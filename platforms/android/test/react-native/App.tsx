@@ -21,8 +21,14 @@ const lines: string[] = [];
 function record(label: string, fn: () => unknown) {
   try {
     const value = fn();
-    lines.push(`${label} = ${String(value)}`);
-    console.log(`${MARK} PASS ${label} = ${String(value)}`);
+    const text = String(value);
+    // A check that catches its own error and returns a description of it is
+    // still a failed check. Reporting on "did it throw" alone marked a
+    // "FAIL ...LookedUpClassNotFound" result as PASS, which is the one thing a
+    // test harness must never do.
+    const failed = text.startsWith('FAIL');
+    lines.push(`${label} = ${text}`);
+    console.log(`${MARK} ${failed ? 'FAIL' : 'PASS'} ${label} = ${text}`);
   } catch (e: any) {
     lines.push(`${label} THREW ${e && e.message}`);
     console.log(`${MARK} FAIL ${label} :: ${e && e.message}`);
