@@ -568,7 +568,12 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
     auto frames = tns::BuildStacktraceFrames(rt, nullptr, 4);
     if (frames.empty()) {
         DEBUG_WRITE("%s", "FRAME IS NULL!");
-        return true;
+        // Reported as a failure, not a success with an empty location. An empty
+        // location makes every unnamed extend() of the same base class produce
+        // the same generated class name, and the second one's overrides then
+        // dispatch to themselves -- a StackOverflowError far from the cause.
+        // The caller turns this into "No name specified for extend at location".
+        return false;
     }
 
     tns::JsStacktraceFrame *frame;
@@ -590,10 +595,10 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
     if (srcFileName == "<embedded>" || srcFileName == "<input>" || srcFileName == "JavaScript") {
         fullPathToFile = "script";
     } else {
-        string hardcodedPathToSkip = Constants::APP_ROOT_FOLDER_PATH;
-        int startIndex = hardcodedPathToSkip.length();
-        int strToTakeLen = srcFileName.length() - startIndex - 3;
-        fullPathToFile = srcFileName.substr(startIndex, strToTakeLen);
+        // The app-root-relative substring this used to compute was assigned and
+        // then immediately overwritten by the full name below, so it was already
+        // dead -- and it throws for any path that does not start with the app
+        // root, which is every path a guest sees.
         fullPathToFile = srcFileName;
         replace(fullPathToFile.begin(), fullPathToFile.end(), '/', '_');
         replace(fullPathToFile.begin(), fullPathToFile.end(), '.', '_');
@@ -619,6 +624,14 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
         return false;
     }
     int column = frame->col;
+
+    // Both adjustments below exist to undo the runtime's own module wrapper, so
+    // that a call site's key matches what the static binding generator computed
+    // from the unwrapped source. A guest has no such wrapper -- the embedder's
+    // bundler (Metro) owns module wrapping and the static binding generator
+    // never saw the source -- so applying them here only corrupts the key, and
+    // two different extend() sites can collide onto one generated class.
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (frame->line == 1) {
         column -= ModuleInternal::MODULE_PROLOGUE_LENGTH;
     }
@@ -626,6 +639,7 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
 #ifdef TARGET_ENGINE_HERMES
     column = column - 6;
 #endif
+#endif  // !NS_JSI_HOST_RUNTIME
 
     extendLocationStream << fullPathToFile << "_" << frame->line << "_" << column << "_";
     extendLocation = extendLocationStream.str();

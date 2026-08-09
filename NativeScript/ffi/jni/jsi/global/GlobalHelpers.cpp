@@ -167,6 +167,19 @@ std::vector<tns::JsStacktraceFrame> tns::BuildStacktraceFrames(JsRuntime &rt, co
     const regex bareRegex(R"RE([(\s]([^\s():]+):(\d+):(\d+))RE");
 #endif
 
+#if defined(NS_JSI_HOST_RUNTIME)
+    // A guest's modules come from the embedder's bundler, and its frames carry
+    // no "file:" scheme -- Metro serves "http://10.0.2.2:8081/index.bundle?..."
+    // in development and an "index.android.bundle" path in release. Without a
+    // match there are no frames at all, and MetadataNode::GetExtendLocation then
+    // has no call site to name an unnamed extend() after, so every one of them
+    // collapses onto the same generated class.
+    //
+    // Anchored the same way as the bytecode form, and the scheme pattern above
+    // still runs first, so nothing changes for a frame that does carry one.
+    const regex hostRegex(R"RE([(\s@]([A-Za-z][A-Za-z\d+.-]*://[^\s()]+|[^\s()@]+):(\d+):(\d+))RE");
+#endif
+
     int current = 0;
     for (auto &frame : stackLines) {
         smatch match;
@@ -177,6 +190,11 @@ std::vector<tns::JsStacktraceFrame> tns::BuildStacktraceFrames(JsRuntime &rt, co
 #ifdef NS_BYTECODE_ENABLED
         else if (regex_search(frame, match, bareRegex)) {
             filePath = "file://" + Constants::APP_ROOT_FOLDER_PATH + match[1].str();
+        }
+#endif
+#if defined(NS_JSI_HOST_RUNTIME)
+        else if (regex_search(frame, match, hostRegex)) {
+            filePath = match[1].str();
         }
 #endif
         else {

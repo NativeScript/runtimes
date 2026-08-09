@@ -29,7 +29,8 @@ bool g_attached = false;
 
 extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
         JNIEnv* env, jobject obj, jint runtimeId, jstring metadataPath, jlong hostRuntimePtr,
-        jboolean verboseLoggingEnabled, jint maxLogcatObjectSize, jboolean forceLog) {
+        jboolean verboseLoggingEnabled, jint maxLogcatObjectSize, jboolean forceLog,
+        jstring bootstrapScript) {
     try {
         if (hostRuntimePtr == 0) {
             throw NativeScriptException(
@@ -41,9 +42,23 @@ extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
         auto* hostRuntime = reinterpret_cast<facebook::jsi::Runtime*>(hostRuntimePtr);
         std::string metadataDir = ArgConverter::jstringToString(metadataPath);
 
-        Runtime::Attach(env, obj, runtimeId, *hostRuntime, metadataDir,
-                        verboseLoggingEnabled == JNI_TRUE, maxLogcatObjectSize,
-                        forceLog == JNI_TRUE);
+        Runtime* runtime = Runtime::Attach(env, obj, runtimeId, *hostRuntime, metadataDir,
+                                           verboseLoggingEnabled == JNI_TRUE, maxLogcatObjectSize,
+                                           forceLog == JNI_TRUE);
+
+        // ts_helpers.js. The standalone runtime runs this as its first module;
+        // there is no module loader here, so the embedder reads it out of the
+        // library's assets and hands the source over. Without it there is no
+        // __extends, no JavaProxy and -- the one that matters most -- no
+        // __createNativeProxy, which every Java object handed to JS goes through.
+        if (bootstrapScript != nullptr) {
+            std::string source = ArgConverter::jstringToString(bootstrapScript);
+            if (!source.empty()) {
+                JSScope scope(runtime->GetEngineHost());
+                runtime->GetEngineHost()->ExecuteScript(source, "internal/ts_helpers.js");
+            }
+        }
+
         g_attached = true;
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(nullptr);

@@ -50,7 +50,8 @@ public class Runtime {
     // embedder created and still owns. Unresolved (and never called) in a
     // standalone build, which binds natives lazily on first invocation.
     private native void attachNativeScript(int runtimeId, String metadataPath, long hostRuntimePtr,
-                                           boolean verboseLoggingEnabled, int maxLogcatObjectSize, boolean forceLog);
+                                           boolean verboseLoggingEnabled, int maxLogcatObjectSize, boolean forceLog,
+                                           String bootstrapScript);
 
     private native void runModule(int runtimeId, String filePath) throws NativeScriptException;
 
@@ -459,23 +460,25 @@ public class Runtime {
     public static Runtime attachToHostRuntime(Logger logger, String appName, String nativeLibDir,
                                               File filesDir, ClassLoader classLoader, File dexDir,
                                               String dexThumb, boolean isDebuggable,
-                                              long hostRuntimePtr, String metadataPath) {
+                                              long hostRuntimePtr, String metadataPath,
+                                              String bootstrapScript) {
         // Built here rather than by the caller so that AppConfig, which is
         // package-private and reads a package.json a guest does not have, stays
         // an implementation detail. Its defaults are what a guest wants anyway.
         StaticConfiguration config = new StaticConfiguration(logger, appName, nativeLibDir,
                 filesDir, filesDir, classLoader, dexDir, dexThumb, new AppConfig(filesDir),
                 isDebuggable);
-        return attachToHostRuntime(config, hostRuntimePtr, metadataPath);
+        return attachToHostRuntime(config, hostRuntimePtr, metadataPath, bootstrapScript);
     }
 
-    static Runtime attachToHostRuntime(StaticConfiguration config, long hostRuntimePtr, String metadataPath) {
+    static Runtime attachToHostRuntime(StaticConfiguration config, long hostRuntimePtr, String metadataPath,
+                                       String bootstrapScript) {
         staticConfiguration = config;
         WorkThreadScheduler scheduler = new WorkThreadScheduler(new Handler(Looper.myLooper()));
         DynamicConfiguration dynamicConfiguration = new DynamicConfiguration(0, scheduler, null);
         Runtime runtime = new Runtime(config, dynamicConfiguration);
         try {
-            runtime.attach(hostRuntimePtr, metadataPath);
+            runtime.attach(hostRuntimePtr, metadataPath, bootstrapScript);
         } catch (Throwable t) {
             // Same rollback as initRuntime: the constructor already registered
             // the instance, so a failed bootstrap must not leave a stale one
@@ -488,7 +491,7 @@ public class Runtime {
         return runtime;
     }
 
-    private void attach(long hostRuntimePtr, String metadataPath) {
+    private void attach(long hostRuntimePtr, String metadataPath, String bootstrapScript) {
         if (initialized) {
             throw new RuntimeException("NativeScript is already attached to a runtime");
         }
@@ -509,7 +512,8 @@ public class Runtime {
                 && (appConfig.getForceLog() || "timeline".equalsIgnoreCase(appConfig.getProfilingMode()));
         int maxLogcatObjectSize = appConfig != null ? appConfig.getMaxLogcatObjectSize() : 1024;
 
-        attachNativeScript(getRuntimeId(), metadataPath, hostRuntimePtr, logger.isEnabled(), maxLogcatObjectSize, forceConsoleLog);
+        attachNativeScript(getRuntimeId(), metadataPath, hostRuntimePtr, logger.isEnabled(), maxLogcatObjectSize, forceConsoleLog,
+                bootstrapScript);
 
         GcListener.subscribe(this);
 

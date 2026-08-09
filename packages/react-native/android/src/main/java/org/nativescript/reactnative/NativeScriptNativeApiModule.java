@@ -31,6 +31,9 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
     /** Written into the APK by nativescript.gradle. */
     private static final String ASSET_METADATA_DIR = "nativescript-metadata";
 
+    /** Ships with this library; see src/main/assets. */
+    private static final String ASSET_TS_HELPERS = "nativescript/internal/ts_helpers.js";
+
     private static final String[] METADATA_FILES = {
             "treeNodeStream.dat", "treeStringsStream.dat", "treeValueStream.dat",
     };
@@ -85,7 +88,7 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
                             + "JSI runtime and cannot run over the legacy bridge.");
         }
 
-        attachRuntime(context, runtimePtr, resolvedPath);
+        attachRuntime(context, runtimePtr, resolvedPath, readAsset(context, ASSET_TS_HELPERS));
         return true;
     }
 
@@ -135,7 +138,8 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
         }
     }
 
-    private static void attachRuntime(Context context, long runtimePtr, String metadataPath) {
+    private static void attachRuntime(Context context, long runtimePtr, String metadataPath,
+                                      String bootstrapScript) {
         File filesDir = context.getFilesDir();
         File dexDir = new File(filesDir, "nativescript-dex");
         if (!dexDir.exists() && !dexDir.mkdirs()) {
@@ -154,7 +158,29 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
                 /* dexThumb */ buildStamp(context),
                 isDebuggable(context),
                 runtimePtr,
-                metadataPath);
+                metadataPath,
+                bootstrapScript);
+    }
+
+    /**
+     * Reads one of this library's own assets.
+     *
+     * <p>Kept in memory rather than staged to disk like the metadata: it is a
+     * single small script that is evaluated once, and the runtime takes it as
+     * source rather than as a path.
+     */
+    private static String readAsset(Context context, String name) {
+        try (InputStream in = context.getAssets().open(name)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return out.toString("UTF-8");
+        } catch (IOException e) {
+            throw new RuntimeException("NativeScript could not read its own asset: " + name, e);
+        }
     }
 
     /**
