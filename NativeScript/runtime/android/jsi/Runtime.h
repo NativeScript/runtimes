@@ -74,6 +74,18 @@ namespace tns {
                   bool isDebuggable, jstring packageName, jobjectArray args, jstring callingDir,
                   int maxLogcatObjectSize, bool forceLog);
 
+#if defined(NS_JSI_HOST_RUNTIME)
+        // The guest counterpart of Init: binds to a jsi::Runtime the embedder
+        // created and still owns. `filesRoot` is where the metadata .dat files
+        // were staged; there is no app root to run a module from.
+        static Runtime *Attach(JNIEnv *_env, jobject obj, int runtimeId,
+                               ::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
+                               bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+
+        void Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
+                    bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+#endif
+
         jobject GetJavaRuntime() const;
 
         void DestroyRuntime();
@@ -166,6 +178,11 @@ namespace tns {
     private:
 
         Runtime(JNIEnv *env, jobject runtime, int id);
+
+        // The part of startup that does not depend on who owns the runtime.
+        // See the comment on its definition for what `guest` turns off.
+        void InitCommon(const std::string &filesRoot, const std::string &callingDir,
+                        int maxLogcatObjectSize, bool forceLog, bool guest);
 
         int m_id;
         jobject m_runtime;

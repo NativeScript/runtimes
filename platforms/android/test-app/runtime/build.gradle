@@ -470,6 +470,13 @@ tasks.register('downloadHermesLibs', Exec) {
             }
         }
     }
+    doLast {
+        // Any CMake config generated before this fetch recorded no runtimeFiles
+        // for the prebuilts, and AGP would keep reusing it -- building green and
+        // shipping an APK that dlopen-fails at launch. Having had to download at
+        // all means every existing config predates the libraries.
+        delete new File(projectDir, ".cxx")
+    }
 }
 
 task 'setPackageVersion' {
