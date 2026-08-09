@@ -38,6 +38,28 @@ mkdir -p \
 cp -R "$REPO_ROOT/NativeScript/runtime/android/jsi" "$NATIVE_API/runtime/android/"
 cp -R "$REPO_ROOT/NativeScript/ffi/jni/jsi" "$NATIVE_API/ffi/jni/"
 
+# Parts of the standalone runtime the guest build excludes (see the source
+# filters in packages/react-native/android/CMakeLists.txt). They are dropped
+# here too so the package does not carry sources no consumer can compile.
+#
+# workers/ keeps LooperTasks: despite living beside the Worker implementation it
+# is the main-thread task queue every guest needs. ConcurrentQueue has no user
+# other than the Worker wrapper, so it goes with it.
+rm -rf \
+  "$NATIVE_API/runtime/android/jsi/assetextractor" \
+  "$NATIVE_API/runtime/android/jsi/modules/module" \
+  "$NATIVE_API/runtime/android/jsi/modules/console" \
+  "$NATIVE_API/runtime/android/jsi/modules/timers" \
+  "$NATIVE_API/runtime/android/jsi/modules/performance" \
+  "$NATIVE_API/runtime/android/jsi/profiler" \
+  "$NATIVE_API/runtime/android/jsi/instrumentation"
+rm -f \
+  "$NATIVE_API/runtime/android/jsi/workers/WorkerWrapper.cpp" \
+  "$NATIVE_API/runtime/android/jsi/workers/WorkerWrapper.h" \
+  "$NATIVE_API/runtime/android/jsi/workers/WorkerMessage.h" \
+  "$NATIVE_API/runtime/android/jsi/workers/ConcurrentQueue.cpp" \
+  "$NATIVE_API/runtime/android/jsi/workers/ConcurrentQueue.h"
+
 # The engine layer. Only the Hermes adapter is reachable -- it is the one written
 # against plain facebook::jsi -- but the tree is copied whole so that a rooted
 # include of a sibling resolves the same way it does in the repository.

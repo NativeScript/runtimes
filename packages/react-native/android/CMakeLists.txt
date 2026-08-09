@@ -68,11 +68,37 @@ file(GLOB_RECURSE RUNTIME_SOURCES "${NS_ANDROID_RUNTIME_DIR}/*.cpp")
 file(GLOB_RECURSE JNI_SOURCES "${NS_JNI_DIR}/*.cpp")
 list(FILTER JNI_SOURCES EXCLUDE REGEX "_test\\.cpp$")
 
-# The asset extractor unpacks a standalone app's app/ directory out of the APK
-# with libzip. Metro owns the JavaScript here and the only asset we need is the
-# metadata, which the Java side stages -- so this is the one part of the runtime
-# tree the guest drops, and dropping it takes libzip with it.
+# Parts of the standalone runtime a guest can never reach, dropped rather than
+# merely left uninitialised so they are not carried in an app that cannot call
+# them. Each has a matching NS_JSI_HOST_RUNTIME guard at its call sites.
+#
+#   assetextractor  unpacks a standalone app's app/ directory from the APK with
+#                   libzip. Metro owns the JavaScript here, and the one asset
+#                   needed -- the metadata -- is staged by the Java side.
+#                   Dropping this takes libzip with it.
+#   WorkerWrapper   a Worker gets its own VM, which a guest cannot build. React
+#                   Native has its own answer for background work. Only the
+#                   wrapper goes: LooperTasks and ConcurrentQueue live in the
+#                   same directory but LooperTasks is the main-thread task
+#                   queue -- how a Java callback arriving on another thread gets
+#                   back onto the JS thread, which is core to a guest and not
+#                   worker-specific. ConcurrentQueue has no other user, so it
+#                   goes with the wrapper.
+#   modules/module  require(). The embedder's bundler resolves modules; nothing
+#                   in a guest ever loads a file.
+#   modules/console React Native installs console before this runtime attaches.
+#   modules/timers  likewise setTimeout and friends.
+#   modules/performance  likewise performance.
+#   profiler, instrumentation  developer tooling for the standalone runtime,
+#                   driven by JNI entry points a guest never calls.
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/assetextractor/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/workers/(WorkerWrapper|ConcurrentQueue)\\.cpp$")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/modules/module/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/modules/console/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/modules/timers/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/modules/performance/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/profiler/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/instrumentation/")
 
 add_library(nativescript_rn SHARED
         ${RUNTIME_SOURCES}

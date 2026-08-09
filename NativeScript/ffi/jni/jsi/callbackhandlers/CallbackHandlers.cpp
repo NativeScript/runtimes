@@ -19,8 +19,12 @@
 #include "ArgConverter.h"
 #include "JsArgConverter.h"
 #include "GlobalHelpers.h"
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "WorkerWrapper.h"
+#endif
 #include <regex>
 
 #ifdef USE_MIMALLOC
@@ -1308,6 +1312,11 @@ void CallbackHandlers::RemoveEnvEntries(JsRuntime &rt) {
 }
 
 // Worker
+//
+// A Worker gets its own VM, which a guest cannot build -- the runtime it is
+// attached to belongs to the embedder. Excluded from the guest build along with
+// WorkerWrapper itself; React Native has its own answer for background work.
+#if !defined(NS_JSI_HOST_RUNTIME)
 
 JsValue CallbackHandlers::NewThreadCallback(JsRuntime &rt, const JsValue &thisVal,
                                             const JsValue *args, size_t argc) {
@@ -1677,6 +1686,8 @@ void CallbackHandlers::CallWorkerScopeOnErrorHandle(JsRuntime &rt, const JsError
         nsEx.ReThrowToJs(rt);
     }
 }
+#endif
+
 
 robin_hood::unordered_map<uint64_t, CallbackHandlers::CacheEntry> CallbackHandlers::cache_;
 robin_hood::unordered_map<jclass, jfieldID> CallbackHandlers::jclass_to_runtimeId_cache;

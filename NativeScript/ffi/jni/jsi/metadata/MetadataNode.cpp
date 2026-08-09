@@ -16,7 +16,11 @@
 #include "FieldCallbackData.h"
 #include "MetadataBuilder.h"
 #include "ArgsWrapper.h"
+// Only referenced from the module-prologue column adjustment below, which is
+// itself standalone-only -- a guest has no module wrapper to undo.
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
 #include "Util.h"
 #include "GlobalHelpers.h"
 #include "JSONObjectHelper.h"

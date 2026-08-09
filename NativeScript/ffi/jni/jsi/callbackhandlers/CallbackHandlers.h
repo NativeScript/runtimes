@@ -147,6 +147,8 @@ namespace tns {
 
         static JsValue FindClass(JsRuntime &rt, const char *name);
 
+// Worker. Not built for a guest -- see the definitions in CallbackHandlers.cpp.
+#if !defined(NS_JSI_HOST_RUNTIME)
         static JsValue NewThreadCallback(JsRuntime &rt, const JsValue &thisVal,
                                          const JsValue *args, size_t argc);
 
@@ -188,6 +190,7 @@ namespace tns {
          * napi version received) is JSError::value().
          */
         static void CallWorkerScopeOnErrorHandle(JsRuntime &rt, const JsError &error);
+#endif
 
         static JsValue PostFrameCallback(JsRuntime &rt, const JsValue &thisVal,
                                          const JsValue *args, size_t argc);

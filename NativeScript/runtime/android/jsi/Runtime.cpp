@@ -21,18 +21,26 @@
 #include "NativeScriptAssert.h"
 #include "CallbackHandlers.h"
 #include "MetadataNode.h"
-#include "Console.h"
 #include "Util.h"
-#include "Performance.h"
 #include "JsArgToArrayConverter.h"
 #include "ArrayHelper.h"
-#include "SimpleProfiler.h"
-#include "ManualInstrumentation.h"
 #include "GlobalHelpers.h"
-#include "Timers.h"
 
 #include "AndroidRuntimeModules.h"
+// The main-thread task queue, not a worker facility: this is how a Java
+// callback arriving on another thread gets back onto the JS thread.
 #include "LooperTasks.h"
+
+// Everything below belongs to the standalone runtime only. Excluded from the
+// guest build so it is not compiled into an app that can never reach it -- see
+// the source filters in packages/react-native/android/CMakeLists.txt.
+#if !defined(NS_JSI_HOST_RUNTIME)
+#include "Console.h"
+#include "Performance.h"
+#include "SimpleProfiler.h"
+#include "ManualInstrumentation.h"
+#include "Timers.h"
+#endif
 
 using namespace tns;
 using namespace std;
@@ -278,11 +286,13 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
     // Newer JSC ships a native `WeakRef` global, so the old polyfill (which was
     // actually a strong reference and leaked) is no longer needed.
 
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (!guest) {
         Console::createConsole(rt, maxLogcatObjectSize, forceLog);
 
         Timers::InitStatic(rt, global);
     }
+#endif
 
     // Bound to this (runtime) thread's Looper; drains deferred finalizers posted
     // via Runtime::PostFinalizer at a safe point off the GC sweep.
@@ -346,7 +356,9 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
                                  return engine::Value::undefined();
                              });
 
+#if !defined(NS_JSI_HOST_RUNTIME)
     SimpleProfiler::Init(rt, global);
+#endif
 
     CallbackHandlers::CreateGlobalCastFunctions(rt);
 
@@ -358,9 +370,11 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
 
     m_objectManager->Init(rt);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (!guest) {
         m_module.Init(rt, callingDir);
     }
+#endif
 
     if (!s_mainThreadInitialized) {
         m_isMainThread = true;
@@ -393,9 +407,14 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
          * Emulate a `WorkerGlobalScope`
          * Attach 'postMessage', 'close' to the global object of every non-main
          * (worker) env.
+         *
+         * A guest is only ever attached to the embedder's runtime, which is a
+         * main-thread runtime by construction, so this branch is unreachable
+         * there and the worker callbacks it needs are not built.
          */
     else {
         m_isMainThread = false;
+#if !defined(NS_JSI_HOST_RUNTIME)
         engine_util::SetFunction(rt, global, "postMessage",
                                  CallbackHandlers::WorkerGlobalPostMessageCallback);
         engine_util::SetFunction(rt, global, "close",
@@ -403,6 +422,7 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
         engine_util::SetFunction(rt, global, "terminate",
                                  CallbackHandlers::WorkerGlobalCloseCallback);
         global.setProperty(rt, "__ns__worker", true);
+#endif
     }
 
     /*
@@ -411,6 +431,7 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
      */
     // A worker gets its own VM, which a guest has no way to build -- and React
     // Native ships its own Worker story anyway.
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (!guest) {
         engine::Function worker = engine::Function::createFromHostConstructor(
                 rt, engine::PropNameID::forAscii(rt, "Worker"), 0,
@@ -422,6 +443,7 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
                                  CallbackHandlers::WorkerObjectTerminateCallback);
         global.setProperty(rt, "Worker", worker);
     }
+#endif
 
     // The napi runtime installs `global` (and `self`) as accessors returning the
     // current global object. nativescript::engine has no accessor API, and a
@@ -443,11 +465,13 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
 
     ArrayHelper::Init(rt);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (!guest) {
         Performance::createPerformance(rt, global);
 
         engine_util::SetFunction(rt, global, "queueMicrotask", QueueMicrotaskCallback, 1);
     }
+#endif
 
     m_arrayBufferHelper.CreateConvertFunctions(rt, global, m_objectManager);
 
@@ -536,12 +560,14 @@ void Runtime::DestroyRuntime() {
     this->js_method_cache->cleanupCache();
     delete this->js_method_cache;
     this->js_method_cache = nullptr;
+#if !defined(NS_JSI_HOST_RUNTIME)
     this->m_module.DeInit();
     Console::onDisposeRuntime(rt);
     // The napi version tears the timers down from a finalizer on the global
     // object; there is no equivalent here, so it is driven from the same place
     // as every other per-runtime teardown.
     Timers::onDisposeRuntime(rt);
+#endif
     CallbackHandlers::RemoveEnvEntries(rt);
     this->m_objectManager->OnDisposeRuntime();
     // Release the finalizer handler and flush any still-queued cleanup while the
@@ -614,6 +640,10 @@ bool Runtime::TryCallGC() {
     return success;
 }
 
+// Module loading, workers, and the worker->main exception hop are all the
+// standalone runtime's. A guest never evaluates a file: the embedder's bundler
+// does, and it hands the runtime an already-running VM.
+#if !defined(NS_JSI_HOST_RUNTIME)
 void Runtime::RunModule(JNIEnv *_jEnv, jobject obj, jstring scriptFile) {
     JEnv jEnv(_jEnv);
     string filePath = ArgConverter::jstringToString(scriptFile);
@@ -668,6 +698,8 @@ jobject Runtime::RunScript(JNIEnv *_env, jobject obj, jstring scriptFile) {
 
     return nullptr;
 }
+#endif
+
 
 engine::Runtime &Runtime::GetJSRuntime() {
     return engineHost->GetRuntime();
@@ -820,6 +852,7 @@ Runtime::PassExceptionToJsNative(JNIEnv *jEnv, jobject obj, jthrowable exception
     NativeScriptException::CallJsFuncWithErr(rt, engine::Value(rt, errObj), isDiscarded);
 }
 
+#if !defined(NS_JSI_HOST_RUNTIME)
 void
 Runtime::PassUncaughtExceptionFromWorkerToMainHandler(const engine::Value &message,
                                                       const engine::Value &stackTrace,
@@ -843,13 +876,17 @@ Runtime::PassUncaughtExceptionFromWorkerToMainHandler(const engine::Value &messa
     jEnv.CallStaticVoidMethod(runtimeClass, mId, (jstring) jMsgLocal, (jstring) jfileNameLocal,
                               (jstring) stTrace, (jint) lineno);
 }
+#endif
 
+
+#if !defined(NS_JSI_HOST_RUNTIME)
 void Runtime::SetManualInstrumentationMode(jstring mode) {
     auto modeStr = ArgConverter::jstringToString(mode);
     if (modeStr == "timeline") {
         tns::instrumentation::Frame::enable();
     }
 }
+#endif
 
 void Runtime::Lock() {
 #ifdef APPLICATION_IN_DEBUG

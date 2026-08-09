@@ -9,7 +9,13 @@
 #include "FinalizerQueue.h"
 #include <android/looper.h>
 #include "robin_hood.h"
+// The guest has no module loader: the embedder's bundler owns module
+// resolution, and require() never reaches this runtime. Excluded from the guest
+// build entirely rather than merely left uninitialised, so the code does not
+// ship in an app that cannot call it.
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
 #include <fcntl.h>
 #include "ObjectManager.h"
 #include "ArrayBufferHelper.h"
@@ -94,11 +100,15 @@ namespace tns {
 
         void RunModule(const char *moduleName);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         void RunWorker(const std::string &filePath);
+#endif
 
         // Tears down a worker's Runtime (engine scope + engine state release) and
         // deletes it. Called from the native worker thread during shutdown.
+#if !defined(NS_JSI_HOST_RUNTIME)
         static void DisposeWorkerRuntime(Runtime *runtime);
+#endif
 
         jobject RunScript(JNIEnv *_env, jobject obj, jstring scriptFile);
 
@@ -164,10 +174,12 @@ namespace tns {
                                 jstring fullStackTrace, jstring jsStackTrace, jboolean isDiscarded,
                                 jboolean isPendingError);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         void PassUncaughtExceptionFromWorkerToMainHandler(const engine::Value &message,
                                                           const engine::Value &stackTrace,
                                                           const engine::Value &filename,
                                                           int lineno);
+#endif
 
         void AdjustAmountOfExternalAllocatedMemory();
 
@@ -204,7 +216,9 @@ namespace tns {
 
         bool m_isMainThread;
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         ModuleInternal m_module;
+#endif
 
         std::shared_ptr<LooperTasks> m_looperTasks;
 
