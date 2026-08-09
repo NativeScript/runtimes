@@ -431,7 +431,7 @@ var es5_visitors = (function () {
       foundInterface = false,
       interfaceNames = config.interfaceNames;
 
-    var currentInterface = interfaceArr.reverse().join(".");
+    var currentInterface = _stripNonJavaPrefix(interfaceArr.reverse().join("."));
     for (var i in interfaceNames) {
       var interfaceName = interfaceNames[i].trim();
       if (interfaceName === currentInterface) {
@@ -515,7 +515,9 @@ var es5_visitors = (function () {
       return;
     }
 
-    var extendClass = _getWholeName(node.superClass).reverse().join(".");
+    var extendClass = _stripNonJavaPrefix(
+      _getWholeName(node.superClass).reverse().join(".")
+    );
     if (!extendClass || extendClass.indexOf(".") === -1) {
       return;
     }
@@ -619,6 +621,46 @@ var es5_visitors = (function () {
     }
 
     normalExtendsArr.push(lineToWrite);
+  }
+
+  /*
+   *	Drops whatever the code used to reach the Java namespace.
+   *
+   *	Java types are usually written `global.java.util.ArrayList` outside of
+   *	NativeScript's own tooling, because `java` is not a declared global in a
+   *	React Native project. The runtime resolves that to java/util/ArrayList,
+   *	and so must this: left alone, the base class reads as
+   *	`global.java.util.ArrayList`, and after minification as `g.java.util.
+   *	ArrayList`, neither of which names a class the generator can load.
+   *
+   *	The first segment that looks like a Java root wins. A name already
+   *	starting at its root is returned untouched.
+   */
+  var JAVA_ROOT_PACKAGES = [
+    "java",
+    "javax",
+    "android",
+    "androidx",
+    "dalvik",
+    "kotlin",
+    "com",
+    "org",
+    "net",
+  ];
+
+  function _stripNonJavaPrefix(dottedName) {
+    if (!dottedName) {
+      return dottedName;
+    }
+
+    var segments = dottedName.split(".");
+    for (var i = 0; i < segments.length; i++) {
+      if (JAVA_ROOT_PACKAGES.indexOf(segments[i]) !== -1) {
+        return segments.slice(i).join(".");
+      }
+    }
+
+    return dottedName;
   }
 
   /*
@@ -795,7 +837,7 @@ var es5_visitors = (function () {
         var classNameFromDecorator = isCorrectExtendClassName ? className : "";
         lineToWrite = _generateLineToWrite(
           classNameFromDecorator,
-          extendClass.reverse().join("."),
+          _stripNonJavaPrefix(extendClass.reverse().join(".")),
           overriddenMethodNames,
           "",
           config.fullPathName,
@@ -826,7 +868,7 @@ var es5_visitors = (function () {
       };
       lineToWrite = _generateLineToWrite(
         isCorrectExtendClassName ? className : "",
-        extendClass.reverse().join("."),
+        _stripNonJavaPrefix(extendClass.reverse().join(".")),
         overriddenMethodNames,
         extendInfo,
         "",
@@ -1216,7 +1258,7 @@ var es5_visitors = (function () {
 
     extClassArr = _getWholeName(o);
 
-    return extClassArr.reverse().join(".");
+    return _stripNonJavaPrefix(extClassArr.reverse().join("."));
   }
 
   function _getDecoratorArgument(path, config, customDecoratorName) {

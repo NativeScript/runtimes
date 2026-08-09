@@ -74,5 +74,11 @@
         "NativeScriptNativeApi": "NativeScriptNativeApiModuleProvider"
       }
     }
+  },
+  "dependencies": {
+    "@babel/parser": "^7.17.3",
+    "@babel/traverse": "^7.17.3",
+    "@babel/types": "^7.17.0",
+    "split": "^1.0.1"
   }
 }

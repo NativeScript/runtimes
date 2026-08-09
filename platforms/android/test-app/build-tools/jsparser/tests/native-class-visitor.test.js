@@ -125,3 +125,34 @@ function fields(row) {
 }
 
 console.log("native-class visitor tests passed");
+
+// Java types are reached through `global` in a React Native project, and the
+// minifier renames that binding, so the prefix has to be dropped by shape
+// rather than by matching a literal "global".
+{
+  const { unnamed } = parse(`
+    @NativeClass
+    class G extends global.java.util.ArrayList { size() { return 0; } }
+  `);
+  assert.strictEqual(fields(unnamed[0])[0], "java.util.ArrayList");
+}
+
+{
+  const { unnamed } = parse(`
+    @NativeClass
+    class M extends g.java.util.ArrayList { size() { return 0; } }
+  `);
+  assert.strictEqual(fields(unnamed[0])[0], "java.util.ArrayList",
+    "a minified global binding must not end up in the class name");
+}
+
+// A name that already starts at its root is untouched.
+{
+  const { unnamed } = parse(`
+    @NativeClass
+    class C extends com.example.Widget { go() {} }
+  `);
+  assert.strictEqual(fields(unnamed[0])[0], "com.example.Widget");
+}
+
+console.log("global-prefix tests passed");

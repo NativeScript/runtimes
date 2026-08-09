@@ -24,6 +24,20 @@ def toolsDir = file("${nsPackageDir}/tools")
 
 def metadataGeneratorJar = file("${toolsDir}/android-metadata-generator.jar")
 def dtsGeneratorJar = file("${toolsDir}/dts-generator.jar")
+def sbgGeneratorJar = file("${toolsDir}/static-binding-generator.jar")
+
+// Bundler settings, taken from the React extension the app already configures
+// so that a project with a custom root, entry file or CLI is bundled the same
+// way React Native bundles it. The defaults mirror the plugin's own.
+def reactExt = project.extensions.findByName("react")
+def reactRoot = reactExt?.root?.getOrNull()?.asFile ?: file("${project.projectDir}/../..")
+def reactCliFile = reactExt?.cliFile?.getOrNull()?.asFile?.absolutePath
+        ?: new File(reactRoot, "node_modules/react-native/cli.js").absolutePath
+def nodeExecutable = (reactExt?.nodeExecutableAndArgs?.getOrNull() ?: ["node"])[0]
+def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
+        ?: (new File(reactRoot, "index.js").exists()
+                ? new File(reactRoot, "index.js").absolutePath
+                : new File(reactRoot, "index.android.js").absolutePath)
 
 def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
     && Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
@@ -31,13 +45,33 @@ def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
 // Where the .dat files land. This is added to the asset source set rather than
 // written into src/, so a clean build regenerates and nothing lands in version
 // control. NativeScriptNativeApiModule copies them out of the APK on first run.
-def metadataAssetRoot = file("${buildDir}/generated/nativescript/assets")
-def metadataOutDir = file("${metadataAssetRoot}/nativescript-metadata")
+//
+// One directory per variant. A single shared one is not merely untidy: two
+// variants' generator tasks then declare the same output, and Gradle refuses to
+// merge assets it cannot prove are up to date, failing the build with
+// "uses this output of task ... without declaring an explicit dependency".
+// Only release surfaces it, because a debug-only build never has a second
+// variant's task registered against the same path.
+def metadataAssetRootFor = { variantName ->
+    file("${buildDir}/generated/nativescript/assets/${variantName}")
+}
+def metadataOutDirFor = { variantName ->
+    new File(metadataAssetRootFor(variantName), "nativescript-metadata")
+}
 
+// Registered against each variant's own source set rather than main, so that a
+// variant only ever picks up the metadata generated for it.
 android {
-    sourceSets {
-        main {
-            assets.srcDirs += metadataAssetRoot
+    applicationVariants.all { variant ->
+        def assetRoot = metadataAssetRootFor(variant.name)
+        def sourceSet = android.sourceSets.findByName(variant.name)
+        if (sourceSet != null) {
+            sourceSet.assets.srcDirs += assetRoot
+        } else {
+            // Flavoured builds have no source set named after the full variant;
+            // fall back to main, where the per-variant subdirectory still keeps
+            // the two generators from colliding.
+            android.sourceSets.main.assets.srcDirs += assetRoot
         }
     }
 }
@@ -115,6 +149,7 @@ def collectClassFiles = { Collection<File> roots ->
 android.applicationVariants.all { variant ->
     def variantName = variant.name.capitalize()
     def workDir = file("${buildDir}/nativescript/${variant.name}")
+    def metadataOutDir = metadataOutDirFor(variant.name)
 
     def metadataTask = tasks.register("generateNativeScriptMetadata${variantName}", JavaExec) {
         group = "nativescript"
@@ -211,6 +246,182 @@ android.applicationVariants.all { variant ->
         }
     }
 
+    // Pre-generated Java for named (@JavaProxy) subclasses.
+    //
+    // Only for variants that ship a bundle. In debug, Metro serves JS over HTTP,
+    // there is nothing on disk to read, and unnamed classes are generated on the
+    // device anyway.
+    //
+    // The bundle React Native itself produces is no use here: hermesc compiles
+    // it and moves the bytecode over the JavaScript inside a single task, so by
+    // the time any later task runs there is nothing readable left. So Metro is
+    // run a second time into a scratch directory, purely as generator input.
+    // That costs a bundle on release builds and nothing on debug.
+    //
+    // --dev false is what makes the second bundle usable: it has to be minified
+    // the same way the shipped one is, or the class names the generator reads
+    // will not be the names the runtime computes at load. A @JavaProxy name is
+    // a string literal and survives minification either way; an unnamed class
+    // that fails to line up simply gets generated on the device, as it does in
+    // debug, so a mismatch costs startup time rather than correctness.
+    def sbgEnabled = !variant.buildType.debuggable &&
+            !project.hasProperty("nsSkipStaticBindings") &&
+            sbgGeneratorJar.exists()
+
+    if (sbgEnabled) {
+        def sbgWorkDir = file("${buildDir}/nativescript/${variant.name}/sbg")
+        def sbgBundleDir = new File(sbgWorkDir, "bundle")
+        def sbgJavaDir = new File(sbgWorkDir, "java")
+
+        def bindingsTask = tasks.register("generateNativeScriptBindings${variantName}", JavaExec) {
+            group = "nativescript"
+            description = "Pre-generates Java bindings for named NativeScript subclasses (${variant.name})."
+
+            // The generator resolves jsparser and every one of its scratch
+            // files relative to the working directory, so it gets its own.
+            workingDir sbgWorkDir
+            mainClass = "-jar"
+
+            inputs.files(fileTree(reactRoot) {
+                include "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"
+                exclude "**/node_modules/**", "**/android/**", "**/ios/**", "**/build/**"
+            })
+            // The generator and its parser are inputs too. Without them a change
+            // to either leaves the task up to date against stale output, which
+            // reads exactly like the change having no effect.
+            inputs.file(sbgGeneratorJar)
+            inputs.files(fileTree(new File(toolsDir, "jsparser")))
+            outputs.dir(sbgJavaDir)
+
+            doFirst {
+                sbgWorkDir.mkdirs()
+                sbgBundleDir.deleteDir()
+                sbgBundleDir.mkdirs()
+                sbgJavaDir.deleteDir()
+                sbgJavaDir.mkdirs()
+
+                // Plain JDK calls rather than project.copy / project.exec:
+                // Gradle no longer allows reaching into Project services while a
+                // task is executing.
+                def jsparserSource = new File(toolsDir, "jsparser").toPath()
+                def jsparserTarget = new File(sbgWorkDir, "jsparser").toPath()
+                java.nio.file.Files.walk(jsparserSource).forEach { source ->
+                    def target = jsparserTarget.resolve(jsparserSource.relativize(source))
+                    if (java.nio.file.Files.isDirectory(source)) {
+                        java.nio.file.Files.createDirectories(target)
+                    } else {
+                        java.nio.file.Files.createDirectories(target.getParent())
+                        java.nio.file.Files.copy(source, target,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    }
+                }
+
+                // jsparser reads ts_helpers.js from a sibling of the input
+                // directory to learn the decorator names, so the copy that ships
+                // in the package is staged where it expects to find it.
+                def tsHelpersTarget = new File(sbgWorkDir, "internal/ts_helpers.js")
+                tsHelpersTarget.parentFile.mkdirs()
+                def tsHelpersSource = new File(nsPackageDir,
+                        "src/main/assets/nativescript/internal/ts_helpers.js")
+                if (!tsHelpersSource.exists()) {
+                    throw new GradleException("NativeScript: ${tsHelpersSource} is missing from the package.")
+                }
+                tsHelpersTarget.text = tsHelpersSource.text
+
+                logger.lifecycle("NativeScript: bundling ${variant.name} JavaScript for binding generation")
+
+                def bundleCmd = [nodeExecutable, reactCliFile, "bundle",
+                                 "--platform", "android",
+                                 "--dev", "false",
+                                 "--entry-file", nsEntryFile,
+                                 "--bundle-output", new File(sbgBundleDir, "index.android.bundle").absolutePath,
+                                 "--assets-dest", new File(sbgWorkDir, "assets").absolutePath]
+
+                def bundleProcess = new ProcessBuilder(bundleCmd)
+                        .directory(reactRoot)
+                        .redirectErrorStream(true)
+                        .start()
+                bundleProcess.inputStream.eachLine { logger.info(it) }
+                def bundleExit = bundleProcess.waitFor()
+                if (bundleExit != 0) {
+                    throw new GradleException(
+                            "NativeScript: bundling for binding generation failed (exit ${bundleExit}). " +
+                            "Re-run with --info to see the bundler output, or pass " +
+                            "-PnsSkipStaticBindings to build without pre-generated bindings.")
+                }
+
+                def bundles = sbgBundleDir.listFiles()?.findAll { it.isFile() } ?: []
+                if (bundles.isEmpty()) {
+                    throw new GradleException("NativeScript: the bundler produced no output in ${sbgBundleDir}")
+                }
+                logger.lifecycle("NativeScript: scanning ${bundles.size()} bundle file(s) for named subclasses")
+
+                new File(sbgWorkDir, "sbg-input-file.txt").text = "${sbgBundleDir.absolutePath}\n"
+                new File(sbgWorkDir, "sbg-output-file.txt").text = "${sbgJavaDir.absolutePath}\n"
+
+                // Only jars that exist and actually open. Two kinds do not:
+                //
+                //  - sibling library modules whose classes.jar is produced later
+                //    in the build. Registering this task as a source generator
+                //    puts it in front of javac, which is in front of those.
+                //  - artifacts that are not really archives (soloader ships a
+                //    runtime jar with no class entries).
+                //
+                // Either one aborts the generator with "Error while reading JAR
+                // entry" and takes the whole build down, so they are dropped and
+                // reported. The cost of dropping one is that a class extending
+                // something declared inside it is not pre-generated -- it still
+                // works, built on the device as in debug.
+                def usableJars = []
+                def skippedJars = []
+                resolveClasspathJars(variant).each { jar ->
+                    if (!jar.name.endsWith(".jar")) return
+                    if (!jar.isFile()) {
+                        skippedJars.add("${jar.name} (not built yet)")
+                        return
+                    }
+                    try {
+                        new java.util.zip.ZipFile(jar).withCloseable { zip ->
+                            if (zip.entries().findAll { it.name.endsWith(".class") }.isEmpty()) {
+                                skippedJars.add("${jar.name} (no classes)")
+                            } else {
+                                usableJars.add(jar)
+                            }
+                        }
+                    } catch (Exception e) {
+                        skippedJars.add("${jar.name} (unreadable)")
+                    }
+                }
+
+                if (!skippedJars.isEmpty()) {
+                    logger.lifecycle("NativeScript: skipping ${skippedJars.size()} classpath " +
+                            "entr${skippedJars.size() == 1 ? 'y' : 'ies'} for binding generation: " +
+                            skippedJars.join(", "))
+                }
+
+                new File(sbgWorkDir, "sbg-java-dependencies.txt").withWriter { out ->
+                    usableJars.each { out.println it.absolutePath }
+                }
+
+                // jsparser's Babel packages are dependencies of
+                // @nativescript/react-native, so they live in the app's
+                // node_modules rather than beside the copied tree.
+                environment "NODE_PATH", new File(reactRoot, "node_modules").absolutePath
+
+                def params = [sbgGeneratorJar.absolutePath]
+                // The generated names must be derived the same way the runtime
+                // derives them; the guest runtime always uses content keys.
+                params.add("-content-keyed-bindings")
+                args params.toArray()
+            }
+        }
+
+        // Registering the directory is what puts the generated Java in front of
+        // javac; it also makes javac depend on this task, which is why the
+        // bundling above has to be free of any dependency on compiled classes.
+        variant.registerJavaGeneratingTask(bindingsTask.get(), sbgJavaDir)
+    }
+
     // Metadata describes the compiled classes, so it has to run after javac and
     // before the assets are merged into the APK.
     // Depend on the provider directly. Reaching into javaCompileProvider.configure
@@ -224,5 +435,17 @@ android.applicationVariants.all { variant ->
         if (nsGenerateTypings) {
             it.dependsOn(typingsTask)
         }
+    }
+
+    // Lint reads the asset source sets, which now include a generated directory.
+    // Gradle fails the build on an undeclared read of another task's output
+    // rather than risking a stale result, so the ordering is stated. Matched by
+    // name because the lint tasks vary between AGP versions and not all of them
+    // exist in every build.
+    tasks.matching {
+        it.name.startsWith("lint") || it.name.startsWith("generate${variantName}Lint")
+    }.configureEach {
+        it.mustRunAfter(metadataTask)
+        it.dependsOn(metadataTask)
     }
 }

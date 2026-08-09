@@ -11,7 +11,7 @@
 import React from 'react';
 import {SafeAreaView, Text, ScrollView} from 'react-native';
 import NativeScriptNativeApi from '@nativescript/react-native/src/NativeScriptNativeApi';
-import {NativeClass} from '@nativescript/react-native/src/NativeClass';
+import {NativeClass, JavaProxy} from '@nativescript/react-native/src/NativeClass';
 
 declare const global: any;
 
@@ -144,10 +144,37 @@ try {
       : `only ${names.join(',')}`;
   });
 
-  // @JavaProxy('com.example.X') is deliberately not exercised here: a
-  // fully-qualified name makes the runtime *look up* a pre-generated class
-  // rather than dex one on the device, so it only resolves once the static
-  // binding generator has emitted it at build time.
+  // A fully-qualified name makes the runtime *look up* a pre-generated class
+  // instead of building one on the device, so this only passes in a release
+  // build, where the static binding generator has run. In debug it is expected
+  // to report LookedUpClassNotFound, which is why the check is explicit about
+  // which build it is looking at rather than simply failing.
+  record('@JavaProxy resolves a pre-generated class', () => {
+    try {
+      const Ticker = JavaProxy('com.example.nsrn.Ticker')(
+        class Ticker extends global.java.lang.Object {
+          toString() {
+            return 'ticked';
+          }
+        },
+      );
+
+      const instance = new Ticker();
+      const name = String(instance.getClass().getName());
+      if (name !== 'com.example.nsrn.Ticker') {
+        return `wrong class ${name}`;
+      }
+
+      // Round-trip through Java so this cannot pass on the JS override alone.
+      return String(new global.java.lang.StringBuilder().append(instance).toString());
+    } catch (e: any) {
+      const message = String(e && e.message ? e.message : e);
+      if (message.indexOf('LookedUpClassNotFound') >= 0) {
+        return __DEV__ ? 'skipped (debug: no build-time generator)' : `FAIL ${message}`;
+      }
+      return `FAIL ${message}`;
+    }
+  });
 
   record('Comparator drives a real Java sort', () => {
     const list = new global.java.util.ArrayList();
