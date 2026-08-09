@@ -99,6 +99,60 @@ function parseManifest(manifestPath) {
   return names;
 }
 
+/*
+ * Class names reachable from resource XML. The framework instantiates these by
+ * name and nothing in the JS or the class graph refers to them:
+ *
+ *   <com.foo.MyView …/>            custom view, the tag *is* the class
+ *   <fragment android:name="…"/>   fragment
+ *   <view class="…"/>              the generic form of a custom view
+ *   app:layout_behavior="…"        CoordinatorLayout behaviours
+ *   <meta-data android:value="…"/> the usual place a library hides a class name
+ *
+ * Scanned with a regex rather than an XML parser: every one of these is a
+ * dotted token, and a malformed or exotic file should contribute nothing
+ * rather than abort the build.
+ */
+function parseResourceXml(resDir) {
+  const names = new Set();
+  if (!resDir || !fs.existsSync(resDir)) return names;
+
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      const st = fs.statSync(full);
+      if (st.isDirectory()) walk(full);
+      else if (entry.endsWith(".xml")) files.push(full);
+    }
+  };
+  walk(resDir);
+
+  /* A dotted, Java-shaped token: lowercase package segments then a class. */
+  const fqn = /\b([a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*\.[A-Z][a-zA-Z0-9_$]*)\b/g;
+
+  for (const file of files) {
+    const xml = fs.readFileSync(file, "utf8");
+
+    /* Custom view tags: <com.foo.MyView ... /> */
+    const tag = /<\s*([a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*\.[A-Z][a-zA-Z0-9_$]*)[\s/>]/g;
+    let m;
+    while ((m = tag.exec(xml)) !== null) names.add(m[1]);
+
+    /* Attribute values that name a class. */
+    const attr = /(?:android:name|class|app:layout_behavior|android:value|android:targetClass)\s*=\s*"([^"]+)"/g;
+    while ((m = attr.exec(xml)) !== null) {
+      let v = m[1];
+      if (v.indexOf(".") <= 0) continue;
+      fqn.lastIndex = 0;
+      const hit = fqn.exec(v);
+      if (hit && hit[1] === v) names.add(v);
+    }
+  }
+
+  return names;
+}
+
 function toEntry(fqn) {
   const segments = fqn.split(".");
   for (let i = 0; i < segments.length; i++) {
@@ -119,18 +173,22 @@ function main() {
    * that are invalid on purpose, to test how the loader reports them. Nothing
    * an ordinary app should ever need. */
   const allowUnparseable = [];
+  /* Resource directories to scan for class names the framework inflates. */
+  const resDirs = [];
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--out") out = args[++i];
     else if (args[i] === "--manifest") manifest = args[++i];
     else if (args[i] === "--sbg-bindings") bindings = args[++i];
     else if (args[i] === "--allow-unparseable") allowUnparseable.push(args[++i]);
+    else if (args[i] === "--res") resDirs.push(args[++i]);
     else targets.push(args[i]);
   }
 
   if (!out || targets.length === 0) {
     console.error(
-      "usage: seed.js <js-dir-or-file>… --out whitelist.mdg [--manifest AndroidManifest.xml] [--sbg-bindings sbg-bindings.txt]"
+      "usage: seed.js <js-dir-or-file>… --out whitelist.mdg [--manifest AndroidManifest.xml] " +
+        "[--res res-dir]… [--sbg-bindings sbg-bindings.txt] [--allow-unparseable path]…"
     );
     process.exit(2);
   }
@@ -180,6 +238,17 @@ function main() {
     if (e) entries.add(e);
   }
 
+  let resourceNames = 0;
+  for (const resDir of resDirs) {
+    for (const name of parseResourceXml(resDir)) {
+      const e = toEntry(name);
+      if (e) {
+        entries.add(e);
+        resourceNames++;
+      }
+    }
+  }
+
   /* SBG bindings: the base class and interfaces of everything the app extends.
    * Field 0 is the base, field 8 the interface list. */
   if (bindings && fs.existsSync(bindings)) {
@@ -208,7 +277,8 @@ function main() {
 
   console.error(
     `seed: ${sorted.length} entries ` +
-      `(${harvest.resolved.length} named, ${harvest.roots.length} eased to whole packages)`
+      `(${harvest.resolved.length} named, ${harvest.roots.length} eased to whole packages, ` +
+      `${resourceNames} from resources)`
   );
 }
 

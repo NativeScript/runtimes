@@ -16,22 +16,54 @@ const path = require("path");
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 
-// The package names a Java FQN can start with. Anything rooted elsewhere is a
-// JS identifier that merely looks like a namespace.
-const JAVA_ROOTS = [
-  "java",
-  "javax",
-  "android",
-  "androidx",
-  "dalvik",
-  "kotlin",
-  "kotlinx",
-  "com",
-  "org",
-  "net",
-  "edu",
-  "io",
+/*
+ * There is deliberately no list of "the packages a Java name can start with".
+ *
+ * Such a list is a guess about a classpath it cannot see, and it rots: a
+ * dependency under me.*, de.*, ru.* or dev.* is invisible to it, and its
+ * classes then go missing from the metadata with no warning. The test-app
+ * already contained one casualty -- `in.tns.tests.JavascriptKeywordClass`,
+ * whose root is a JS keyword.
+ *
+ * Instead any dotted chain shaped like a Java name is harvested, and the
+ * decision about what is real is left to the generator, which holds the actual
+ * class graph. A pattern matching no class costs a line in a file; a class
+ * missing from the seed costs a TypeError in the app. Only the second is a bug,
+ * so this errs entirely in the first direction.
+ */
+
+// Kept only to recognise the JS globals whose members are never Java, so the
+// seed does not fill up with `Math:floor`-shaped noise. Not a correctness
+// filter: anything wrongly admitted simply matches nothing.
+const JS_GLOBAL_OBJECTS = [
+  "Math", "JSON", "Object", "Array", "String", "Number", "Boolean", "Date",
+  "RegExp", "Promise", "Symbol", "Reflect", "Proxy", "Map", "Set", "WeakMap",
+  "WeakSet", "Error", "TypeError", "console", "process", "globalThis",
 ];
+
+/*
+ * Property names that appear in every JS program and in no Java package path.
+ * Used only to keep the *package alias* heuristic from turning `a.length` into
+ * a whitelist entry. Purely cosmetic: an alias wrongly emitted matches no
+ * package and retains nothing, but the seed is easier to review without a
+ * thousand of them, and the generator's wildcard matcher is recursive.
+ */
+const JS_MEMBER_NOISE = [
+  "length", "call", "apply", "bind", "prototype", "constructor", "message",
+  "source", "global", "name", "value", "type", "state", "props", "target",
+  "current", "default", "exports", "children", "style", "data", "id", "key",
+  "index", "parent", "node", "next", "prev", "push", "pop", "slice", "split",
+  "join", "concat", "filter", "map", "reduce", "forEach", "then", "catch",
+];
+
+/* A chain that could plausibly be a package path: several conventional,
+ * lowercase, non-noise segments. */
+function looksLikePackagePath(segments) {
+  if (segments.length < 2) return false;
+  return segments.every(
+    (s) => /^[a-z][a-z0-9_]*$/.test(s) && s.length > 1 && JS_MEMBER_NOISE.indexOf(s) === -1
+  );
+}
 
 const PARSER_PLUGINS = [
   "jsx",
@@ -68,14 +100,19 @@ function splitPackageAndClass(segments) {
   return null;
 }
 
-/* Extra roots supplied by the build, for classpaths whose top-level packages
- * the list above does not anticipate. The list is a convenience, not a
- * contract -- a package name it has never heard of is exactly the case this
- * escape hatch exists for. */
-const extraRoots = [];
+/*
+ * A chain is Java-shaped when at least one all-lowercase package segment
+ * precedes an initial-capital class segment. Requiring the package segment is
+ * what keeps `Math.floor` and `JSON.stringify` out -- and it matters beyond
+ * noise: an entry with an empty package pattern matches *every* package in the
+ * generator's matcher, so `:Foo` would quietly retain `anything.Foo`.
+ */
+function isJavaShaped(segments) {
+  if (segments.length < 2) return false;
+  if (JS_GLOBAL_OBJECTS.indexOf(segments[0]) !== -1) return false;
 
-function isJavaRoot(name) {
-  return JAVA_ROOTS.indexOf(name) !== -1 || extraRoots.indexOf(name) !== -1;
+  const split = splitPackageAndClass(segments);
+  return split != null && split.classIndex >= 1;
 }
 
 /*
@@ -197,20 +234,21 @@ function harvestFile(filePath, source, harvest) {
       }
 
       const chain = staticChain(p.node);
-      /* The '$' prefix is itself proof of a Java package, so such a chain is
-       * accepted whether or not its root is on the known list. */
-      if (!chain || !(chain.keywordPrefixed || isJavaRoot(chain.segments[0]))) return;
+      if (!chain) return;
 
       const split = splitPackageAndClass(chain.segments);
 
       if (chain.truncated) {
-        /* We know the program reaches into this package but not which class.
-         * Record the deepest all-lowercase prefix as a root hint. */
+        /* We know the program reaches into some package but not which class.
+         * Record the all-lowercase prefix as a root hint, so the package is
+         * kept whole. Restricted to chains that got at least two segments in,
+         * which is what separates `java.lang[name]` from `foo[bar]`. */
         const pkgSegments = [];
         for (const s of chain.segments) {
           if (s && s[0] >= "A" && s[0] <= "Z") break;
           pkgSegments.push(s);
         }
+        if (!chain.keywordPrefixed && !looksLikePackagePath(pkgSegments)) return;
         harvest.addRoot(pkgSegments.join("."), `computed access in ${rel}`);
         harvest.addUnresolved("computed-member", chain.segments.join(".") + "[…]", {
           file: rel,
@@ -222,6 +260,7 @@ function harvestFile(filePath, source, harvest) {
       if (!split) {
         /* All-lowercase chain: a package object being passed around, e.g.
          * `var l = java.lang`. Everything under it is reachable. */
+        if (!looksLikePackagePath(chain.segments)) return;
         harvest.addRoot(chain.segments.join("."), `package alias in ${rel}`);
         harvest.addUnresolved("package-alias", chain.segments.join("."), {
           file: rel,
@@ -229,6 +268,8 @@ function harvestFile(filePath, source, harvest) {
         });
         return;
       }
+
+      if (!isJavaShaped(chain.segments)) return;
 
       /* Trailing segments after the class name are members/nested classes.
        * Keep the class and, for a nested name, its outer class too. */
@@ -252,8 +293,8 @@ function harvestFile(filePath, source, harvest) {
       const v = p.node.value;
       if (v.length < 3 || v.indexOf(".") === -1 || /\s/.test(v)) return;
       const segments = v.split(".");
-      if (!isJavaRoot(segments[0])) return;
-      if (!splitPackageAndClass(segments)) return;
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segments[0])) return;
+      if (!isJavaShaped(segments)) return;
       harvest.addResolved(v, `string literal in ${rel}`);
     },
   });
@@ -289,8 +330,6 @@ function main() {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--json") {
       jsonOut = args[++i];
-    } else if (args[i] === "--extra-root") {
-      extraRoots.push(args[++i]);
     } else {
       targets.push(args[i]);
     }

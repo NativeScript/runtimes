@@ -18,6 +18,13 @@ struct MetadataTreeNode {
     std::string* metadata;
     uint8_t type;
 
+    // True when this node was not read from the metadata files but rebuilt at
+    // runtime by MetadataReader::GetOrCreateTreeNodeByName, via reflection.
+    // That path is the reason a class missing from filtered metadata can still
+    // be marshalled: it is slower, not broken. Only the usage tracer reads
+    // this, to tell "recovered" apart from "would have thrown".
+    bool synthesizedAtRuntime = false;
+
     static const uint8_t PACKAGE = 0;
     static const uint8_t CLASS = 1 << 0;
     static const uint8_t INTERFACE = 1 << 1;

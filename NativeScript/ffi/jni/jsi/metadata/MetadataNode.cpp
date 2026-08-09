@@ -916,7 +916,12 @@ void MetadataNode::TraceUsage(MetadataTreeNode *treeNode) {
                        ? "P"
                        : (s_metadataReader.IsNodeTypeInterface(nodeType) ? "I" : "C");
 
-    __android_log_print(ANDROID_LOG_INFO, "NS_MD_USE", "%s %s", kind, name.c_str());
+    // R marks a node the metadata files did not contain, rebuilt by reflection.
+    // A filtered build is allowed to omit these -- that path is why omitting
+    // them is safe -- so the coverage check must not count them as misses.
+    const char *origin = treeNode->synthesizedAtRuntime ? "R" : "F";
+
+    __android_log_print(ANDROID_LOG_INFO, "NS_MD_USE", "%s%s %s", kind, origin, name.c_str());
 }
 #endif
 

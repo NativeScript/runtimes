@@ -255,6 +255,39 @@ Turning the flag off deletes the generated seed. A stale seed left behind would
 keep filtering on for a build that asked for it to be off, which is the
 confusing direction to fail.
 
+## The two checks
+
+Neither one subsumes the other, and the distinction matters.
+
+**Soundness** -- `ClosureVerifier`, in the generator, no device needed. Proves
+the emitted metadata is internally consistent: no signature quietly rewritten.
+
+**Completeness** -- `verify-coverage.js`, needs a traced run. Proves the app did
+not resolve anything the filter dropped. The soundness check is blind to this:
+a class the JS names that never entered the seed produces no substitution for
+it to notice, so nothing in the generator ever hears about it.
+
+Run completeness like this:
+
+```bash
+./gradlew :app:assembleDebug -PnsFilterMetadata -Pmetadata-usage-trace
+# run the app through as much of itself as possible, capturing logcat, then:
+node build-tools/metadata-filter/verify-coverage.js \
+     --trace logcat.txt --keep-rules app/build/nativescript/metadata-keep-rules.pro
+```
+
+On the 520-spec suite: **179 classes resolved from metadata, all retained; 13
+rebuilt by reflection**. That second number is the fallback path working as
+designed -- `WindowManagerImpl`, `DirectByteBuffer`, `DecimalFormat` and the
+Kotlin companions are absent from the filtered metadata and recovered at
+runtime. The trace marks them `R` rather than `F` so the check does not count
+them as misses.
+
+A third check, `checkMetadataRuntimeKeepList`, guards the one hand-written part
+of the seed: it greps the runtime C++ for class-name literals and fails if
+`RUNTIME_KEEP` no longer covers them. It needs no device and is wired into
+`check`.
+
 ## The soundness check
 
 `ClosureVerifier` fails the build if the filter changed the meaning of any
@@ -335,6 +368,34 @@ Three specs failed with "Could not call static interface method". Adding
 `-keep class **$-CC { *; }` did not help, because the defect was renaming rather
 than removal. Renaming buys some string space; removing unreachable classes is
 where the five megabytes come from, and that still happens.
+
+## Known limits
+
+Two checks and a set of heuristics cover most of what static analysis cannot
+see. What remains, stated plainly:
+
+**JS that does not exist at build time cannot be analysed.** CodePush/OTA
+updates, `eval` of code fetched at runtime, or class names arriving from a
+server. A JS update naming a class the shipped filter dropped will fail, and no
+build-time check can see it coming. **Do not enable filtering on an app that
+ships JS out of band.** This is not a gap that can be closed -- it is the same
+reason R8 cannot shrink a reflective Java app safely.
+
+**`-dontobfuscate` is forced whenever filtering is on.** Correct for a
+name-driven bridge, but it removes obfuscation as an option for apps that want
+it for other reasons. Shrinking, where the size comes from, is unaffected.
+
+**Coverage checking is only as good as the run.** `verify-coverage.js` proves
+nothing the traced run touched is missing. A screen the run never opened is not
+covered, so point it at the broadest run available.
+
+**The RN path is release-only**, so an app can pass in debug and fail in
+release. That is the safer direction (debug is unfiltered) but it means the
+filter's correctness is exercised on the less frequently run build.
+
+**Not yet run end to end on React Native.** The plugin registers
+`generateNativeScriptMetadataSeedRelease` and configures cleanly; a full RN
+release build has not been measured.
 
 ## Status
 

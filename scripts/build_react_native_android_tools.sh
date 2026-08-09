@@ -65,6 +65,8 @@ rm -rf "$TOOLS_DIR/metadata-filter"
 mkdir -p "$TOOLS_DIR/metadata-filter"
 cp "$TEST_APP_DIR/build-tools/metadata-filter/harvest.js" \
    "$TEST_APP_DIR/build-tools/metadata-filter/seed.js" \
+   "$TEST_APP_DIR/build-tools/metadata-filter/verify-coverage.js" \
+   "$TEST_APP_DIR/build-tools/metadata-filter/check-runtime-keeplist.js" \
    "$TOOLS_DIR/metadata-filter/"
 
 checkpoint "Staged:"

@@ -498,6 +498,15 @@ android.applicationVariants.all { variant ->
                         cmd.addAll(["--manifest", manifest.absolutePath])
                     }
 
+                    // Custom views, fragments and behaviours are named in
+                    // resource XML and inflated by the framework; the JS never
+                    // mentions them.
+                    android.sourceSets.main.res.srcDirs.each { dir ->
+                        if (dir.exists()) {
+                            cmd.addAll(["--res", dir.absolutePath])
+                        }
+                    }
+
                     def bindings = new File(sbgWorkDir, "sbg-bindings.txt")
                     if (bindings.exists()) {
                         cmd.addAll(["--sbg-bindings", bindings.absolutePath])

@@ -770,6 +770,7 @@ task generateMetadataSeed {
 
     inputs.property("enabled", nsFilterMetadata)
     inputs.dir(APP_DIR)
+    inputs.files(fileTree("$projectDir/src/main/res"))
     inputs.files(fileTree("$BUILD_TOOLS_PATH/metadata-filter") { include "*.js" })
     outputs.file(generatedSeed)
 
@@ -787,6 +788,13 @@ task generateMetadataSeed {
         def cmd = ["node", seedScript, APP_DIR,
                    "--manifest", "$projectDir/src/main/AndroidManifest.xml",
                    "--out", generatedSeed.absolutePath]
+
+        // Custom views, fragments and behaviours are named in resource XML and
+        // instantiated by the framework; nothing in the JS mentions them.
+        def resDir = file("$projectDir/src/main/res")
+        if (resDir.exists()) {
+            cmd.addAll(["--res", resDir.absolutePath])
+        }
 
         def bindings = file("$BUILD_TOOLS_PATH/$SBG_BINDINGS_NAME")
         if (bindings.exists()) {
@@ -808,6 +816,42 @@ task generateMetadataSeed {
         }
     }
 }
+
+// Device-free guard against the one part of the seed that is written by hand.
+// Wired into `check` so it runs in CI: the runtime naming a new class from
+// native code is otherwise invisible until an app built with filtering on hits
+// the code path that needs it.
+task checkMetadataRuntimeKeepList {
+    group = "verification"
+    description = "Verifies RUNTIME_KEEP covers every class the runtime resolves by name."
+
+    def runtimeSources = ["$rootDir/../../../NativeScript/ffi/jni/jsi",
+                          "$rootDir/../../../NativeScript/runtime/android/jsi"]
+    def script = "$BUILD_TOOLS_PATH/metadata-filter/check-runtime-keeplist.js"
+
+    inputs.files(fileTree("$BUILD_TOOLS_PATH/metadata-filter") { include "*.js" })
+    runtimeSources.each { dir ->
+        if (file(dir).exists()) {
+            inputs.files(fileTree(dir) { include "**/*.cpp", "**/*.h" })
+        }
+    }
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def cmd = ["node", script] + runtimeSources.findAll { file(it).exists() }
+        def process = new ProcessBuilder(cmd.collect { it.toString() })
+                .redirectErrorStream(true).start()
+        process.inputStream.eachLine { outLogger.withStyle(Style.Info).println "\t ~ [keeplist] $it" }
+        if (process.waitFor() != 0) {
+            throw new GradleException(
+                    "NativeScript: the metadata runtime keep-list is out of date. " +
+                    "Add the classes listed above to RUNTIME_KEEP in " +
+                    "build-tools/metadata-filter/seed.js.")
+        }
+    }
+}
+
+tasks.matching { it.name == "check" }.configureEach { it.dependsOn(checkMetadataRuntimeKeepList) }
 
 task copyMetadataFilters {
     dependsOn generateMetadataSeed
