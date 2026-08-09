@@ -144,6 +144,11 @@ try {
       : `only ${names.join(',')}`;
   });
 
+  // @JavaProxy('com.example.X') is deliberately not exercised here: a
+  // fully-qualified name makes the runtime *look up* a pre-generated class
+  // rather than dex one on the device, so it only resolves once the static
+  // binding generator has emitted it at build time.
+
   record('Comparator drives a real Java sort', () => {
     const list = new global.java.util.ArrayList();
     list.add(new global.java.lang.Integer(3));

@@ -68,6 +68,15 @@ function annotate(target, options) {
     });
   }
 
+  const explicitName = options.name;
+  if (explicitName !== undefined && explicitName.indexOf(".") < 0) {
+    throw new Error(
+      `@NativeClass name "${explicitName}" must be fully qualified, e.g. ` +
+        `"com.example.${explicitName}". The name is the generated Java class's ` +
+        `name, and the static binding generator matches on it.`,
+    );
+  }
+
   const base = Object.getPrototypeOf(target);
   const extend = nativeExtendOf(base);
   if (!extend) {
@@ -87,7 +96,17 @@ function annotate(target, options) {
   //
   // Passing the prototype as the implementation object and `true` for the
   // TypeScript-extend form is exactly what ts_helpers does.
-  const extended = extend.call(base, target.name, target.prototype, true);
+  // A fully-qualified name is taken verbatim by the runtime, with no call-site
+  // location mixed in. That is what makes it reproducible at build time: the
+  // static binding generator can emit a Java class under exactly this name and
+  // the runtime will find it instead of generating one on the device.
+  //
+  // Without a name the generated class is keyed on the call site, which under a
+  // bundler is a position in the bundle rather than in your source -- so nothing
+  // ahead of time can predict it, and the class is generated at runtime.
+  const extended = explicitName
+    ? extend.call(base, explicitName, target.prototype)
+    : extend.call(base, target.name, target.prototype, true);
 
   // Re-point the class at the generated one. `super()` resolves through the
   // constructor's own prototype, so this is what makes construction go via the
@@ -149,4 +168,19 @@ function Interfaces(interfaces) {
   };
 }
 
-module.exports = { NativeClass, Interfaces, NATIVE_CLASS };
+/**
+ * Names the generated Java class.
+ *
+ * `@JavaProxy("com.example.Ticker")` is `@NativeClass({ name })`, spelled the way
+ * NativeScript has always spelled it. Naming a class is what lets it be
+ * generated at build time rather than on the device, and it is required for a
+ * class that has to exist before the app runs -- one referenced from
+ * AndroidManifest.xml, say.
+ */
+function JavaProxy(name) {
+  return function decorate(target, _context) {
+    return annotate(target, { name });
+  };
+}
+
+module.exports = { NativeClass, Interfaces, JavaProxy, NATIVE_CLASS };

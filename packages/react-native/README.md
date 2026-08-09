@@ -683,6 +683,31 @@ Decorators are *syntax*, so your bundler has to parse them — that means
 `@babel/plugin-proposal-decorators` (or the SWC equivalent) in your Babel
 config. That is a standard plugin, not a NativeScript-specific transform.
 
+#### Naming a class
+
+`@NativeClass()` on its own generates the Java class on the device, keyed on the
+call site. That is all most classes need.
+
+A class that has to exist *before* the app runs — one named in
+`AndroidManifest.xml`, for instance — needs a fixed name instead:
+
+```ts
+import { JavaProxy } from "@nativescript/react-native";
+
+@JavaProxy("com.example.Ticker")
+@NativeClass()
+class Ticker extends java.lang.Object {}
+```
+
+A fully-qualified name is taken verbatim by the runtime, so it is reproducible
+at build time. The runtime then *looks the class up* rather than generating it,
+which means a named class only resolves once the static binding generator has
+emitted it — see the note below.
+
+> **Not yet wired up.** The static binding generator does not currently run for
+> React Native apps, so `@JavaProxy` names do not resolve. Unnamed
+> `@NativeClass()` classes, which are generated on the device, work today.
+
 If you would rather not use decorators, the runtime API is always available and
 needs nothing from the bundler:
 

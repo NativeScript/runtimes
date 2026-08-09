@@ -8,6 +8,14 @@
 
 export type NativeClassOptions = {
   /**
+   * Fully-qualified name for the generated Java class, e.g.
+   * "com.example.Ticker". Taken verbatim by the runtime, which is what allows
+   * the static binding generator to emit the class at build time. Without it
+   * the class is keyed on the call site and generated on the device.
+   */
+  name?: string;
+
+  /**
    * Java interfaces the generated class should implement, in addition to
    * whatever it extends. A JavaScript class has one base, so this is the only
    * way to express "implements Runnable and Callable".
@@ -32,4 +40,9 @@ export declare function NativeClass(
 /** Equivalent to `@NativeClass({ interfaces })`. */
 export declare function Interfaces(
   interfaces: unknown[],
+): <T extends AnyClass>(target: T, context?: unknown) => T;
+
+/** `@JavaProxy(name)` — equivalent to `@NativeClass({ name })`. */
+export declare function JavaProxy(
+  name: string,
 ): <T extends AnyClass>(target: T, context?: unknown) => T;

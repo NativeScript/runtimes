@@ -2,7 +2,12 @@ const assert = require('assert');
 
 // Plain JavaScript on purpose: the decorator has to behave identically under
 // every bundler, so it is shipped untranspiled and tested as shipped.
-const { NativeClass, Interfaces, NATIVE_CLASS } = require('../src/NativeClass');
+const {
+  NativeClass,
+  Interfaces,
+  JavaProxy,
+  NATIVE_CLASS,
+} = require('../src/NativeClass');
 
 /** Stands in for a metadata-backed native class. */
 function makeNativeBase() {
@@ -116,6 +121,38 @@ function makeNativeBase() {
 // Applying it to something that is not a class is a mistake worth reporting.
 {
   assert.throws(() => NativeClass()(42), /class declaration/);
+}
+
+// A fully-qualified name goes to the runtime verbatim, with no
+// isTypeScriptExtend flag -- that is the form the runtime takes as-is, and the
+// only one the static binding generator can predict.
+{
+  const { Base, calls } = makeNativeBase();
+  class Ticker extends Base {}
+  JavaProxy('com.example.Ticker')(Ticker);
+
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].name, 'com.example.Ticker');
+  assert.strictEqual(calls[0].isTypeScriptExtend, undefined);
+}
+
+// @NativeClass({ name }) is the same thing.
+{
+  const { Base, calls } = makeNativeBase();
+  class Ticker extends Base {}
+  NativeClass({ name: 'com.example.Ticker' })(Ticker);
+  assert.strictEqual(calls[0].name, 'com.example.Ticker');
+}
+
+// An unqualified name would collide across packages and cannot be generated
+// ahead of time; say so rather than producing a class nobody can find.
+{
+  const { Base } = makeNativeBase();
+  class Ticker extends Base {}
+  assert.throws(
+    () => JavaProxy('Ticker')(Ticker),
+    /fully qualified/,
+  );
 }
 
 console.log('native-class tests passed');
