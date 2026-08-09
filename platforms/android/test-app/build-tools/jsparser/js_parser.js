@@ -147,6 +147,13 @@ function getFileAst(tsHelpersFilePath) {
       const ast = babelParser.parse(fileContent, {
         minify: false,
         plugins: [
+          // "decorators-legacy" is the @babel/parser plugin. The
+          // "@babel/plugin-proposal-decorators" entry below names a Babel
+          // *transform*, which the parser does not recognise, so on its own
+          // decorator syntax fails to parse outright -- which is why only
+          // downlevelled __decorate([...]) output was ever handled. Kept
+          // alongside it so nothing that reads this list changes meaning.
+          "decorators-legacy",
           [
             "@babel/plugin-proposal-decorators",
             { decoratorsBeforeExport: true },
@@ -249,6 +256,10 @@ const astFromFileContent = function (path, data, err) {
     const parserOptions = {
       minify: false,
       plugins: [
+        // See the note on the same list in getFileAst: without
+        // "decorators-legacy" the parser rejects `@NativeClass class X {}`
+        // outright, so a bundle that keeps its decorators cannot be read.
+        "decorators-legacy",
         ["@babel/plugin-proposal-decorators", { decoratorsBeforeExport: true }],
         "objectRestSpread",
       ],

@@ -1,0 +1,127 @@
+// Covers the native-class visitor: `class X extends android.view.View {}` with
+// its decorators still in the source.
+//
+// Plain node rather than a jasmine spec in specs/, because the specs there
+// shell out to gradle and need `npm install` in this directory first. This
+// drives the visitor directly against jsparser's own dependencies, so it runs
+// with nothing installed beyond what the parser already needs:
+//
+//     node tests/native-class-visitor.test.js
+const assert = require("assert");
+const path = require("path");
+
+const root = path.resolve(__dirname, "..");
+const babelParser = require(path.join(root, "node_modules/@babel/parser"));
+const traverse = require(path.join(root, "node_modules/@babel/traverse")).default;
+const es5 = require(path.join(root, "visitors/es5-visitors"));
+
+function parse(source) {
+  const ast = babelParser.parse(source, {
+    minify: false,
+    plugins: ["decorators-legacy", "objectRestSpread"],
+  });
+
+  traverse(ast, {
+    enter(nodePath) {
+      es5.es5Visitor(nodePath, {
+        filePath: "app/subject.js",
+        fullPathName: "app_subject",
+        extendDecoratorName: "JavaProxy",
+        interfacesDecoratorName: "Interfaces",
+        logger: null,
+      });
+    },
+  });
+
+  return {
+    named: es5.es5Visitor.getProxyExtendInfo(),
+    unnamed: es5.es5Visitor.getCommonExtendInfo(),
+  };
+}
+
+function fields(row) {
+  return row.split("*");
+}
+
+// The override set has to match CallbackHandlers::CollectMethodOverrideNames in
+// the runtime, because a content-keyed class name hashes it. Accessors are on
+// the prototype and count; the constructor, statics and instance fields are not
+// overrides.
+{
+  const { unnamed, named } = parse(`
+    @NativeClass
+    class MyView extends android.view.View {
+      constructor() { super(); }
+      onClick(v) { return 1; }
+      get title() { return "t"; }
+      set title(v) {}
+      static helper() {}
+      handler = () => {};
+      onTouch(e) { return false; }
+    }
+  `);
+
+  assert.strictEqual(named.length, 0);
+  assert.strictEqual(unnamed.length, 1);
+
+  const f = fields(unnamed[0]);
+  assert.strictEqual(f[0], "android.view.View");
+  assert.strictEqual(f[4], "MyView", "declared name must match the runtime's extendName");
+  assert.deepStrictEqual(f[5].split(","), ["onClick", "title", "onTouch"]);
+  assert.strictEqual(f[6], "", "an unnamed class must not claim a JavaProxy name");
+}
+
+// @JavaProxy puts the fully qualified name in the filename field, which is what
+// makes hasSpecifiedName true on the generator side.
+{
+  const { named, unnamed } = parse(`
+    @JavaProxy("com.example.MyActivity")
+    @Interfaces([android.view.View.OnClickListener, java.lang.Runnable])
+    class MyActivity extends android.app.Activity {
+      onCreate(b) {}
+      run() {}
+    }
+  `);
+
+  assert.strictEqual(unnamed.length, 0);
+  assert.strictEqual(named.length, 1);
+
+  const f = fields(named[0]);
+  assert.strictEqual(f[0], "android.app.Activity");
+  assert.strictEqual(f[5], "onCreate,run");
+  assert.strictEqual(f[6], "com.example.MyActivity");
+  assert.strictEqual(f[8], "android.view.View.OnClickListener,java.lang.Runnable");
+}
+
+// @NativeClass({ name }) is the same request as @JavaProxy.
+{
+  const { named } = parse(`
+    @NativeClass({ name: "com.example.Ticker" })
+    class Ticker extends java.lang.Object {
+      toString() { return "tick"; }
+    }
+  `);
+
+  assert.strictEqual(named.length, 1);
+  assert.strictEqual(fields(named[0])[6], "com.example.Ticker");
+}
+
+// An undecorated class is not a binding, however native its superclass looks.
+// Bundles are full of `class X extends Foo.Bar {}` that has nothing to do with
+// Java, which is why the decorator is required rather than inferred.
+{
+  const { named, unnamed } = parse(`
+    class NotNative extends Something.Else {
+      whatever() {}
+    }
+    @NativeClass
+    class AlsoNotNative extends PlainIdentifier {
+      whatever() {}
+    }
+  `);
+
+  assert.strictEqual(named.length, 0);
+  assert.strictEqual(unnamed.length, 0);
+}
+
+console.log("native-class visitor tests passed");

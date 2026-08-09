@@ -1,6 +1,10 @@
 var es5_visitors = (function () {
   var types = require("@babel/types"),
     defaultExtendDecoratorName = "JavaProxy",
+    // Marks a class that extends a native type. Required on every such class,
+    // so that this parser never has to guess whether a dotted superclass is a
+    // Java type or an ordinary JS one.
+    NATIVE_CLASS_DECORATOR_NAME = "NativeClass",
     columnOffset = 1,
     ASTERISK_SEPARATOR = "*",
     customExtendsArr = [],
@@ -39,6 +43,15 @@ var es5_visitors = (function () {
     //anchor is new keyword (interface pattern)
     if (types.isNewExpression(path)) {
       traverseInterface(path, config);
+    }
+
+    // Native `class X extends android.view.View {}`, decorators intact.
+    // Everything below this point anchors on transpiler output (__extends,
+    // swc_inherit_polyfill, .extend). A bundler that emits classes and
+    // decorators as written -- Metro with Hermes, esbuild targeting esnext --
+    // produces none of those, so the class itself has to be an anchor too.
+    if (types.isClassDeclaration(path) || types.isClassExpression(path)) {
+      traverseNativeClassDeclaration(path, config);
     }
 
     // // Parsed Typescript to ES5 Syntax (normal extend pattern + custom extend pattern)
@@ -476,6 +489,187 @@ var es5_visitors = (function () {
    *	Finds the java proxy name from custom class decorator.
    *	Write results in "customExtendsArr"
    */
+  /*
+   *	Handles a native class declaration that still has its decorators:
+   *
+   *		@NativeClass
+   *		class MyView extends android.view.View { onClick() {} }
+   *
+   *		@JavaProxy("com.example.MyActivity")
+   *		@Interfaces([android.view.View.OnClickListener])
+   *		class MyActivity extends android.app.Activity { onCreate() {} }
+   *
+   *	A class is only reported when it carries one of those two decorators.
+   *	That is the documented rule -- every class extending a native type is
+   *	decorated -- and it keeps this visitor off the many ordinary classes in a
+   *	bundle that merely extend something with a dotted name.
+   */
+  function traverseNativeClassDeclaration(path, config) {
+    var node = path.node;
+
+    if (!node.decorators || node.decorators.length === 0) {
+      return;
+    }
+
+    if (!node.superClass || !types.isMemberExpression(node.superClass)) {
+      return;
+    }
+
+    var extendClass = _getWholeName(node.superClass).reverse().join(".");
+    if (!extendClass || extendClass.indexOf(".") === -1) {
+      return;
+    }
+
+    var extendDecoratorName =
+      config.extendDecoratorName === undefined
+        ? defaultExtendDecoratorName
+        : config.extendDecoratorName;
+
+    var javaProxyName = null;
+    var isNativeClass = false;
+    var implementedInterfaces = [];
+
+    for (var i = 0; i < node.decorators.length; i++) {
+      var expression = node.decorators[i].expression;
+      var isCall = types.isCallExpression(expression);
+      var name = isCall
+        ? expression.callee && expression.callee.name
+        : expression.name;
+
+      if (!name) {
+        continue;
+      }
+
+      if (name === extendDecoratorName) {
+        // @JavaProxy("a.b.C") -- reuse the shared validation so the error text
+        // is the same one the transpiled path produces.
+        javaProxyName = _getDecoratorArgument(
+          { parent: expression },
+          config,
+          extendDecoratorName
+        );
+      } else if (name === config.interfacesDecoratorName) {
+        if (isCall && expression.arguments.length > 0) {
+          var interfacesNode = expression.arguments[0];
+          if (types.isArrayExpression(interfacesNode)) {
+            for (var j = 0; j < interfacesNode.elements.length; j++) {
+              implementedInterfaces.push(
+                _getWholeInterfaceNameFromInterfacesNode(
+                  interfacesNode.elements[j]
+                )
+              );
+            }
+          }
+        }
+      } else if (name === NATIVE_CLASS_DECORATOR_NAME) {
+        isNativeClass = true;
+        // @NativeClass({ name: "a.b.C" }) is the same request as @JavaProxy.
+        if (isCall && expression.arguments.length > 0) {
+          var options = expression.arguments[0];
+          if (types.isObjectExpression(options)) {
+            for (var k = 0; k < options.properties.length; k++) {
+              var property = options.properties[k];
+              if (
+                _getIdentifierKeyName(property) === "name" &&
+                types.isStringLiteral(property.value)
+              ) {
+                javaProxyName = property.value.value;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!isNativeClass && javaProxyName === null) {
+      return;
+    }
+
+    var overriddenMethodNames = _getOverriddenMethodsFromClassBody(node);
+
+    if (javaProxyName !== null) {
+      traverseJavaProxyExtend(
+        javaProxyName,
+        config,
+        extendDecoratorName,
+        extendClass,
+        overriddenMethodNames,
+        implementedInterfaces.join(",")
+      );
+      return;
+    }
+
+    var location = node.loc && node.loc.start;
+    var lineToWrite = _generateLineToWrite(
+      "",
+      extendClass,
+      overriddenMethodNames,
+      {
+        file: config.fullPathName,
+        line: location ? location.line : "",
+        column: location ? location.column + columnOffset : "",
+        className: node.id ? node.id.name : "",
+      },
+      config.fullPathName,
+      implementedInterfaces.join(",")
+    );
+
+    if (config.logger) {
+      config.logger.info(lineToWrite);
+    }
+
+    normalExtendsArr.push(lineToWrite);
+  }
+
+  /*
+   *	The names a class body puts on the prototype, which is the object the
+   *	runtime is handed as the implementation.
+   *
+   *	Must agree with CallbackHandlers::CollectMethodOverrideNames in the
+   *	runtime, because a content-keyed class name hashes this set: a name
+   *	collected on one side and not the other produces two different class
+   *	names for one class, which surfaces only as LookedUpClassNotFound.
+   *
+   *	 - "constructor" is skipped; it is on the prototype but is never a Java
+   *	   override, and the runtime skips it too.
+   *	 - static members live on the constructor, not the prototype.
+   *	 - class fields are per-instance, so they are not on the prototype either.
+   *	 - getters and setters are, so they count.
+   *	 - computed keys cannot be read statically; skipping them costs only the
+   *	   pre-generated class, since the runtime still generates one at load.
+   */
+  function _getOverriddenMethodsFromClassBody(node) {
+    var overriddenMethodNames = [];
+
+    if (!node.body || !node.body.body) {
+      return overriddenMethodNames;
+    }
+
+    var members = node.body.body;
+    for (var i = 0; i < members.length; i++) {
+      var member = members[i];
+
+      if (!types.isClassMethod(member) || member.static || member.computed) {
+        continue;
+      }
+
+      if (member.kind === "constructor") {
+        continue;
+      }
+
+      var keyName = _getIdentifierKeyName(member);
+      if (keyName === null) {
+        continue;
+      }
+
+      if (overriddenMethodNames.indexOf(keyName) === -1) {
+        overriddenMethodNames.push(keyName);
+      }
+    }
+
+    return overriddenMethodNames;
+  }
+
   function traverseJavaProxyExtend(
     path,
     config,
