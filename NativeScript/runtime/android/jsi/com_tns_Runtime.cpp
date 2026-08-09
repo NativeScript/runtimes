@@ -93,6 +93,10 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_setManualInstrumentationModeLegac
     setManualInstrumentationModeFast_impl(_env, clazz, mode);
 }
 
+// Standalone only: a guest is attached by its embedder (see Runtime::Attach),
+// never by Java asking the runtime to stand a VM up. Every other native below
+// is interop that both flavours need, so only this one is compiled out.
+#if !defined(NS_JSI_HOST_RUNTIME)
 extern "C" JNIEXPORT void Java_com_tns_Runtime_initNativeScript(JNIEnv* _env, jobject obj, jint runtimeId, jstring filesPath, jstring nativeLibDir, jboolean verboseLoggingEnabled, jboolean isDebuggable, jstring packageName, jobjectArray args, jstring callingDir, jint maxLogcatObjectSize, jboolean forceLog) {
     try {
         DEBUG_WRITE("NativeScript Initializing!");
@@ -110,6 +114,7 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_initNativeScript(JNIEnv* _env, jo
         nsEx.ReThrowToJava(nullptr);
     }
 }
+#endif  // !NS_JSI_HOST_RUNTIME
 
 Runtime* TryGetRuntime(int runtimeId) {
     Runtime* runtime = nullptr;

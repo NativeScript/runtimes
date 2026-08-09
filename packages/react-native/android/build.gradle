@@ -1,0 +1,111 @@
+// @nativescript/react-native -- Android
+//
+// Built from source in the consuming app, the way every React Native module
+// with C++ is. That is not a packaging preference: jsi::Runtime is an abstract
+// class whose vtable changes shape between React Native versions, so a binary
+// compiled against one version's <jsi/jsi.h> can call through the wrong slot on
+// another. Compiling here means the runtime is always built against exactly the
+// jsi the app ships.
+//
+// Nothing links a JavaScript engine. The runtime speaks nativescript::engine,
+// which on this flavour is a header-only adapter over facebook::jsi, so the
+// only JS symbols in libnativescript_rn.so come from React Native's own
+// libjsi.so -- which is why the same binary works under Hermes and JSC alike.
+
+apply plugin: "com.android.library"
+
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+// The C++ and Java the runtime is made of. Two layouts are supported: the
+// published npm package, which carries a copy under native-api/, and this
+// repository, where the sources are the originals. Supporting both is what lets
+// a demo app build straight from a checkout with no staging step.
+// Keyed on the Android tree rather than on native-api/ itself: the iOS staging
+// step creates that directory too, with only the Objective-C bridge in it.
+def packagedRoot = file("${projectDir}/../native-api")
+def fromPackage = file("${packagedRoot}/runtime/android/jsi").exists()
+// Canonicalise before walking up. In a checkout the app reaches this package
+// through a symlink in node_modules, and file("...") normalises ".." lexically
+// without ever following it -- so the walk has to start from the real path or
+// it lands in node_modules instead of at the repository root.
+def repoRoot = projectDir.getCanonicalFile().parentFile.parentFile.parentFile
+
+def nsRoot = fromPackage ? packagedRoot : file("${repoRoot}/NativeScript")
+// Two trees, exactly as the standalone runtime module composes them: com.tns.*
+// proper, plus com.tns.bindings.* (the proxy generator that stands a Java class
+// up for a JS subclass), which lives in its own project but is compiled into
+// the runtime rather than shipped separately.
+def runtimeJava = fromPackage
+    ? [file("${projectDir}/src/main/java-runtime")]
+    : [file("${repoRoot}/platforms/android/test-app/runtime/src/main/java"),
+       file("${repoRoot}/platforms/android/test-app/runtime-binding-generator/src/main/java")]
+def metadataInclude = fromPackage
+    ? file("${packagedRoot}/metadata/include")
+    : file("${repoRoot}/metadata-generator/include")
+
+android {
+  namespace "org.nativescript.reactnative"
+  compileSdk safeExtGet("compileSdkVersion", 35)
+  // Follow the app rather than AGP's default, which points at whichever NDK the
+  // plugin was built against and need not be the one installed.
+  ndkVersion safeExtGet("ndkVersion", "27.1.12297006")
+
+  defaultConfig {
+    minSdk safeExtGet("minSdkVersion", 24)
+
+    externalNativeBuild {
+      cmake {
+        arguments "-DANDROID_STL=c++_shared",
+            "-DNS_ROOT=${nsRoot.absolutePath}",
+            "-DNS_METADATA_INCLUDE=${metadataInclude.absolutePath}"
+        cppFlags "-std=c++20", "-frtti", "-fexceptions"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+
+  buildFeatures {
+    prefab true
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  sourceSets {
+    main {
+      // com.tns.* is the runtime's Java half -- the class resolver, the object
+      // maps, the dex factory. It is plain Java with no engine dependency, so
+      // the guest ships the same copy the standalone runtime uses.
+      java.srcDirs += runtimeJava
+    }
+  }
+
+  packagingOptions {
+    // React Native and the NDK both contribute one; either is the NDK's.
+    pickFirst "**/libc++_shared.so"
+    // Never ship an engine. If one of these ever turns up here it means a
+    // dependency pulled a VM in behind our back, which would defeat the whole
+    // arrangement described at the top of this file.
+    exclude "**/libhermes.so"
+    exclude "**/libhermesvm.so"
+    exclude "**/libjsc.so"
+    exclude "**/libv8android.so"
+  }
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+}
+
+// Generates NativeScriptNativeApiSpec from src/NativeScriptNativeApi.ts, using
+// the codegenConfig block in package.json. The same spec drives iOS.
+apply plugin: "com.facebook.react"

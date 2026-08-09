@@ -44,6 +44,14 @@ public class Runtime {
     private native void initNativeScript(int runtimeId, String filesPath, String nativeLibDir, boolean verboseLoggingEnabled, boolean isDebuggable, String packageName,
                                          Object[] v8Options, String callingDir, int maxLogcatObjectSize, boolean forceLog);
 
+    // The guest counterpart of initNativeScript, implemented by
+    // @nativescript/react-native rather than by the standalone runtime: instead
+    // of standing a VM up it binds to `hostRuntimePtr`, a jsi::Runtime the
+    // embedder created and still owns. Unresolved (and never called) in a
+    // standalone build, which binds natives lazily on first invocation.
+    private native void attachNativeScript(int runtimeId, String metadataPath, long hostRuntimePtr,
+                                           boolean verboseLoggingEnabled, int maxLogcatObjectSize, boolean forceLog);
+
     private native void runModule(int runtimeId, String filePath) throws NativeScriptException;
 
     private native Object runScript(int runtimeId, String filePath) throws NativeScriptException;
@@ -433,6 +441,79 @@ public class Runtime {
         DynamicConfiguration dynamicConfiguration = new DynamicConfiguration(0, mainThreadScheduler, null);
         Runtime runtime = initRuntime(dynamicConfiguration);
         return runtime;
+    }
+
+    /*
+        Binds the runtime to a JavaScript runtime an embedder owns, for
+        @nativescript/react-native. Must be called on the embedder's JS thread:
+        the native side installs the metadata globals into that runtime straight
+        away, and jsi may only be touched from the thread the host designates.
+
+        The differences from initializeRuntimeWithConfiguration are all
+        consequences of being a guest. There is no VM to create. There is no
+        app/ directory to require from, so Module is not initialized and
+        ts_helpers.js is not run -- the host's bundler owns module loading.
+        `metadataPath` is the directory the .dat files were staged into, which
+        is the only part of the standalone file layout a guest still needs.
+     */
+    public static Runtime attachToHostRuntime(Logger logger, String appName, String nativeLibDir,
+                                              File filesDir, ClassLoader classLoader, File dexDir,
+                                              String dexThumb, boolean isDebuggable,
+                                              long hostRuntimePtr, String metadataPath) {
+        // Built here rather than by the caller so that AppConfig, which is
+        // package-private and reads a package.json a guest does not have, stays
+        // an implementation detail. Its defaults are what a guest wants anyway.
+        StaticConfiguration config = new StaticConfiguration(logger, appName, nativeLibDir,
+                filesDir, filesDir, classLoader, dexDir, dexThumb, new AppConfig(filesDir),
+                isDebuggable);
+        return attachToHostRuntime(config, hostRuntimePtr, metadataPath);
+    }
+
+    static Runtime attachToHostRuntime(StaticConfiguration config, long hostRuntimePtr, String metadataPath) {
+        staticConfiguration = config;
+        WorkThreadScheduler scheduler = new WorkThreadScheduler(new Handler(Looper.myLooper()));
+        DynamicConfiguration dynamicConfiguration = new DynamicConfiguration(0, scheduler, null);
+        Runtime runtime = new Runtime(config, dynamicConfiguration);
+        try {
+            runtime.attach(hostRuntimePtr, metadataPath);
+        } catch (Throwable t) {
+            // Same rollback as initRuntime: the constructor already registered
+            // the instance, so a failed bootstrap must not leave a stale one
+            // reachable through the caches.
+            runtimeCache.remove(runtime.getRuntimeId());
+            currentRuntime.remove();
+            GcListener.unsubscribe(runtime);
+            throw t;
+        }
+        return runtime;
+    }
+
+    private void attach(long hostRuntimePtr, String metadataPath) {
+        if (initialized) {
+            throw new RuntimeException("NativeScript is already attached to a runtime");
+        }
+
+        this.logger = config.logger;
+
+        AppConfig appConfig = config.appConfig;
+        if (appConfig != null) {
+            this.cachedDiscardUncaughtJsExceptions = appConfig.getDiscardUncaughtJsExceptions();
+            this.cachedEnableMultithreadedJavascript = appConfig.getEnableMultithreadedJavascript();
+        }
+
+        // Generated proxies still need somewhere to be defined and injected:
+        // extending a Java class from JS works the same way under a host runtime.
+        this.dexFactory = new DexFactory(logger, config.classLoader, config.dexDir, config.dexThumb, classStorageService, true);
+
+        boolean forceConsoleLog = appConfig != null
+                && (appConfig.getForceLog() || "timeline".equalsIgnoreCase(appConfig.getProfilingMode()));
+        int maxLogcatObjectSize = appConfig != null ? appConfig.getMaxLogcatObjectSize() : 1024;
+
+        attachNativeScript(getRuntimeId(), metadataPath, hostRuntimePtr, logger.isEnabled(), maxLogcatObjectSize, forceConsoleLog);
+
+        GcListener.subscribe(this);
+
+        initialized = true;
     }
 
     /*

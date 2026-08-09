@@ -101,3 +101,7 @@ metadata-generator/symbol-analyzer/target/
 # release as the Apple xcframework. Committing them let the .so files drift out
 # of step with the headers.
 /platforms/android/test-app/runtime/src/main/libs/hermes/
+
+# @nativescript/react-native Android module build output
+packages/react-native/android/.cxx/
+packages/react-native/android/build/

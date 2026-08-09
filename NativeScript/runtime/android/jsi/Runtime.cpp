@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <exception>
 #include <dlfcn.h>
-#include "zipconf.h"
+// PRId64, for the memory-accounting trace below. It used to arrive by accident
+// through libzip's zipconf.h, which this file included but never used.
+#include <cinttypes>
 #include "NativeScriptException.h"
 #include <sys/system_properties.h>
 #include "File.h"
