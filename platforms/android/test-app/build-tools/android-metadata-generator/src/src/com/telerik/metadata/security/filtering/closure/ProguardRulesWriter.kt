@@ -49,6 +49,30 @@ object ProguardRulesWriter {
                     -keep class **.R$* { *; }
                     -keepattributes Signature,InnerClasses,EnclosingMethod,*Annotation*
 
+                    # Shrink, but do not rename. Every lookup this runtime makes
+                    # is by name: metadata names classes, and JS names them
+                    # through it. A -keep rule preserves the names of classes it
+                    # matches, but R8 still renames the synthetic classes it
+                    # generates itself -- desugaring moved a static interface
+                    # method into StaticProducer${'$'}-CC and R8 emitted it as B.a,
+                    # which the runtime then could not find. Renaming buys some
+                    # string space; removing unreachable classes is where the
+                    # size comes from, and that still happens.
+                    -dontobfuscate
+
+                    # Below minSdk 24 a static interface method cannot live on
+                    # the interface, so desugaring moves the body into a
+                    # synthetic companion -- ${'$'}-CC for D8/R8, ${'$'}${'$'}CC for Bazel. The
+                    # runtime tries the interface and both companion names in
+                    # turn (JEnv::GetInterfaceStaticMethodIDAndJClass), so all
+                    # three have to survive. Nothing in Java calls them, so
+                    # without this R8 removes every one: measured, 18 companion
+                    # classes went to 0 and three specs failed with
+                    # "Could not call static interface method".
+                    -keep class **${'$'}-CC { *; }
+                    -keep class **${'$'}${'$'}CC { *; }
+                    -keepclassmembers interface * { public static <methods>; }
+
                     """.trimIndent()
             )
             out.newLine()

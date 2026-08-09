@@ -277,26 +277,54 @@ That is the exact defect that produced the launch crash, caught at build time.
 
 ## App size
 
-Measured on the test-app debug APK, same build both ways:
+Release APK, arm64 only, Hermes, `-PnsFilterMetadata` (which also turns on R8
+with the generated keep rules). Clean build on each side.
 
-| | Unfiltered | Filtered | Saved |
+| | Unfiltered | Filtered + R8 | Saved |
 |---|---|---|---|
-| Metadata on disk | 2,836,154 | 699,752 | **-75.3%** |
-| Metadata in the APK (compressed) | 1,053,583 | 266,669 | -74.7% |
-| **APK total** | 45,907,151 | 45,120,239 | **-786,912 (-1.7%)** |
+| **APK total** | 28,899,229 | 26,432,698 | **-2,466,531 (-8.5%)** |
+| dex (uncompressed) | 7,060,432 | 1,986,864 | **-5,073,568 (-71.9%)** |
+| metadata (compressed) | 939,188 | 238,698 | -700,490 (-74.6%) |
 
-The APK saving equals the compressed-metadata saving exactly, so nothing is lost
-to alignment. The relative figure is small only because this APK carries 22
-uncompressed `.so` files for four ABIs; against a single-ABI release APK the
-same ~770KB is a much larger share.
+**The dex is where the win is** -- 7.1 MB to 2.0 MB. Metadata filtering saves
+0.7 MB on its own; letting R8 strip the same set saves five megabytes more. The
+two only work together: R8 cannot see that JS reaches a class, so without the
+generated keep rules it strips the app's own dependencies, and with a keep-all
+rule it strips nothing.
 
-> Measure this with a clean `packageDebug`. Incremental packaging reuses the
-> previous APK layout and pads the freed space instead of reclaiming it -- two
-> APKs whose metadata differed by 787KB came out **byte-identical in total
-> size**, which reads exactly like the filter having no effect.
+The APK still being 26 MB is the four `.so` files (Hermes, the runtime, libc++,
+fbjni), which no metadata work touches.
 
-The runtime win is not measured here: less metadata is also less to parse and
-hold at startup.
+Verified: **520 specs, 0 failures** on the shrunk release APK, not just on the
+filtered metadata.
+
+> Measure on a clean `packageRelease`. Incremental packaging reuses the previous
+> APK layout and pads the freed space instead of reclaiming it -- two debug APKs
+> whose metadata differed by 787KB came out **byte-identical in total size**,
+> which reads exactly like the filter having no effect.
+
+### Why the rules say -dontobfuscate
+
+Shrinking is kept; renaming is not. Every lookup this runtime makes is by name:
+metadata names classes, JS names them through it. A `-keep` rule preserves the
+names of classes it *matches*, but R8 still renames the synthetic classes it
+generates itself.
+
+That is not hypothetical. Below minSdk 24, desugaring moves a static interface
+method into a synthetic companion (`Foo$-CC`), and the runtime tries the
+interface and both companion spellings in turn
+(`JEnv::GetInterfaceStaticMethodIDAndJClass`). With renaming on, R8 kept the
+companion -- it is in `seeds.txt` -- and emitted it as `B.a`:
+
+```
+com.tns.tests.interfaces.staticmethods.StaticProducer$-CC -> B.a:
+# {"id":"com.android.tools.r8.synthesized"}
+```
+
+Three specs failed with "Could not call static interface method". Adding
+`-keep class **$-CC { *; }` did not help, because the defect was renaming rather
+than removal. Renaming buys some string space; removing unreachable classes is
+where the five megabytes come from, and that still happens.
 
 ## Status
 

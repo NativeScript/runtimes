@@ -303,6 +303,16 @@ android {
             } else {
                 signingConfig signingConfigs.debug
             }
+
+            // Shrink the dex with the same set the metadata was filtered to.
+            // Only together with -PnsFilterMetadata: without the generated keep
+            // rules R8 cannot see that JS reaches these classes at all, and
+            // would strip everything the app depends on.
+            if (project.hasProperty("nsFilterMetadata")) {
+                minifyEnabled true
+                proguardFiles getDefaultProguardFile("proguard-android.txt"),
+                        METADATA_KEEP_RULES
+            }
         }
     }
 
@@ -1432,9 +1442,11 @@ tasks.configureEach({ DefaultTask currentTask ->
         currentTask.dependsOn(compileBytecode)
     }
 
-//    // ensure buildMetadata is done before R8 to allow custom proguard from metadata
+    // R8 consumes metadata-keep-rules.pro, which buildMetadata writes. Without
+    // this ordering R8 either reads the previous build's rules or fails on a
+    // missing file, and either way strips classes the app reaches from JS.
     if (currentTask =~ /minify.*WithR8/) {
-   //     buildMetadata.finalizedBy(currentTask)
+        currentTask.dependsOn(buildMetadata)
     }
     if (currentTask =~ /assemble.*Debug/ || currentTask =~ /assemble.*Release/) {
         currentTask.finalizedBy("validateAppIdMatch")
