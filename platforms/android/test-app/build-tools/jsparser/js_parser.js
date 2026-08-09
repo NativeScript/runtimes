@@ -274,7 +274,25 @@ const astFromFileContent = function (path, data, err) {
       logger.info(`Parsing CommonJS file: ${path}`);
     }
 
-    const ast = babelParser.parse(data.data, parserOptions);
+    let ast;
+    try {
+      ast = babelParser.parse(data.data, parserOptions);
+    } catch (scriptError) {
+      // The extension is only a hint, and for bundler output it is often not
+      // even a JavaScript one -- Metro emits index.android.bundle, and a RAM
+      // bundle scatters further files beside it. Anything that fails to parse
+      // as a script is retried as a module before being treated as an error,
+      // so which name the bundler happened to choose does not decide whether
+      // the file can be read.
+      if (isESModule) {
+        throw scriptError;
+      }
+
+      logger.info(`Re-parsing as an ES module: ${path}`);
+      parserOptions.sourceType = "module";
+      ast = babelParser.parse(data.data, parserOptions);
+    }
+
     data.ast = ast;
     return resolve(data);
   });
