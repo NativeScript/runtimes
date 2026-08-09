@@ -535,9 +535,7 @@ var es5_visitors = (function () {
     for (var i = 0; i < appliedDecorators.length; i++) {
       var expression = appliedDecorators[i];
       var isCall = types.isCallExpression(expression);
-      var name = isCall
-        ? expression.callee && expression.callee.name
-        : expression.name;
+      var name = _decoratorName(isCall ? expression.callee : expression);
 
       if (!name) {
         continue;
@@ -622,6 +620,42 @@ var es5_visitors = (function () {
     }
 
     normalExtendsArr.push(lineToWrite);
+  }
+
+  /*
+   *	The name of the decorator being applied, through whatever the module
+   *	system wrapped it in.
+   *
+   *	In source it is a bare `JavaProxy`. Once bundled, the same import reads as
+   *	`(0, _$$_REQUIRE(_dependencyMap[5]).JavaProxy)` -- a sequence whose last
+   *	element is a member expression -- and other bundlers produce
+   *	`ns.JavaProxy` or a further call. Only the trailing property name is
+   *	stable across all of them, and it is the one thing minification leaves
+   *	alone, since renaming a property would break the import.
+   */
+  function _decoratorName(node) {
+    if (!node) {
+      return undefined;
+    }
+
+    if (types.isIdentifier(node)) {
+      return node.name;
+    }
+
+    if (types.isMemberExpression(node)) {
+      return node.property && node.property.name;
+    }
+
+    if (types.isSequenceExpression(node)) {
+      // `(0, x)` -- the comma operator's value is its last element.
+      return _decoratorName(node.expressions[node.expressions.length - 1]);
+    }
+
+    if (types.isCallExpression(node)) {
+      return _decoratorName(node.callee);
+    }
+
+    return undefined;
   }
 
   /*

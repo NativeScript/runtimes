@@ -211,3 +211,31 @@ console.log("global-prefix tests passed");
 }
 
 console.log("call-form decorator tests passed");
+
+// The shape a bundler actually emits for an imported decorator. This is the
+// form that reaches the generator in a real Metro build.
+{
+  const { named } = parse(`
+    var Ticker = (0, _$$_REQUIRE(_dependencyMap[5]).JavaProxy)('com.example.nsrn.Ticker')(
+      class Ticker extends global.java.lang.Object {
+        toString() { return 'ticked'; }
+      }
+    );
+  `);
+  assert.strictEqual(named.length, 1, "a bundled JavaProxy import must be recognised");
+  const f = fields(named[0]);
+  assert.strictEqual(f[0], "java.lang.Object");
+  assert.strictEqual(f[5], "toString");
+  assert.strictEqual(f[6], "com.example.nsrn.Ticker");
+}
+
+// Namespace-imported form.
+{
+  const { unnamed } = parse(`
+    var L = ns.NativeClass(class MyList extends global.java.util.ArrayList { size() {} });
+  `);
+  assert.strictEqual(unnamed.length, 1);
+  assert.strictEqual(fields(unnamed[0])[4], "MyList");
+}
+
+console.log("bundled-import decorator tests passed");

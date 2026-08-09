@@ -330,9 +330,23 @@ android.applicationVariants.all { variant ->
 
                 logger.lifecycle("NativeScript: bundling ${variant.name} JavaScript for binding generation")
 
+                // --unstable-transform-profile is what keeps `class X extends Y {}`
+                // in the output. React Native's Babel preset downlevels classes
+                // into a function plus an anonymous helper call unless this is
+                // set (preserveClasses = isHermesV1 in the preset), and a
+                // downlevelled class is not something any static analysis can
+                // recognise as a subclass.
+                //
+                // It only affects this bundle. The one that ships is built by
+                // React Native's own task and is untouched -- and the runtime
+                // handles the downlevelled form there perfectly well.
+                //
+                // The value is "hermes-stable"; the CLI's own help text still
+                // says "hermes", which the preset does not match.
                 def bundleCmd = [nodeExecutable, reactCliFile, "bundle",
                                  "--platform", "android",
                                  "--dev", "false",
+                                 "--unstable-transform-profile", "hermes-stable",
                                  "--entry-file", nsEntryFile,
                                  "--bundle-output", new File(sbgBundleDir, "index.android.bundle").absolutePath,
                                  "--assets-dest", new File(sbgWorkDir, "assets").absolutePath]
