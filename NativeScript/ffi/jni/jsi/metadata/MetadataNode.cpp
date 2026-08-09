@@ -892,6 +892,34 @@ MetadataNode *MetadataNode::GetOrCreate(const string &className) {
     return node;
 }
 
+#if defined(NS_METADATA_USAGE_TRACE)
+// Ground truth for the build-time metadata filter: every metadata node the app
+// actually materialises, emitted once, at the single point where a tree node
+// first becomes a MetadataNode. A build with this on is a measuring instrument,
+// not a shipping configuration -- see the metadata-filter lane in
+// docs/metadata-filtering.md for how the trace is diffed against the static
+// harvest.
+void MetadataNode::TraceUsage(MetadataTreeNode *treeNode) {
+    static std::set<std::string> *s_traced = new std::set<std::string>();
+
+    auto name = GetJniClassName(treeNode);
+    if (name.empty()) {
+        return;
+    }
+
+    if (!s_traced->insert(name).second) {
+        return;
+    }
+
+    uint8_t nodeType = s_metadataReader.GetNodeType(treeNode);
+    const char *kind = s_metadataReader.IsNodeTypePackage(nodeType)
+                       ? "P"
+                       : (s_metadataReader.IsNodeTypeInterface(nodeType) ? "I" : "C");
+
+    __android_log_print(ANDROID_LOG_INFO, "NS_MD_USE", "%s %s", kind, name.c_str());
+}
+#endif
+
 MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     MetadataNode *result = nullptr;
 
@@ -900,6 +928,9 @@ MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     if (it != s_treeNode2NodeCache.end()) {
         result = it->second;
     } else {
+#if defined(NS_METADATA_USAGE_TRACE)
+        TraceUsage(treeNode);
+#endif
             auto name = GetJniClassName(treeNode);
             if (!name.empty()) {
                 auto it2 = s_name2NodeCache.find(name);
