@@ -124,7 +124,7 @@ public class DtsApi {
 
 
                 String simpleClassName = getSimpleClassname(currClass);
-                if (isObfuscated(simpleClassName)) {
+                if (isObfuscated(simpleClassName) || !isEmittableClassName(currentFileClassname)) {
                     continue;
                 }
                 Signature signature = this.getSignature(currClass);
@@ -139,7 +139,13 @@ public class DtsApi {
                         currentFileClassname.contains(".debugger.") ||
                         currentFileClassname.endsWith("package-info") ||
                         currentFileClassname.endsWith("module-info") ||
-                        currentFileClassname.endsWith("Kt")) {
+                        currentFileClassname.endsWith("Kt") ||
+                        // ...and classes nested inside one. A Kotlin file facade
+                        // (FooKt) is already skipped above; its synthetic members
+                        // (FooKt$WhenMappings) are just as unreachable from JS, and
+                        // emitting them opens a module for a parent that was never
+                        // written.
+                        currentFileClassname.split("\\$")[0].endsWith("Kt")) {
                     continue;
                 }
 
@@ -232,6 +238,18 @@ public class DtsApi {
                 this.prevClass = currClass;
             }
             closePackage(prevClass, null);
+
+            // closePackage derives how much to close from the last emitted class
+            // name, which does not always match how many modules were actually
+            // opened -- and one unclosed module makes the whole .d.ts unparseable
+            // rather than degrading the declarations it belongs to. Close whatever
+            // is still open.
+            String emitted = sbContent.toString();
+            int unclosed = emitted.length() - emitted.replace("{", "").length()
+                    - (emitted.length() - emitted.replace("}", "").length());
+            while (unclosed > 0) {
+                sbContent.appendln(getTabs(--unclosed) + "}");
+            }
             // process class scope end
 
             String[] refs = references.toArray(new String[references.size()]);
@@ -243,20 +261,105 @@ public class DtsApi {
         return content;
     }
 
+    /**
+     * Replaces every type from a namespace we do not emit with {@code any}.
+     *
+     * <p>Scanned rather than matched with a regular expression. Generic arguments
+     * nest -- {@code androidNative.Array<kotlin.Pair<A,B>>} -- and a pattern
+     * either stops before the arguments (leaving {@code any<A,B>}) or runs past
+     * the closing bracket (leaving {@code Array<any}); both produce a .d.ts the
+     * TypeScript compiler cannot parse. Counting bracket depth gets it right for
+     * any nesting.
+     */
     private String replaceIgnoredNamespaces(String content) {
-        String regexFormat = "(?<Replace>%s(?:(?:\\.[a-zA-Z\\d]*)|<[a-zA-Z\\d\\.<>]*>)*)(?<Suffix>[^a-zA-Z\\d]+)";
-        // these namespaces are not known in some android api levels, so we cannot use them in android-support for instance, so we are replacing them with any
-        for (String ignoredNamespace : this.getIgnoredNamespaces()) {
-            String regexString = String.format(regexFormat, ignoredNamespace.replace(".", "\\."));
-            content = content.replaceAll(regexString, "any$2");
-            regexString = String.format(regexFormat, getGlobalAliasedClassName(ignoredNamespace).replace(".", "\\."));
-            content = content.replaceAll(regexString, "any$2");
+        List<String> ignored = new ArrayList<>();
+        for (String namespace : this.getIgnoredNamespaces()) {
+            ignored.add(namespace);
+            String aliased = getGlobalAliasedClassName(namespace);
+            if (!aliased.equals(namespace)) {
+                ignored.add(aliased);
+            }
+        }
+
+        StringBuilder out = new StringBuilder(content.length());
+        int i = 0;
+        while (i < content.length()) {
+            int length = ignoredTypeLengthAt(content, i, ignored);
+            if (length > 0) {
+                out.append("any");
+                i += length;
+            } else {
+                out.append(content.charAt(i));
+                i++;
+            }
         }
 
         // replace "extends any" with "extends java.lang.Object"
-        content = content.replace(" extends any ", String.format(" extends %s ", DtsApi.JavaLangObject));
+        return out.toString().replace(" extends any ", String.format(" extends %s ", DtsApi.JavaLangObject));
+    }
 
-        return content;
+    private static boolean isTypeNameChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
+    }
+
+    /**
+     * Length of the ignored-namespace type starting at {@code start}, or 0.
+     * Includes the qualified name and its balanced generic arguments.
+     */
+    private static int ignoredTypeLengthAt(String content, int start, List<String> ignored) {
+        // Must begin a name, not land in the middle of one.
+        if (start > 0) {
+            char previous = content.charAt(start - 1);
+            if (isTypeNameChar(previous) || previous == '.') {
+                return 0;
+            }
+        }
+
+        for (String namespace : ignored) {
+            if (!content.startsWith(namespace, start)) {
+                continue;
+            }
+            int at = start + namespace.length();
+            // "kotlin" must not match "kotlinx".
+            if (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                continue;
+            }
+            // Trailing name segments: kotlin -> kotlin.jvm.functions.Function3
+            while (at + 1 < content.length() && content.charAt(at) == '.'
+                    && isTypeNameChar(content.charAt(at + 1))) {
+                at++;
+                while (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                    at++;
+                }
+            }
+            // Generic arguments, to the matching bracket.
+            if (at < content.length() && content.charAt(at) == '<') {
+                int depth = 0;
+                int scan = at;
+                while (scan < content.length()) {
+                    char c = content.charAt(scan);
+                    if (c == '<') {
+                        depth++;
+                    } else if (c == '>') {
+                        depth--;
+                        if (depth == 0) {
+                            scan++;
+                            break;
+                        }
+                    } else if (c == '\n' || c == ';') {
+                        // Unbalanced; leave the arguments alone.
+                        depth = -1;
+                        break;
+                    }
+                    scan++;
+                }
+                if (depth == 0) {
+                    at = scan;
+                }
+            }
+            return at - start;
+        }
+        return 0;
     }
 
     public static String serializeGenerics() {
@@ -790,7 +893,12 @@ public class DtsApi {
                     Type[] types = new Type[referenceTypes.size()];
                     types = referenceTypes.toArray(types);
                     return types;
-                } catch (ClassCastException classCast) {
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    // A generic signature the parser does not model -- an
+                    // intersection bound (<T extends ViewGroup & HasSmoothScroll>)
+                    // is the common one. The erased descriptor is always valid and
+                    // always available, so fall back to it rather than failing the
+                    // whole run over one method.
                     return m.getArgumentTypes();
                 }
             }
@@ -826,7 +934,7 @@ public class DtsApi {
             }
             try {
                 return GenericUtilities.getType(typeSignature);
-            } catch (ClassCastException classCast) {
+            } catch (ClassCastException | IllegalArgumentException parseFailure) {
                 return f.getType();
             }
         }
@@ -843,7 +951,11 @@ public class DtsApi {
                 if(isVoid.matcher(returnSignature).matches()){
                     return m.getReturnType(); // returning void
                 }
-                return GenericUtilities.getType(returnSignature);
+                try {
+                    return GenericUtilities.getType(returnSignature);
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    return m.getReturnType();
+                }
             }
         }
         return m.getReturnType();
@@ -939,6 +1051,52 @@ public class DtsApi {
         return name;
     }
 
+    /**
+     * Whether a class can be written out at all.
+     *
+     * <p>Every segment of the qualified name becomes either a namespace or a
+     * class identifier, so all of them have to be identifiers. Kotlin breaks this
+     * in both directions: it mangles some internal classes with a leading dash
+     * ({@code -Base64}), and synthesises names with empty segments, which come
+     * out as {@code export module  {}. Neither is reachable from JavaScript, so
+     * they are skipped rather than emitted as unparseable declarations.
+     */
+    private static boolean isEmittableClassName(String qualifiedName) {
+        if (qualifiedName == null || qualifiedName.isEmpty()) {
+            return false;
+        }
+        for (String segment : qualifiedName.replace('$', '.').split("\\.", -1)) {
+            if (!isValidJsIdentifier(segment)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether a name from the bytecode can be used as a TypeScript parameter name.
+     *
+     * <p>Kotlin emits synthetic parameter names that are not identifiers at all --
+     * a property setter's parameter is literally {@code <set-?>} -- and writing
+     * one out produces a .d.ts the compiler cannot parse. Such parameters fall
+     * back to paramN, exactly like the interface case below.
+     */
+    private static boolean isValidJsIdentifier(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        if (!Character.isJavaIdentifierStart(name.charAt(0)) && name.charAt(0) != '$') {
+            return false;
+        }
+        for (int i = 1; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!Character.isJavaIdentifierPart(c) && c != '$') {
+                return false;
+            }
+        }
+        return true;
+    }
+
    private String getMethodParamSignature(JavaClass clazz, TypeDefinition typeDefinition, Method m) {
         LocalVariableTable table = m.getLocalVariableTable();
         LocalVariable[] variables = table != null ? table.getLocalVariableTable() : null;
@@ -956,7 +1114,7 @@ public class DtsApi {
                 ? variables[localVarIndex]
                 : null;
 
-            if (localVariable != null) {
+            if (localVariable != null && isValidJsIdentifier(localVariable.getName())) {
                 String name = localVariable.getName();
                 if(reservedJsKeywords.contains(name)){
                     System.out.println(String.format("Appending _ to reserved JS keyword %s", name));
@@ -1143,13 +1301,19 @@ public class DtsApi {
                 typeName = this.typeOverrides.get(typeName);
             }
 
+            int emittedBaseAt = tsType.length();
             if (!typeBelongsInCurrentTopLevelNamespace(typeName) && !typeName.startsWith("java.util.function.") && !isPrivateGoogleApiClass(typeName)) {
                 tsType.append(getAliasedClassName(typeName));
             } else {
                 tsType.append(typeName);
             }
 
-            if(type instanceof GenericObjectType) {
+            // A base that collapsed to `any` takes no type arguments: `any<K,V>`
+            // is not parseable TypeScript. Kotlin's synthetic inline-function
+            // parameters are the usual way to end up here.
+            boolean baseIsAny = "any".contentEquals(tsType.subSequence(emittedBaseAt, tsType.length()));
+
+            if(!baseIsAny && type instanceof GenericObjectType) {
                 GenericObjectType genericType = (GenericObjectType) type;
                 if (genericType.getNumParameters() > 0) {
                     tsType.append("<");
