@@ -1208,6 +1208,57 @@ inline jsi::Value makeConstructReceiver(jsi::Runtime& rt,
   return jsi::Value(jsi::Object::create(rt, prototype));
 }
 
+// A JS function that wraps a host function so the result is constructible.
+//
+// Whether Hermes lets you `new` a native function is a property of the Hermes
+// build, not of jsi: the vendored static-hermes allows it, the Hermes React
+// Native ships throws "This function cannot be used as a constructor". Since
+// @nativescript/react-native runs on whatever Hermes the app has, the
+// constructor cannot be a native function at all. An ordinary JS function is
+// constructible everywhere, gets a correct `this` from the language itself, and
+// comes with a `prototype` whose `constructor` back-pointer is already right.
+//
+// Cached on the global because the factory is per-runtime and there is nowhere
+// else to hang per-runtime state; the property is non-enumerable so it does not
+// show up in application code.
+inline jsi::Function hostConstructorFactory(jsi::Runtime& rt) {
+  static constexpr const char* kFactoryKey = "__nsHostConstructorFactory";
+
+  jsi::Value cached = rt.global().getProperty(rt, kFactoryKey);
+  if (cached.isObject() && cached.getObject(rt).isFunction(rt)) {
+    return cached.getObject(rt).getFunction(rt);
+  }
+
+  jsi::Value made = rt.evaluateJavaScript(
+      std::make_shared<jsi::StringBuffer>(
+          "(function (hostFn, name, length) {"
+          "  function NativeScriptClass() {"
+          "    return hostFn.apply(this, arguments);"
+          "  }"
+          "  Object.defineProperty(NativeScriptClass, 'name',"
+          "    { value: name, configurable: true });"
+          "  Object.defineProperty(NativeScriptClass, 'length',"
+          "    { value: length, configurable: true });"
+          "  return NativeScriptClass;"
+          "})"),
+      "nativescript:host-constructor");
+
+  jsi::Function factory = made.getObject(rt).getFunction(rt);
+
+  jsi::Object global = rt.global();
+  jsi::Function defineProperty = global.getPropertyAsObject(rt, "Object")
+                                     .getPropertyAsFunction(rt, "defineProperty");
+  jsi::Object descriptor(rt);
+  descriptor.setProperty(rt, "value", jsi::Value(rt, factory));
+  descriptor.setProperty(rt, "enumerable", false);
+  descriptor.setProperty(rt, "configurable", true);
+  defineProperty.call(rt, jsi::Value(rt, global),
+                      jsi::String::createFromAscii(rt, kFactoryKey),
+                      jsi::Value(rt, descriptor));
+
+  return factory;
+}
+
 inline jsi::Function makeHostConstructor(Runtime& runtime,
                                          const PropNameID& name,
                                          unsigned int paramCount,
@@ -1239,21 +1290,23 @@ inline jsi::Function makeHostConstructor(Runtime& runtime,
         }
       });
 
-  weakSelf->emplace(rt, fn);
-  // A writable own `prototype`: MetadataNode chains class prototypes with a
-  // plain `ctor.prototype = ...` assignment, and a Hermes host function has no
-  // prototype at all until one is installed.
-  //
-  // It carries a `constructor` back-pointer, as the spec requires of any
-  // function's prototype. V8's Function::New installs one for us; a bare object
-  // has none, so `instance.constructor` walked past the class prototype to
-  // Object.prototype.constructor and every native class reported its name as
-  // "Object". The QuickJS and JSC backends needed the same property for the
-  // same reason.
-  jsi::Object prototype(rt);
-  prototype.setProperty(rt, "constructor", jsi::Value(rt, fn));
-  fn.setProperty(rt, "prototype", prototype);
-  return fn;
+  // Wrap it in a real JS function; see hostConstructorFactory above. The
+  // wrapper brings its own writable `prototype` carrying the `constructor`
+  // back-pointer the spec requires, which is what stops `instance.constructor`
+  // walking past the class prototype and reporting every native class as
+  // "Object".
+  jsi::Function factory = hostConstructorFactory(rt);
+  jsi::Value made = factory.call(rt, jsi::Value(rt, fn),
+                                 jsi::String::createFromUtf8(rt, text),
+                                 jsi::Value(static_cast<double>(paramCount)));
+  jsi::Function ctor = made.getObject(rt).getFunction(rt);
+
+  // Weak, and pointing at the wrapper rather than the host function: it is the
+  // wrapper that owns `prototype`, and it is what a direct (non-`new`) call has
+  // to synthesise a receiver from. Strong would be a cycle through
+  // prototype.constructor that the GC cannot break.
+  weakSelf->emplace(rt, ctor);
+  return ctor;
 }
 
 }  // namespace hermesengine

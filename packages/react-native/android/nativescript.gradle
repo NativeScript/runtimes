@@ -1,0 +1,228 @@
+// NativeScript build integration for a React Native app.
+//
+// Apply from android/app/build.gradle:
+//
+//   apply from: "../../node_modules/@nativescript/react-native/android/nativescript.gradle"
+//
+// It adds two things:
+//
+//   * metadata generation -- the description of every Java/Kotlin class the app
+//     can see, which is what makes `android.widget.Toast` resolvable from JS.
+//     Generated from the app's own resolved classpath, so a library the app
+//     installs is callable without anyone publishing bindings for it.
+//
+//   * TypeScript declarations for the same classpath, off by default because
+//     they take a while. Turn on with -PnsGenerateTypings=true.
+//
+// Both are keyed to the variant being built, so debug and release get metadata
+// for the dependencies they actually resolve.
+
+import java.nio.file.Paths
+
+def nsPackageDir = file("${buildscript.sourceFile.parentFile}")
+def toolsDir = file("${nsPackageDir}/tools")
+
+def metadataGeneratorJar = file("${toolsDir}/android-metadata-generator.jar")
+def dtsGeneratorJar = file("${toolsDir}/dts-generator.jar")
+
+def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
+    && Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
+
+// Where the .dat files land. This is added to the asset source set rather than
+// written into src/, so a clean build regenerates and nothing lands in version
+// control. NativeScriptNativeApiModule copies them out of the APK on first run.
+def metadataAssetRoot = file("${buildDir}/generated/nativescript/assets")
+def metadataOutDir = file("${metadataAssetRoot}/nativescript-metadata")
+
+android {
+    sourceSets {
+        main {
+            assets.srcDirs += metadataAssetRoot
+        }
+    }
+}
+
+/**
+ * Every jar the variant resolves, plus android.jar.
+ *
+ * AARs are asked for as "android-classes-jar" so the artifact view unpacks
+ * classes.jar for us; without that an .aar arrives as an archive the generator
+ * cannot read.
+ */
+def resolveClasspathJars = { variant ->
+    def jars = new LinkedHashSet<File>()
+
+    def androidJar = Paths.get(android.sdkDirectory.absolutePath, "platforms",
+            android.compileSdkVersion, "android.jar").toFile()
+    if (androidJar.exists()) {
+        jars.add(androidJar)
+    }
+
+    // The published name of AGP's "classes.jar unpacked from an aar" artifact.
+    // Spelled out rather than read off AndroidArtifacts.ArtifactType, which is
+    // AGP-internal and not resolvable from a script plugin.
+    def classesJarType = "android-classes-jar"
+
+    try {
+        def view = variant.runtimeConfiguration.incoming.artifactView { config ->
+            config.lenient(true)
+            config.attributes { container ->
+                container.attribute(
+                        org.gradle.api.attributes.Attribute.of("artifactType", String),
+                        classesJarType)
+            }
+        }
+        view.artifacts.artifactFiles.each { jars.add(it) }
+    } catch (Exception e) {
+        logger.warn("NativeScript: could not resolve the ${variant.name} runtime classpath " +
+                "(${e.message}). Metadata will cover only the Android SDK.")
+    }
+
+    return jars
+}
+
+/** Directories of .class files this build produced, across every subproject. */
+def resolveCompiledClassDirs = { variant ->
+    def dirs = new LinkedHashSet<File>()
+    def variantName = variant.name
+
+    rootProject.subprojects.each { sub ->
+        ["intermediates/javac/${variantName}/classes",
+         "intermediates/javac/${variantName}/compile${variantName.capitalize()}JavaWithJavac/classes",
+         "tmp/kotlin-classes/${variantName}"].each { relative ->
+            def candidate = new File(sub.buildDir, relative)
+            if (candidate.isDirectory()) {
+                dirs.add(candidate)
+            }
+        }
+    }
+
+    return dirs
+}
+
+def collectClassFiles = { Collection<File> roots ->
+    def files = new ArrayList<File>()
+    roots.each { root ->
+        root.eachFileRecurse { f ->
+            if (f.isFile() && f.name.endsWith(".class")) {
+                files.add(f)
+            }
+        }
+    }
+    return files
+}
+
+android.applicationVariants.all { variant ->
+    def variantName = variant.name.capitalize()
+    def workDir = file("${buildDir}/nativescript/${variant.name}")
+
+    def metadataTask = tasks.register("generateNativeScriptMetadata${variantName}", JavaExec) {
+        group = "nativescript"
+        description = "Generates NativeScript metadata for the ${variant.name} classpath."
+
+        // The generator takes its input as files in the working directory
+        // rather than as arguments -- a classpath can be thousands of entries
+        // and would overflow the command line.
+        workingDir workDir
+        mainClass = "-jar"
+
+        outputs.dir(metadataOutDir)
+
+        doFirst {
+            if (!metadataGeneratorJar.exists()) {
+                throw new GradleException(
+                        "NativeScript: ${metadataGeneratorJar} is missing. It ships with " +
+                        "@nativescript/react-native; reinstall the package, or run " +
+                        "scripts/build_react_native_android_tools.sh from a checkout.")
+            }
+
+            workDir.mkdirs()
+            metadataOutDir.deleteDir()
+            metadataOutDir.mkdirs()
+
+            def jars = resolveClasspathJars(variant)
+            def classDirs = resolveCompiledClassDirs(variant)
+
+            new File(workDir, "mdg-java-dependencies.txt").withWriter { out ->
+                jars.each { if (it.name.endsWith(".jar")) out.println it.absolutePath }
+                classDirs.each { out.println it.absolutePath }
+            }
+
+            new File(workDir, "mdg-java-out.txt").withWriter { out ->
+                collectClassFiles(classDirs).each { out.println it.absolutePath }
+            }
+
+            new File(workDir, "mdg-output-dir.txt").withWriter { out ->
+                out.println metadataOutDir.absolutePath
+            }
+
+            // Optional filters, same file names and format the NativeScript CLI
+            // uses. Absent means "everything on the classpath".
+            ["whitelist.mdg", "blacklist.mdg"].each { name ->
+                def source = file("${project.projectDir}/${name}")
+                def target = new File(workDir, name)
+                if (source.exists()) {
+                    target.text = source.text
+                } else {
+                    target.delete()
+                }
+            }
+
+            logger.lifecycle("NativeScript: generating metadata from ${jars.size()} jars and " +
+                    "${classDirs.size()} class directories")
+
+            def params = [metadataGeneratorJar.absolutePath]
+            if (project.hasProperty("nsVerboseMetadata")) {
+                params.add("verbose")
+            }
+            args params.toArray()
+        }
+    }
+
+    def typingsTask = tasks.register("generateNativeScriptTypings${variantName}", JavaExec) {
+        group = "nativescript"
+        description = "Generates TypeScript declarations for the ${variant.name} classpath."
+
+        workingDir workDir
+        mainClass = "-jar"
+        onlyIf { nsGenerateTypings }
+
+        doFirst {
+            if (!dtsGeneratorJar.exists()) {
+                throw new GradleException(
+                        "NativeScript: ${dtsGeneratorJar} is missing. It ships with " +
+                        "@nativescript/react-native; reinstall the package, or run " +
+                        "scripts/build_react_native_android_tools.sh from a checkout.")
+            }
+
+            // Alongside the app rather than in build/: these are checked in and
+            // referenced from tsconfig.json, the same way types/ios is on the
+            // Apple side.
+            def typingsDir = file("${rootProject.projectDir}/../types/android")
+            typingsDir.mkdirs()
+
+            def params = [dtsGeneratorJar.absolutePath, "-input"]
+            resolveClasspathJars(variant).each { params.add(it.absolutePath) }
+            params.add("-output")
+            params.add(typingsDir.absolutePath)
+
+            logger.lifecycle("NativeScript: writing TypeScript declarations to ${typingsDir}")
+            args params.toArray()
+        }
+    }
+
+    // Metadata describes the compiled classes, so it has to run after javac and
+    // before the assets are merged into the APK.
+    // Depend on the provider directly. Reaching into javaCompileProvider.configure
+    // to wire these up nests one task's configuration inside another's, which
+    // Gradle rejects.
+    metadataTask.configure { it.dependsOn(variant.javaCompileProvider) }
+    typingsTask.configure { it.dependsOn(variant.javaCompileProvider) }
+
+    tasks.matching { it.name == "merge${variantName}Assets" }.configureEach {
+        it.dependsOn(metadataTask)
+        if (nsGenerateTypings) {
+            it.dependsOn(typingsTask)
+        }
+    }
+}

@@ -104,9 +104,15 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
         return nativeIsInstalled();
     }
 
+    /**
+     * The directory the runtime is pointed at.
+     *
+     * <p>Note this is the <em>parent</em>: MetadataBuilder appends "/metadata"
+     * to whatever it is handed, so the .dat files are staged one level below.
+     */
     @Override
     public String defaultMetadataPath() {
-        return new File(reactContext.getApplicationContext().getFilesDir(), "nativescript-metadata")
+        return new File(reactContext.getApplicationContext().getFilesDir(), "nativescript")
                 .getAbsolutePath();
     }
 
@@ -180,14 +186,17 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
      * files. Extraction is keyed on the build stamp so a rebuild that regenerates
      * metadata does not keep serving the previous build's copy.
      */
-    private static void stageMetadata(Context context, File target) throws IOException {
-        File stamp = new File(target, ".version");
+    private static void stageMetadata(Context context, File root) throws IOException {
+        File stamp = new File(root, ".version");
         String version = buildStamp(context);
 
         if (stamp.exists() && version.equals(readAll(stamp))) {
             return;
         }
 
+        // MetadataBuilder::BuildMetadata appends "/metadata" to the path it is
+        // given, so the files go one level below the directory we report.
+        File target = new File(root, "metadata");
         if (!target.exists() && !target.mkdirs()) {
             throw new IOException("Could not create " + target.getAbsolutePath());
         }

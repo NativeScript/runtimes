@@ -105,3 +105,5 @@ metadata-generator/symbol-analyzer/target/
 # @nativescript/react-native Android module build output
 packages/react-native/android/.cxx/
 packages/react-native/android/build/
+# Staged by scripts/build_react_native_android_tools.sh at package time
+packages/react-native/android/tools/
