@@ -721,11 +721,20 @@ at build time. The runtime then *looks the class up* rather than generating it,
 which means a named class only resolves once the static binding generator has
 emitted it — see the note below.
 
-> **Release builds only.** The static binding generator reads the bundle, so it
-> needs one on disk. In debug, Metro serves the bundle over HTTP and there is
-> nothing to scan; unnamed `@NativeClass()` classes are generated on the device
-> and work as usual, but `@JavaProxy` names do not resolve until you build a
-> release bundle.
+> **`@JavaProxy` does not resolve yet.** The generator runs on release builds
+> and does pre-generate classes for `.extend(...)` subclasses, but not yet for
+> ones written with `class` syntax.
+>
+> React Native's Babel preset rewrites `class X extends Y {}` into a function
+> plus a helper call, and the helper is an anonymous import — there is no class
+> left in the bundle for the generator to recognise. The preset keeps classes
+> under the `hermes-stable` transform profile, so the fix is to bundle the
+> generator's input with that profile; wiring it through Metro is the open
+> piece.
+>
+> Until then: unnamed `@NativeClass()` classes are generated on the device and
+> work in both debug and release. `@JavaProxy` raises
+> `LookedUpClassNotFound`.
 
 If you would rather not use decorators, the runtime API is always available and
 needs nothing from the bundler:

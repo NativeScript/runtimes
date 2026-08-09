@@ -156,3 +156,58 @@ console.log("native-class visitor tests passed");
 }
 
 console.log("global-prefix tests passed");
+
+// The call form. A project without the Babel decorator plugin writes this, and
+// it must produce exactly what the decorator form produces.
+{
+  const { named } = parse(`
+    const Ticker = JavaProxy('com.example.nsrn.Ticker')(
+      class Ticker extends global.java.lang.Object {
+        toString() { return 'ticked'; }
+      }
+    );
+  `);
+  assert.strictEqual(named.length, 1, "JavaProxy(...)(class) must emit a binding");
+  const f = fields(named[0]);
+  assert.strictEqual(f[0], "java.lang.Object");
+  assert.strictEqual(f[5], "toString");
+  assert.strictEqual(f[6], "com.example.nsrn.Ticker");
+}
+
+// Bare call form, no arguments.
+{
+  const { unnamed } = parse(`
+    const L = NativeClass(class MyList extends global.java.util.ArrayList {
+      size() { return 0; }
+    });
+  `);
+  assert.strictEqual(unnamed.length, 1);
+  assert.strictEqual(fields(unnamed[0])[0], "java.util.ArrayList");
+  assert.strictEqual(fields(unnamed[0])[4], "MyList");
+}
+
+// Nested call form: both wrappers have to be seen.
+{
+  const { named } = parse(`
+    const B = JavaProxy('com.example.Both')(
+      Interfaces([java.lang.Runnable, java.util.concurrent.Callable])(
+        class Both extends global.java.lang.Object { run() {} call() {} }
+      )
+    );
+  `);
+  assert.strictEqual(named.length, 1);
+  const f = fields(named[0]);
+  assert.strictEqual(f[6], "com.example.Both");
+  assert.strictEqual(f[8], "java.lang.Runnable,java.util.concurrent.Callable");
+}
+
+// An ordinary call taking a class must not be mistaken for a decorator.
+{
+  const { named, unnamed } = parse(`
+    const x = describe(class Plain extends global.java.lang.Object { run() {} });
+  `);
+  assert.strictEqual(named.length, 0);
+  assert.strictEqual(unnamed.length, 0);
+}
+
+console.log("call-form decorator tests passed");

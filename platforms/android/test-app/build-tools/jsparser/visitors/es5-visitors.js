@@ -507,7 +507,8 @@ var es5_visitors = (function () {
   function traverseNativeClassDeclaration(path, config) {
     var node = path.node;
 
-    if (!node.decorators || node.decorators.length === 0) {
+    var appliedDecorators = _collectAppliedDecorators(path);
+    if (appliedDecorators.length === 0) {
       return;
     }
 
@@ -531,8 +532,8 @@ var es5_visitors = (function () {
     var isNativeClass = false;
     var implementedInterfaces = [];
 
-    for (var i = 0; i < node.decorators.length; i++) {
-      var expression = node.decorators[i].expression;
+    for (var i = 0; i < appliedDecorators.length; i++) {
+      var expression = appliedDecorators[i];
       var isCall = types.isCallExpression(expression);
       var name = isCall
         ? expression.callee && expression.callee.name
@@ -621,6 +622,49 @@ var es5_visitors = (function () {
     }
 
     normalExtendsArr.push(lineToWrite);
+  }
+
+  /*
+   *	Every decorator applied to a class, however it was spelled.
+   *
+   *	`@NativeClass class X {}` keeps its decorators on the class node, but a
+   *	decorator is only syntax: a project without the Babel plugin writes the
+   *	same thing as a call, `NativeClass(class X {})`, and so does any bundler
+   *	that downlevels decorators it cannot emit. Both forms reach the runtime
+   *	identically, so both have to be recognised here or a class is silently
+   *	left without a binding.
+   *
+   *	The call form nests, `JavaProxy("a.b.C")(Interfaces([...])(class X {}))`,
+   *	so the chain is walked while the class is still the first argument.
+   *
+   *	What gets collected is the callee, which lands on the same shapes the
+   *	decorator form produces: an Identifier for a bare decorator, a
+   *	CallExpression for one with arguments.
+   */
+  function _collectAppliedDecorators(path) {
+    var expressions = [];
+    var node = path.node;
+
+    if (node.decorators) {
+      for (var i = 0; i < node.decorators.length; i++) {
+        expressions.push(node.decorators[i].expression);
+      }
+    }
+
+    var current = path;
+    var parent = current.parentPath;
+    while (
+      parent &&
+      types.isCallExpression(parent.node) &&
+      parent.node.arguments.length > 0 &&
+      parent.node.arguments[0] === current.node
+    ) {
+      expressions.push(parent.node.callee);
+      current = parent;
+      parent = current.parentPath;
+    }
+
+    return expressions;
   }
 
   /*
