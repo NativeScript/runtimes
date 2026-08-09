@@ -26,8 +26,21 @@ public class Generator {
     private static final String MDG_WHITELIST = "whitelist.mdg";
     private static final String MDG_BLACKLIST = "blacklist.mdg";
     private static final String METADATA_JAVA_OUT = "mdg-java-out.txt";
+    private static final String PROGUARD_RULES_OUT = "metadata-keep-rules.pro";
+    private static final String CLOSURE_DEPTH_ARGUMENT_BEGINNING = "signatureClosureDepth=";
+    private static final String PROGUARD_OUT_ARGUMENT_BEGINNING = "proguardOut=";
 
     private static boolean verbose_mode = false;
+
+    /* How far signature types are chased when growing the whitelist. Unbounded
+     * by default: a bounded closure leaves the last level's signatures liable
+     * to be widened, and a widened signature is a NoSuchMethodError at the call
+     * site rather than a build error. Overridable only for measurement. */
+    private static int signatureClosureDepth = Integer.MAX_VALUE;
+
+    /* Where to write the R8 keep rules. Set by the build; defaults to beside
+     * the metadata output rather than inside it. */
+    private static String proguardRulesPath = null;
 
     /**
      * @param args arguments
@@ -60,6 +73,15 @@ public class Generator {
                 throw new InvalidParameterException(String.format("You need to pass a file containing a list of jar/class paths, so metadata can be generated for them! %s\n", e.getMessage()));
             }
 
+            // Deliberately not under metadataOutputDir: that directory is the
+            // app's assets, and the keep rules are build input for R8, not
+            // something to ship inside the APK.
+            String proguardOut = proguardRulesPath != null
+                    ? proguardRulesPath
+                    : new File(metadataOutputDir, "../" + PROGUARD_RULES_OUT).getCanonicalPath();
+
+            Builder.configureClosure(signatureClosureDepth, proguardOut);
+
             TreeNode root = Builder.build(params, classes);
 
             FileOutputStream ovs = new FileOutputStream(new File(metadataOutputDir, "treeValueStream.dat"));
@@ -90,6 +112,11 @@ public class Generator {
             if (arg.startsWith(ANALYTICS_ARGUMENT_BEGINNING)) {
                 String filePath = arg.replace(ANALYTICS_ARGUMENT_BEGINNING, "");
                 AnalyticsConfiguration.enableAnalytics(filePath);
+            } else if (arg.startsWith(CLOSURE_DEPTH_ARGUMENT_BEGINNING)) {
+                signatureClosureDepth = Integer.parseInt(
+                        arg.substring(CLOSURE_DEPTH_ARGUMENT_BEGINNING.length()));
+            } else if (arg.startsWith(PROGUARD_OUT_ARGUMENT_BEGINNING)) {
+                proguardRulesPath = arg.substring(PROGUARD_OUT_ARGUMENT_BEGINNING.length());
             } else if (VERBOSE_FLAG_NAME.equals(arg)) {
                 verbose_mode = true;
                 MetadataFilterConsoleLogger.INSTANCE.setEnabled(true);

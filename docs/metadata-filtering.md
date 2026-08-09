@@ -187,7 +187,58 @@ already fail-open -- absent `whitelist.mdg`, `UserPatternsCollection` allows
 `*:*` -- so a build that cannot analyse its input ships everything, which is the
 correct direction to fail.
 
+## Result
+
+Implemented and measured on the same 520-spec suite:
+
+| Metadata | Size | Result |
+|---|---|---|
+| Unfiltered | 2.83 MB | 520 specs, 0 failures |
+| Exact usage, no closure | 136 KB | crashes at launch |
+| **Generated seed + closure** | **700 KB** | **520 specs, 0 failures** |
+
+**75% smaller, suite green.** The seed is 449 classes harvested from the app's
+own JS; the closure grows it to 2,183 -- and stops there, well short of the
+classpath, so the unbounded closure is affordable and no depth limit is needed.
+
+Getting from "runs with 15 failures" to green took four fixes, each a category
+the first measurement predicted:
+
+1. **Signature closure** -- supertypes, nested classes, and the types in every
+   retained signature. Launch crash -> runs.
+2. **Kotlin extension functions** -- declared in a file class the app never
+   names and that nothing references, so the closure has to reach it from the
+   receiver side. Extension collection now runs *before* the closure, and
+   unfiltered, or the classes it needs are already gone. 10 failures -> 2.
+3. **Keyword-mangled roots** -- `in.tns.tests.JavascriptKeywordClass` is written
+   `$in.…` in JS. The `$` prefix is now treated as proof of a Java package, so
+   this no longer depends on the hardcoded root list.
+4. **Package spine** -- `if (android.support.design && …)` threw once every
+   class under `android.support` was filtered out and the package node went
+   with them. Empty package nodes are recreated for packages the seed names --
+   but only up to the deepest prefix that exists on the classpath. Inventing
+   the rest breaks the same guard the other way: it passes, and the constructor
+   behind it is undefined.
+
+### ProGuard/R8 keep rules
+
+The generator writes `metadata-keep-rules.pro` (build dir, not assets) from the
+same retained set. Metadata says what JS can name; R8 decides what survives into
+the dex; neither can see the other's input, so both are driven from one set.
+Classes absent from the rules are absent from the metadata too, so R8 is free to
+remove them. Shrinking is still off by default -- the rules make it safe to turn
+on, they do not turn it on.
+
+Members are kept wholesale per retained class. Per-member rules would need the
+JS side to have resolved every call exactly, which it cannot; the class-level
+strip is where the size comes from anyway.
+
 ## Status
 
-Done: both instruments, the measurements above, the failure taxonomy.
-Not started: closure (5-7), easing (8-9), verification (10-11).
+Done: both instruments, the taxonomy, the closure, the easing rules, the seed
+generator, the keep-rules emitter. Green on the 520-spec suite.
+
+Not done: wiring the seed generation into the Gradle task automatically (it is
+run by hand today), the RN/guest side, and the build-time referential-closure
+check (11) -- the closure constructs the set correctly, but nothing yet
+re-verifies the emitted tree independently.

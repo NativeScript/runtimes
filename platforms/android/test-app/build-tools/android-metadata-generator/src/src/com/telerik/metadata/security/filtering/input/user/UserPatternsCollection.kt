@@ -15,6 +15,15 @@ object UserPatternsCollection : PatternsCollection {
         private set
 
 
+    /**
+     * Whether a whitelist file was actually supplied. Distinguishes "the app
+     * asked for everything" from "the app asked for nothing in particular",
+     * which the default `*:*` entry alone cannot express -- and which decides
+     * whether the closure runs at all.
+     */
+    var whitelistProvided: Boolean = false
+        private set
+
     override fun populateWhitelistEntriesFromFile(filePath: String) {
         val path = Paths.get(filePath)
 
@@ -22,6 +31,7 @@ object UserPatternsCollection : PatternsCollection {
             return
         }
 
+        whitelistProvided = true
         whitelistEntries = parseFile(path) +
                 PatternEntry("java.lang", "Object") +
                 PatternEntry("com.tns.gen*", "*")

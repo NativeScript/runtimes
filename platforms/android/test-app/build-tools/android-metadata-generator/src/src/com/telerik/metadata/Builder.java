@@ -19,6 +19,13 @@ import com.telerik.metadata.parsing.kotlin.metadata.ClassMetadataParser;
 import com.telerik.metadata.parsing.kotlin.metadata.bytecode.BytecodeClassMetadataParser;
 import com.telerik.metadata.security.classes.SecuredClassRepository;
 import com.telerik.metadata.security.classes.SecuredNativeClassDescriptor;
+import com.telerik.metadata.security.filtering.blacklisting.MetadataBlacklist;
+import com.telerik.metadata.security.filtering.closure.MetadataClosure;
+import com.telerik.metadata.security.filtering.closure.ProguardRulesWriter;
+import com.telerik.metadata.security.filtering.input.PatternEntry;
+import com.telerik.metadata.security.filtering.input.user.UserPatternsCollection;
+import com.telerik.metadata.security.filtering.matching.impl.PatternMatcherImpl;
+import com.telerik.metadata.security.filtering.whitelisting.MetadataWhitelist;
 import com.telerik.metadata.storage.functions.FunctionsStorage;
 import com.telerik.metadata.storage.functions.extensions.ExtensionFunctionsStorage;
 import com.telerik.metadata.security.MetadataSecurityViolationException;
@@ -83,11 +90,16 @@ public class Builder {
 
         String[] classNames = SecuredClassRepository.INSTANCE.getClassNames();
 
+        // Before the closure, and deliberately unfiltered: a Kotlin extension
+        // function is declared on a file class the app never names, so the
+        // closure can only retain that class if it already knows the function
+        // exists. Entries for classes that go on to be dropped are inert --
+        // the storage is only ever consulted for a class being generated.
         for (String className : classNames) {
             try {
-                SecuredNativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClass(className);
-                if (clazz.isUsageAllowed()) {
-                    tryCollectKotlinExtensionFunctions(clazz.getNativeDescriptor());
+                NativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClassUnfiltered(className);
+                if (clazz != null) {
+                    tryCollectKotlinExtensionFunctions(clazz);
                 }
             } catch (Throwable e) {
                 System.out.println("Skip " + className);
@@ -95,6 +107,11 @@ public class Builder {
                 //e.printStackTrace();
             }
         }
+
+        // Grow the whitelist into something the tree can be built from before
+        // anything is generated. Skipped entirely when no whitelist was given,
+        // which is what keeps the default behaviour "emit everything".
+        applyClosureIfRequested();
 
         for (String className : classNames) {
             try {
@@ -117,6 +134,8 @@ public class Builder {
             }
         }
 
+        ensureSeedPackageSpine(root);
+
         System.out.println("Added   Properties "+TreeNode.addedProperties);
         System.out.println("Ignored Properties "+TreeNode.skippedProperties+" duplicates.");
         System.out.println("Added   Methods "+TreeNode.addedMethods);
@@ -127,6 +146,131 @@ public class Builder {
 
 
         return root;
+    }
+
+    // Set from Generator before build() runs.
+    private static int signatureClosureDepth = Integer.MAX_VALUE;
+    private static String proguardRulesPath = null;
+
+    public static void configureClosure(int depth, String proguardOut) {
+        signatureClosureDepth = depth;
+        proguardRulesPath = proguardOut;
+    }
+
+    /**
+     * Turns the whitelist into the concrete set of classes to emit, and writes
+     * the matching R8 keep rules. A no-op unless a whitelist was supplied: with
+     * no filter to seed from, the closure would just be every class there is.
+     */
+    private static void applyClosureIfRequested() {
+        if (!UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
+            return;
+        }
+
+        PatternMatcherImpl patternMatcher = new PatternMatcherImpl();
+        MetadataWhitelist seedFilter = new MetadataWhitelist(
+                UserPatternsCollection.INSTANCE.getWhitelistEntries(), patternMatcher);
+        MetadataBlacklist blacklistFilter = new MetadataBlacklist(
+                UserPatternsCollection.INSTANCE.getBlacklistEntries(), patternMatcher);
+
+        MetadataClosure closure = new MetadataClosure(
+                SecuredClassRepository.INSTANCE.getCachedProviders(),
+                blacklistFilter,
+                signatureClosureDepth);
+
+        Set<String> retained = closure.compute(descriptor -> {
+            String simplified = descriptor.getClassName()
+                    .substring(descriptor.getPackageName().length())
+                    .replace('$', '.');
+            while (simplified.startsWith(".")) {
+                simplified = simplified.substring(1);
+            }
+            return seedFilter.isAllowed(descriptor.getPackageName(), simplified).isAllowed();
+        });
+
+        SecuredClassRepository.INSTANCE.applyClosure(retained);
+
+        System.out.println(String.format(
+                "Metadata filter: seed %d classes -> retained %d after closure (depth %s).",
+                closure.getSeedSize(), retained.size(),
+                signatureClosureDepth == Integer.MAX_VALUE
+                        ? "unbounded" : String.valueOf(signatureClosureDepth)));
+
+        if (proguardRulesPath != null) {
+            ProguardRulesWriter.INSTANCE.write(new File(proguardRulesPath), retained);
+            System.out.println("Metadata filter: wrote keep rules to " + proguardRulesPath);
+        }
+    }
+
+    /**
+     * Creates an empty package node for every package the seed named outright,
+     * whether or not any class under it survived.
+     *
+     * JS feature-detects with `if (a.b.C)`. Unfiltered, `a.b` is an object and
+     * a missing `C` reads as undefined -- falsy, and the guard does its job.
+     * Filter every class out of `a.b` and the package node disappears with
+     * them, so the same guard throws:
+     *
+     *     TypeError: Cannot read property 'design' of undefined
+     *
+     * An empty package costs a name and a node. Turning a working guard into a
+     * crash costs the app.
+     *
+     * Restricted to packages that exist on the classpath. A package the filter
+     * emptied must stay visible; a package that was never there must stay
+     * absent, or the same guard breaks the other way -- it passes, and the
+     * constructor behind it is undefined.
+     */
+    private static void ensureSeedPackageSpine(TreeNode root) {
+        if (!UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
+            return;
+        }
+
+        Set<String> existingPackages = new HashSet<>();
+        for (ClassMapProvider provider : SecuredClassRepository.INSTANCE.getCachedProviders()) {
+            for (NativeClassDescriptor descriptor : provider.getClassMap().values()) {
+                String packageName = descriptor.getPackageName();
+                while (!packageName.isEmpty() && existingPackages.add(packageName)) {
+                    int idx = packageName.lastIndexOf('.');
+                    packageName = idx < 0 ? "" : packageName.substring(0, idx);
+                }
+            }
+        }
+
+        for (PatternEntry entry : UserPatternsCollection.INSTANCE.getWhitelistEntries()) {
+            String packagePattern = entry.getPackagePattern();
+
+            // Only literal package names; a wildcard does not name a package to create.
+            if (packagePattern.isEmpty()
+                    || packagePattern.contains("*")
+                    || packagePattern.contains("?")) {
+                continue;
+            }
+
+            // Walk the prefixes and stop at the first that does not exist on
+            // the classpath. `android.support.design` is named by the app but
+            // was never there; its parent `android.support` was, via another
+            // library, and is what the guard actually dereferences.
+            TreeNode node = root;
+            StringBuilder soFar = new StringBuilder();
+            for (String part : packagePattern.split("\\.")) {
+                if (soFar.length() > 0) {
+                    soFar.append('.');
+                }
+                soFar.append(part);
+
+                if (!existingPackages.contains(soFar.toString())) {
+                    break;
+                }
+
+                TreeNode child = node.getChild(part);
+                if (child == null) {
+                    child = node.createChild(part);
+                    child.nodeType = TreeNode.Package;
+                }
+                node = child;
+            }
+        }
     }
 
     private static void tryCollectKotlinExtensionFunctions(NativeClassDescriptor classDescriptor) {

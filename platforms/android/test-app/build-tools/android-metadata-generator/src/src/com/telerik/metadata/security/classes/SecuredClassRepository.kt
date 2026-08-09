@@ -55,7 +55,40 @@ object SecuredClassRepository {
         return SecuredNativeClassDescriptor(false, NativeClassDescriptor.Missing)
     }
 
+    /**
+     * When a closure has been computed, it -- not the raw whitelist -- decides
+     * what is emitted. The whitelist is only the seed it grew from; a class the
+     * closure added is required for the tree to be internally consistent, so
+     * consulting the patterns again here would drop it right back out.
+     * Null means no filtering was requested and everything is allowed.
+     */
+    private var retainedClasses: Set<String>? = null
+
+    fun applyClosure(retained: Set<String>) {
+        retainedClasses = retained
+    }
+
+    fun getRetainedClasses(): Set<String>? = retainedClasses
+
+    fun getCachedProviders(): List<ClassMapProvider> = cachedProviders
+
+    /** Bypasses filtering; for the passes that must run before the filter exists. */
+    fun findClassUnfiltered(className: String): NativeClassDescriptor? =
+            findClassFromProviders(className)
+
     private fun isClassUsageAllowed(packageName: String, className: String): Boolean {
+        val retained = retainedClasses
+        if (retained != null) {
+            /* className arrives simplified ($ -> .); the closure is keyed by the
+             * binary name, which is what the class map uses. */
+            val binaryName = if (packageName.isEmpty()) {
+                className.replace('.', '$')
+            } else {
+                packageName + "." + className.replace('.', '$')
+            }
+            return binaryName in retained
+        }
+
         val whitelistFilterResult = whitelist.isAllowed(packageName, className)
         val blacklistFilterResult = blacklist.isAllowed(packageName, className)
 

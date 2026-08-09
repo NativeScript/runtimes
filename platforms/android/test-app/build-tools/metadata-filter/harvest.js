@@ -68,8 +68,25 @@ function splitPackageAndClass(segments) {
   return null;
 }
 
+/* Extra roots supplied by the build, for classpaths whose top-level packages
+ * the list above does not anticipate. The list is a convenience, not a
+ * contract -- a package name it has never heard of is exactly the case this
+ * escape hatch exists for. */
+const extraRoots = [];
+
 function isJavaRoot(name) {
-  return JAVA_ROOTS.indexOf(name) !== -1;
+  return JAVA_ROOTS.indexOf(name) !== -1 || extraRoots.indexOf(name) !== -1;
+}
+
+/*
+ * A root package whose name is a JS keyword cannot be a global identifier, so
+ * MetadataNode::CreateTopLevelNamespaces exposes it prefixed with '$' --
+ * `in.tns.foo.Bar` is reached from JS as `$in.tns.foo.Bar`. The prefix is
+ * therefore a positive signal that a chain is Java, and the only way to see
+ * such a package at all.
+ */
+function unmangleRoot(name) {
+  return name.length > 1 && name[0] === "$" ? name.slice(1) : name;
 }
 
 class Harvest {
@@ -120,7 +137,9 @@ function staticChain(node) {
   if (!cur || cur.type !== "Identifier") {
     return null;
   }
-  segments.push(cur.name);
+  /* A '$'-prefixed root is a JS-keyword package; recover the real name. */
+  segments.push(unmangleRoot(cur.name));
+  const keywordPrefixed = cur.name !== segments[0];
 
   for (let i = stack.length - 1; i >= 0; i--) {
     const m = stack[i];
@@ -140,7 +159,7 @@ function staticChain(node) {
     segments.push(m.property.name);
   }
 
-  return { segments, truncated };
+  return { segments, truncated, keywordPrefixed };
 }
 
 function harvestFile(filePath, source, harvest) {
@@ -178,7 +197,9 @@ function harvestFile(filePath, source, harvest) {
       }
 
       const chain = staticChain(p.node);
-      if (!chain || !isJavaRoot(chain.segments[0])) return;
+      /* The '$' prefix is itself proof of a Java package, so such a chain is
+       * accepted whether or not its root is on the known list. */
+      if (!chain || !(chain.keywordPrefixed || isJavaRoot(chain.segments[0]))) return;
 
       const split = splitPackageAndClass(chain.segments);
 
@@ -268,6 +289,8 @@ function main() {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--json") {
       jsonOut = args[++i];
+    } else if (args[i] === "--extra-root") {
+      extraRoots.push(args[++i]);
     } else {
       targets.push(args[i]);
     }
