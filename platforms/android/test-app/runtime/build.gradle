@@ -23,6 +23,13 @@ if (!["napi", "jsi"].contains(bindingLayer)) {
     throw new GradleException("bindingLayer must be 'napi' or 'jsi', got '${bindingLayer}'")
 }
 
+// Name generated bindings after what they contain rather than after the call
+// site that created them. Off here so the standalone runtime keeps its existing
+// names; on by default only where the bundler belongs to an embedder. The static
+// binding generator has to be told the same thing -- see -Pcontent-keyed-bindings
+// in app/build.gradle.
+def contentKeyedBindings = project.hasProperty("content-keyed-bindings")
+
 printf("Compiling NativeScript with %s (runtime: %s).\n", jsEngine, bindingLayer)
 
 // Version.h moved under the per-binding runtime tree when the jsi runtime was
@@ -195,6 +202,10 @@ android {
                 }
 
                 arguments.add("-DNS_BINDING=${bindingLayer}")
+
+                if (contentKeyedBindings) {
+                    arguments.add("-DNS_CONTENT_KEYED_BINDINGS=1")
+                }
 
                 if (bytecodeStacktraces) {
                     arguments.add("-DNS_BYTECODE=1")

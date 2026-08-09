@@ -75,6 +75,16 @@ private:
 
     static string CreateFullClassName(const std::string& className, const std::string& extendNameAndLocation);
 
+    static string CreateContentKey(const std::string& baseClassName,
+                                   std::vector<std::string> interfaceNames,
+                                   std::vector<std::string> methodNames);
+
+    // Whether an unnamed extend() names its class by content rather than by call
+    // site. Always available as a fallback when no usable location exists; the
+    // default is on wherever the bundler is the embedder's, since the generator
+    // and the runtime cannot agree on coordinates there.
+    static bool ContentKeyedBindingsEnabled();
+
     static JsValue CreateArrayObjectConstructor(JsRuntime &rt);
 
     static void SetInstanceMetadata(JsRuntime &rt, const JsValue &object, MetadataNode* node);

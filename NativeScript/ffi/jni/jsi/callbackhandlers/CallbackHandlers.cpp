@@ -614,14 +614,21 @@ JsValue CallbackHandlers::CreateJSWrapper(JsRuntime &rt, jint javaObjectID,
     return objectManager->CreateJSWrapper(javaObjectID, typeName);
 }
 
-jobjectArray
-CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
-                                           const JsValue &implementationObject) {
-    if (!implementationObject.isObject()) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+// The two Collect* helpers below define which names take part in a binding.
+// Content-keyed class names hash exactly these sets, so the static binding
+// generator has to reproduce them from the bundle byte for byte -- a name that
+// is collected here but not there (or the reverse) yields two different class
+// names for one extend() site, which fails at runtime as LookedUpClassNotFound.
+// Keeping the JNI arrays and the hash on one implementation is what makes that
+// contract checkable in a single place.
+vector<string>
+CallbackHandlers::CollectImplementedInterfaceNames(JsRuntime &rt,
+                                                   const JsValue &implementationObject) {
+    vector<string> interfaceNames;
 
-    vector<jstring> interfacesToImplement;
+    if (!implementationObject.isObject()) {
+        return interfaceNames;
+    }
 
     auto prop = implementationObject.asObjectBorrowed(rt).getProperty(rt, "interfaces");
 
@@ -637,35 +644,23 @@ CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
 
                 node = Util::ReplaceAll(node, std::string("/"), std::string("."));
 
-                jstring value = jEnv.NewStringUTF(node.c_str());
-                interfacesToImplement.push_back(value);
+                interfaceNames.push_back(node);
             }
         }
     }
 
-    int interfacesCount = interfacesToImplement.size();
-
-    jobjectArray implementedInterfaces = CallbackHandlers::GetJavaStringArray(jEnv,
-                                                                              interfacesCount);
-    for (int i = 0; i < interfacesCount; i++) {
-        jEnv.SetObjectArrayElement(implementedInterfaces, i, interfacesToImplement[i]);
-    }
-
-    for (int i = 0; i < interfacesCount; i++) {
-        jEnv.DeleteLocalRef(interfacesToImplement[i]);
-    }
-
-    return implementedInterfaces;
+    return interfaceNames;
 }
 
-jobjectArray
-CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
-                                     const JsValue &implementationObject) {
-    if (!implementationObject.isObject()) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+vector<string>
+CallbackHandlers::CollectMethodOverrideNames(JsRuntime &rt,
+                                             const JsValue &implementationObject,
+                                             bool functionsOnly) {
+    vector<string> methodNames;
 
-    vector<jstring> methodNames;
+    if (!implementationObject.isObject()) {
+        return methodNames;
+    }
 
     auto implObject = implementationObject.asObjectBorrowed(rt);
 
@@ -689,14 +684,92 @@ CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
             continue;
         }
 
+        // Runtime bookkeeping stamped onto the implementation object, not
+        // something the user wrote. getOwnPropertyNames returns non-enumerable
+        // properties too, so these have to be filtered by name.
+        if (name == EXTEND_CTOR_CACHE_KEY || name == CLASS_IMPLEMENTATION_OBJECT) {
+            continue;
+        }
+
+        if (!functionsOnly) {
+            // Hashing, not binding. The generator reads the implementation object
+            // out of the bundle, where it cannot tell a function from any other
+            // value -- `{ foo: someIdentifier }` is a method it must assume, and
+            // a statically-typed guess either way would disagree with what this
+            // enumeration sees. Taking every name instead makes the two sides
+            // agree by construction on everything the generator can parse.
+            //
+            // The three exclusions below are the names the generator provably
+            // never puts in the method field: `super` and `constructor` are
+            // artifacts of how the implementation object is built (ts_helpers
+            // extends with the class prototype, which always carries a
+            // constructor), and an array-valued `interfaces` is routed to its own
+            // field instead.
+            if (name == "constructor") {
+                continue;
+            }
+
+            string lowered = name;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            auto value = implObject.getProperty(rt, element);
+            bool isInterfacesDeclaration = lowered == "interfaces" && js_util::is_array(rt, value);
+            if (isInterfacesDeclaration) {
+                continue;
+            }
+
+            methodNames.push_back(name);
+            continue;
+        }
+
         auto method = implObject.getProperty(rt, element);
 
         bool methodFound = method.isObject() && method.asObjectBorrowed(rt).isFunction(rt);
 
         if (methodFound) {
-            jstring value = jEnv.NewStringUTF(name.c_str());
-            methodNames.push_back(value);
+            methodNames.push_back(name);
         }
+    }
+
+    return methodNames;
+}
+
+jobjectArray
+CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
+                                           const JsValue &implementationObject) {
+    auto names = CollectImplementedInterfaceNames(rt, implementationObject);
+
+    vector<jstring> interfacesToImplement;
+    interfacesToImplement.reserve(names.size());
+    for (const auto &name: names) {
+        interfacesToImplement.push_back(jEnv.NewStringUTF(name.c_str()));
+    }
+
+    int interfacesCount = interfacesToImplement.size();
+
+    jobjectArray implementedInterfaces = CallbackHandlers::GetJavaStringArray(jEnv,
+                                                                              interfacesCount);
+    for (int i = 0; i < interfacesCount; i++) {
+        jEnv.SetObjectArrayElement(implementedInterfaces, i, interfacesToImplement[i]);
+    }
+
+    for (int i = 0; i < interfacesCount; i++) {
+        jEnv.DeleteLocalRef(interfacesToImplement[i]);
+    }
+
+    return implementedInterfaces;
+}
+
+jobjectArray
+CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
+                                     const JsValue &implementationObject) {
+    auto names = CollectMethodOverrideNames(rt, implementationObject);
+
+    vector<jstring> methodNames;
+    methodNames.reserve(names.size());
+    for (const auto &name: names) {
+        methodNames.push_back(jEnv.NewStringUTF(name.c_str()));
     }
 
     int methodCount = methodNames.size();

@@ -541,6 +541,13 @@ task runSbg(type: BuildToolTask) {
         paramz.add("-line-column-primjs")
     }
 
+    // Must be passed together with -Pcontent-keyed-bindings on :runtime -- the
+    // generated names and the names the runtime looks up are two halves of one
+    // scheme, and half of it is a silent LookedUpClassNotFound.
+    if (project.hasProperty("content-keyed-bindings")) {
+        paramz.add("-content-keyed-bindings")
+    }
+
     setOutputs outLogger
 
     args paramz

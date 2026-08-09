@@ -121,6 +121,21 @@ namespace tns {
         static jobjectArray
         GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv, const JsValue &implementationObject);
 
+        /*
+         * The name sets the two Get* helpers above are built from. Exposed so that
+         * content-keyed class names can hash the same sets the generated binding is
+         * built out of, without a second copy of the filtering rules.
+         */
+        // functionsOnly selects what the names are for: true builds the array the
+        // dex generator overrides against, false the set a content-keyed class
+        // name hashes. The two differ deliberately -- see the implementation.
+        static std::vector<std::string>
+        CollectMethodOverrideNames(JsRuntime &rt, const JsValue &implementationObject,
+                                   bool functionsOnly = true);
+
+        static std::vector<std::string>
+        CollectImplementedInterfaceNames(JsRuntime &rt, const JsValue &implementationObject);
+
         static JsValue EnableVerboseLoggingMethodCallback(JsRuntime &rt, const JsValue &thisVal,
                                                           const JsValue *args, size_t argc);
 

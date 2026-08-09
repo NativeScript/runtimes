@@ -10,6 +10,10 @@
 #define  PROP_KEY_CLASS "class"
 #define  PRIVATE_TYPE_NAME "#typename"
 #define  CLASS_IMPLEMENTATION_OBJECT "t::ClassImplementationObject"
+// Identifies an implementation object across repeated extend() calls, so the
+// extended constructor can be cached per implementation rather than per
+// generated class name -- content-keyed names are shared by design.
+#define  EXTEND_CTOR_CACHE_KEY "t::ExtendCtorCacheKey"
 #define  PROP_KEY_SUPER "super"
 #define  PROP_KEY_SUPERVALUE "supervalue"
 #define  PRIVATE_JSINFO "#js_info"

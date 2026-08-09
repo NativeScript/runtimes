@@ -468,6 +468,14 @@ if (NS_BYTECODE)
     target_compile_definitions(NativeScript PRIVATE NS_BYTECODE_ENABLED)
 endif ()
 
+# Name generated bindings after their content rather than their call site. Must
+# be passed together with -content-keyed-bindings to the static binding
+# generator; the two names are halves of one scheme. Wired from
+# runtime/build.gradle.
+if (NS_CONTENT_KEYED_BINDINGS)
+    target_compile_definitions(NativeScript PRIVATE NS_CONTENT_KEYED_BINDINGS)
+endif ()
+
 # if("${ANDROID_ABI}" MATCHES "armeabi-v7a$" OR "${ANDROID_ABI}" MATCHES "x86$")
 #     # On API Level 19 and lower we need to link with android_support
 #     # because it contains some implementation of functions such as "strtoll" and "strtoul"

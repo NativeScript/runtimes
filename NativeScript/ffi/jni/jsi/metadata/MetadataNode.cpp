@@ -545,6 +545,71 @@ string MetadataNode::CreateFullClassName(const std::string &className,
     return fullClassName;
 }
 
+bool MetadataNode::ContentKeyedBindingsEnabled() {
+#if defined(NS_CONTENT_KEYED_BINDINGS)
+    return true;
+#elif defined(NS_JSI_HOST_RUNTIME)
+    // A guest runs inside the embedder's bundle, so no location key computed here
+    // can match one the generator computed from a source tree it never saw.
+    return true;
+#else
+    return false;
+#endif
+}
+
+// A class-name token derived from what the generated binding is actually made
+// of, rather than from where the extend() call happens to sit.
+//
+// The static binding generator writes a class out of exactly three inputs: the
+// base class, the implemented interfaces, and the overridden method names. Two
+// extend() sites that agree on all three produce byte-identical Java, so hashing
+// them is enough to name the class -- and two sites that collide are meant to
+// share, which is why the generator already treats a duplicate file with equal
+// content as a warning rather than an error.
+//
+// Location keys cannot do this once an embedder owns the bundler: the generator
+// reads source coordinates and the runtime reads bundle coordinates. A content
+// key needs no shared coordinate system at all.
+//
+// Sorted, because the runtime's order is JS own-property order and the
+// generator's is source order; the binding treats both sets as unordered.
+// FNV-1a rather than std::hash, which is not stable across implementations and
+// so could not be reproduced by the generator.
+string MetadataNode::CreateContentKey(const string &baseClassName,
+                                      vector<string> interfaceNames,
+                                      vector<string> methodNames) {
+    sort(interfaceNames.begin(), interfaceNames.end());
+    sort(methodNames.begin(), methodNames.end());
+
+    string canonicalBase = baseClassName;
+    canonicalBase = Util::ReplaceAll(canonicalBase, std::string("/"), std::string("."));
+
+    string payload = canonicalBase;
+    payload += "|";
+    for (size_t i = 0; i < interfaceNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += interfaceNames[i];
+    }
+    payload += "|";
+    for (size_t i = 0; i < methodNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += methodNames[i];
+    }
+
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c: payload) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+
+    char buffer[19];
+    snprintf(buffer, sizeof(buffer), "h%016llx", static_cast<unsigned long long>(hash));
+
+    DEBUG_WRITE("CreateContentKey: %s -> %s", payload.c_str(), buffer);
+
+    return string(buffer);
+}
+
 bool MetadataNode::IsValidExtendName(JsRuntime &rt, const JsValue &name) {
     string extendName = ArgConverter::ConvertToString(rt, name);
 
@@ -1845,11 +1910,28 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
             }
         }
 
+        auto useContentKey = false;
+
         if (hasDot) {
             extendName = JsValue(rt, args[0]);
             implementationObject = JsValue(rt, args[1]);
         } else {
-            bool validExtend = GetExtendLocation(rt, extendLocation, isTypeScriptExtend);
+            useContentKey = ContentKeyedBindingsEnabled();
+
+            // Skipped outright when content keying is on: this walks the stack
+            // purely to build a name, on every class creation.
+            bool validExtend =
+                    useContentKey || GetExtendLocation(rt, extendLocation, isTypeScriptExtend);
+
+            if (!validExtend) {
+                // No usable call site -- an anonymous frame, or a bundle the
+                // generator never indexed. Naming by content still works here,
+                // where before this was fatal.
+                useContentKey = true;
+                validExtend = true;
+                extendLocation.clear();
+            }
+
             extendName = js_util::to_js_string(rt, "");
             auto validArgs = ValidateExtendArguments(rt, argc, args, validExtend,
                                                      extendLocation,
@@ -1860,11 +1942,35 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
             }
         }
 
-
-        string extendNameAndLocation =
-                extendLocation + ArgConverter::ConvertToString(rt, extendName);
-        string fullClassName;
         string baseClassName = node->m_name;
+
+        // An explicitly named extend keeps its name in front of the hash. The
+        // generator reads the same name out of the bundle, so the two still
+        // agree, and it buys back two things the bare hash costs: a class name
+        // that says what it is in a stack trace, and uniqueness for the classes
+        // that need it. Anything Java instantiates by name -- an Activity, a
+        // Fragment, a Worker, anything reached by reflection -- cannot share a
+        // generated class, because the runtime has only the class name to find
+        // the JS implementation with. Naming such a class is what makes it
+        // unique; unnamed extends stay shared, which is the common case and the
+        // point of the scheme.
+        string extendNameString = ArgConverter::ConvertToString(rt, extendName);
+        string extendNameAndLocation;
+
+        if (useContentKey) {
+            string contentKey =
+                    CreateContentKey(baseClassName,
+                                     CallbackHandlers::CollectImplementedInterfaceNames(
+                                             rt, implementationObject),
+                                     CallbackHandlers::CollectMethodOverrideNames(
+                                             rt, implementationObject, /* functionsOnly */ false));
+            extendNameAndLocation =
+                    extendNameString.empty() ? contentKey : extendNameString + "_" + contentKey;
+        } else {
+            extendNameAndLocation = extendLocation + extendNameString;
+        }
+
+        string fullClassName;
         if (!hasDot) {
             fullClassName = TNS_PREFIX + CreateFullClassName(baseClassName, extendNameAndLocation);
         } else {
@@ -1877,12 +1983,43 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
                                                     implementationObject, isInterface);
         auto fullExtendedName = CallbackHandlers::ResolveClassName(rt, clazz);
 
-        auto cachedData = GetCachedExtendedClassData(rt, fullExtendedName);
+        auto implObject = implementationObject.asObjectBorrowed(rt);
+
+        // Which JS constructor to reuse is a different question from which Java
+        // class to load, and only the second one has to agree with the static
+        // binding generator.
+        //
+        // Two extend() calls with the same base, interfaces and overridden names
+        // share one generated Java class -- the Java is identical, and sharing it
+        // is the point. Their JS bodies are not identical, though, so caching the
+        // constructor under the class name would hand the second call the first
+        // call's implementation. Under content keying that is not a rare
+        // collision but the common case, so the constructor is cached per
+        // implementation object instead.
+        // The stamp identifies the object, not the class it was used to build:
+        // combining it with fullExtendedName keeps a second extend() of the same
+        // object against a *different* base a cache miss, so it still reaches the
+        // "used to extend another class" check below instead of silently
+        // returning the first class.
+        string ctorCacheKey = fullExtendedName;
+        if (useContentKey) {
+            auto stamped = implObject.getProperty(rt, EXTEND_CTOR_CACHE_KEY);
+            string implObjectId;
+            if (stamped.isString()) {
+                implObjectId = stamped.asString(rt).utf8(rt);
+            } else {
+                static std::atomic<uint64_t> s_implObjectCounter{0};
+                implObjectId = std::to_string(s_implObjectCounter.fetch_add(1));
+                implObject.setProperty(rt, EXTEND_CTOR_CACHE_KEY,
+                                       ArgConverter::convertToJsString(rt, implObjectId));
+            }
+            ctorCacheKey = fullExtendedName + "#" + implObjectId;
+        }
+
+        auto cachedData = GetCachedExtendedClassData(rt, ctorCacheKey);
         if (!js_util::is_null_or_undefined(cachedData.extendedCtorFunction)) {
             return JsValue(rt, cachedData.extendedCtorFunction);
         }
-
-        auto implObject = implementationObject.asObjectBorrowed(rt);
         auto implementationObjectName = implObject.getProperty(rt, CLASS_IMPLEMENTATION_OBJECT);
 
         if (js_util::is_null_or_undefined(implementationObjectName)) {
@@ -1934,10 +2071,31 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
 
         s_name2NodeCache.emplace(fullExtendedName, node);
 
-        ExtendedClassCacheData cacheData(JsValue(rt, extendFuncCtorValue), fullExtendedName,
-                                         node);
         auto cache = GetMetadataNodeCache(rt);
-        cache->ExtendedCtorFuncCache.emplace(fullExtendedName, std::move(cacheData));
+
+        // Two entries, because there are two ways in.
+        //
+        // From JS, extend() asks "have I already built a constructor for this
+        // implementation object?" -- keyed per object, so two identical-looking
+        // extends keep their own bodies.
+        //
+        // From Java, createJSInstanceNative has only the class name of the
+        // instance it is wrapping (CreateExtendedJSWrapper), so the class name
+        // has to resolve too. emplace leaves an existing entry alone, so for a
+        // shared generated class the first implementation registered is the one
+        // Java-side instantiation finds. That is unambiguous for a named extend
+        // -- naming it makes the class unique -- and inherently ambiguous for an
+        // unnamed one, which is why anything Java constructs by name should be
+        // named.
+        ExtendedClassCacheData byImplObject(JsValue(rt, extendFuncCtorValue), fullExtendedName,
+                                            node);
+        cache->ExtendedCtorFuncCache.emplace(ctorCacheKey, std::move(byImplObject));
+
+        if (ctorCacheKey != fullExtendedName) {
+            ExtendedClassCacheData byClassName(JsValue(rt, extendFuncCtorValue), fullExtendedName,
+                                               node);
+            cache->ExtendedCtorFuncCache.emplace(fullExtendedName, std::move(byClassName));
+        }
 
         return extendFuncCtorValue;
     });
