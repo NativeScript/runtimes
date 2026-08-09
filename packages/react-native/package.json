@@ -7,7 +7,9 @@
     "React Native",
     "TurboModule",
     "JSI",
-    "iOS"
+    "iOS",
+    "Android",
+    "Java"
   ],
   "repository": {
     "type": "git",
@@ -35,6 +37,7 @@
     "plugin",
     "src",
     "types",
+    "android",
     "ios",
     "metadata",
     "native-api",

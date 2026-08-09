@@ -8,6 +8,7 @@ const {
   ensureMetadataConfig,
   normalizeMetadataOptions,
 } = require("../plugin/withNativeScriptReactNative");
+const { configureAndroid } = require("./configure-android");
 
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -23,8 +24,11 @@ function projectRoot() {
 function printNextSteps() {
   console.log("NativeScript React Native configuration checked.");
   console.log("Next steps:");
-  console.log("  cd ios");
-  console.log("  RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install");
+  console.log("  iOS     : cd ios && RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install");
+  console.log("  Android : npx react-native run-android");
+  console.log("");
+  console.log("  Android typings are generated on demand:");
+  console.log("    cd android && ./gradlew generateNativeScriptTypingsDebug -PnsGenerateTypings=true");
 }
 
 function configure(argv = process.argv.slice(2)) {
@@ -86,6 +90,8 @@ function configure(argv = process.argv.slice(2)) {
       );
     }
   }
+
+  configureAndroid(root);
 
   printNextSteps();
 }

@@ -107,3 +107,5 @@ packages/react-native/android/.cxx/
 packages/react-native/android/build/
 # Staged by scripts/build_react_native_android_tools.sh at package time
 packages/react-native/android/tools/
+# Staged by scripts/build_react_native_android.sh at package time
+packages/react-native/android/src/main/java-runtime/

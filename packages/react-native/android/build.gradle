@@ -18,19 +18,22 @@ def safeExtGet(prop, fallback) {
   rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
-// The C++ and Java the runtime is made of. Two layouts are supported: the
-// published npm package, which carries a copy under native-api/, and this
-// repository, where the sources are the originals. Supporting both is what lets
-// a demo app build straight from a checkout with no staging step.
-// Keyed on the Android tree rather than on native-api/ itself: the iOS staging
-// step creates that directory too, with only the Objective-C bridge in it.
-def packagedRoot = file("${projectDir}/../native-api")
-def fromPackage = file("${packagedRoot}/runtime/android/jsi").exists()
-// Canonicalise before walking up. In a checkout the app reaches this package
+// The C++ and Java the runtime is made of. Two layouts are supported: this
+// repository, where the sources are the originals, and the published npm
+// package, which carries a staged copy under native-api/.
+//
+// The repository wins when both are present. A checkout also contains a staged
+// copy (scripts/build_react_native_android.sh leaves one behind), and preferring
+// it would mean edits to NativeScript/ silently did not reach the build.
+//
+// Canonicalise before walking up: in a checkout the app reaches this package
 // through a symlink in node_modules, and file("...") normalises ".." lexically
-// without ever following it -- so the walk has to start from the real path or
-// it lands in node_modules instead of at the repository root.
+// without ever following it, so the walk has to start from the real path or it
+// lands in node_modules instead of at the repository root.
 def repoRoot = projectDir.getCanonicalFile().parentFile.parentFile.parentFile
+def packagedRoot = file("${projectDir}/../native-api")
+def fromRepo = file("${repoRoot}/NativeScript/runtime/android/jsi").exists()
+def fromPackage = !fromRepo
 
 def nsRoot = fromPackage ? packagedRoot : file("${repoRoot}/NativeScript")
 // Two trees, exactly as the standalone runtime module composes them: com.tns.*

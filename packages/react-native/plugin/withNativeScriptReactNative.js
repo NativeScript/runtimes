@@ -245,6 +245,37 @@ function withNativeScriptMetadata(config, metadataOptions) {
   ]);
 }
 
+/**
+ * Applies the NativeScript Gradle script to the app module under prebuild.
+ *
+ * Autolinking already brings in the runtime; what this adds are the metadata and
+ * typings tasks, which read the app's own resolved classpath and so have to live
+ * in the app project.
+ */
+function withNativeScriptAndroidGradle(config) {
+  let withAppBuildGradle;
+  try {
+    ({withAppBuildGradle} = require('expo/config-plugins'));
+  } catch (error) {
+    return config;
+  }
+
+  return withAppBuildGradle(config, (modConfig) => {
+    const {APPLY_LINE} = require('../cli/configure-android');
+    let contents = modConfig.modResults.contents;
+
+    if (!contents.includes('@nativescript/react-native/android/nativescript.gradle')) {
+      const reactPlugin = /apply plugin: ["']com\.facebook\.react["']\s*\n/;
+      contents = reactPlugin.test(contents)
+        ? contents.replace(reactPlugin, (match) => `${match}${APPLY_LINE}\n`)
+        : `${APPLY_LINE}\n${contents}`;
+      modConfig.modResults.contents = contents;
+    }
+
+    return modConfig;
+  });
+}
+
 function withNativeScriptReactNative(config, options) {
   const normalized = normalizeOptions(options);
 
@@ -265,6 +296,7 @@ function withNativeScriptReactNative(config, options) {
     config = withNativeScriptTransforms(config, normalized.workletsBundleMode);
   }
   config = withNativeScriptMetadata(config, normalized.metadata);
+  config = withNativeScriptAndroidGradle(config);
 
   return config;
 }
@@ -277,5 +309,6 @@ module.exports.ensureMetroConfig = ensureMetroConfig;
 module.exports.BABEL_PLUGIN = BABEL_PLUGIN;
 module.exports.WORKLETS_BABEL_PLUGIN = WORKLETS_BABEL_PLUGIN;
 module.exports.ensureMetadataConfig = ensureMetadataConfig;
+module.exports.withNativeScriptAndroidGradle = withNativeScriptAndroidGradle;
 module.exports.normalizeMetadataOptions = normalizeMetadataOptions;
 module.exports.pkg = pkg;

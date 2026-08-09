@@ -1344,3 +1344,8 @@ const NativeScript = {
 };
 
 export default NativeScript;
+
+// The marker every class extending a native class carries. A runtime decorator,
+// so it works the same regardless of bundler or decorator dialect.
+export { NativeClass, Interfaces, NATIVE_CLASS } from "./NativeClass";
+export type { NativeClassOptions } from "./NativeClass";
