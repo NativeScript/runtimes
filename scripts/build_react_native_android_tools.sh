@@ -59,5 +59,13 @@ mkdir -p "$TOOLS_DIR/jsparser"
     --exclude package-lock.json .
 ) | (cd "$TOOLS_DIR/jsparser" && tar xf -)
 
+# Derives the metadata whitelist from the app's own bundle. Plain node scripts
+# that reuse the Babel packages jsparser already depends on.
+rm -rf "$TOOLS_DIR/metadata-filter"
+mkdir -p "$TOOLS_DIR/metadata-filter"
+cp "$TEST_APP_DIR/build-tools/metadata-filter/harvest.js" \
+   "$TEST_APP_DIR/build-tools/metadata-filter/seed.js" \
+   "$TOOLS_DIR/metadata-filter/"
+
 checkpoint "Staged:"
 ls -la "$TOOLS_DIR"

@@ -233,12 +233,78 @@ Members are kept wholesale per retained class. Per-member rules would need the
 JS side to have resolved every call exactly, which it cannot; the class-level
 strip is where the size comes from anyway.
 
+## Turning it on
+
+One flag, both builds. Off by default.
+
+```bash
+# runtime test-app
+./gradlew :app:assembleDebug -PnsFilterMetadata
+
+# a React Native app (release variants only -- debug has no bundle on disk)
+./gradlew :app:assembleRelease -PnsFilterMetadata
+```
+
+The seed is derived automatically from the app's own JS: the test-app reads its
+asset directory, and the RN plugin reuses the bundle the static binding
+generator already produces, so no third Metro run. An app-authored
+`whitelist.mdg` is concatenated with the generated one rather than replacing it
+-- both are keep-lists, so a hand-written entry can only ever add.
+
+Turning the flag off deletes the generated seed. A stale seed left behind would
+keep filtering on for a build that asked for it to be off, which is the
+confusing direction to fail.
+
+## The soundness check
+
+`ClosureVerifier` fails the build if the filter changed the meaning of any
+signature it emitted. It does not re-derive the closure -- it watches what
+generation actually did, so it catches a closure that is wrong as well as one
+that is incomplete. Only substitutions of types that exist on the classpath
+count; a type that is genuinely absent is widened unfiltered too.
+
+Verified in both directions. Clean on the working filter, and with
+`android.os:Bundle` blacklisted to simulate a closure bug:
+
+```
+Metadata filter is unsound: 1 signature type(s) were replaced by a supertype
+because the filter dropped them. Each is a NoSuchMethodError waiting to happen
+at runtime.
+  android.os.Bundle -> android.os.BaseBundle (needed by android.animation.LayoutTransition)
+```
+
+That is the exact defect that produced the launch crash, caught at build time.
+
+## App size
+
+Measured on the test-app debug APK, same build both ways:
+
+| | Unfiltered | Filtered | Saved |
+|---|---|---|---|
+| Metadata on disk | 2,836,154 | 699,752 | **-75.3%** |
+| Metadata in the APK (compressed) | 1,053,583 | 266,669 | -74.7% |
+| **APK total** | 45,907,151 | 45,120,239 | **-786,912 (-1.7%)** |
+
+The APK saving equals the compressed-metadata saving exactly, so nothing is lost
+to alignment. The relative figure is small only because this APK carries 22
+uncompressed `.so` files for four ABIs; against a single-ABI release APK the
+same ~770KB is a much larger share.
+
+> Measure this with a clean `packageDebug`. Incremental packaging reuses the
+> previous APK layout and pads the freed space instead of reclaiming it -- two
+> APKs whose metadata differed by 787KB came out **byte-identical in total
+> size**, which reads exactly like the filter having no effect.
+
+The runtime win is not measured here: less metadata is also less to parse and
+hold at startup.
+
 ## Status
 
-Done: both instruments, the taxonomy, the closure, the easing rules, the seed
-generator, the keep-rules emitter. Green on the 520-spec suite.
+Done: the instruments, the taxonomy, the closure, the easing rules, the seed
+generator, the keep-rules emitter, the soundness check, and Gradle wiring for
+both the test-app and the RN plugin. Green on the 520-spec suite with filtering
+on, and the size numbers above.
 
-Not done: wiring the seed generation into the Gradle task automatically (it is
-run by hand today), the RN/guest side, and the build-time referential-closure
-check (11) -- the closure constructs the set correctly, but nothing yet
-re-verifies the emitted tree independently.
+Not done: the RN path is registered and configures, but has not been run through
+a full release build end to end. R8 shrinking is still off by default -- the
+keep rules make it safe to enable, they do not enable it.

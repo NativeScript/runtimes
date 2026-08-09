@@ -744,12 +744,84 @@ task 'collectAllJars' {
     }
 }
 
+// Derives whitelist.mdg from the app's own JS, so metadata carries only what
+// the app can reach. Opt-in: without -PnsFilterMetadata the seed is removed and
+// the generator emits everything, which is the behaviour every existing build
+// already has.
+//
+// The seed is only a starting point -- the generator closes over supertypes,
+// nested classes and signature types before dropping anything, and fails the
+// build if that closure turns out to be unsound. See docs/metadata-filtering.md.
+def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
+
+task generateMetadataSeed {
+    def seedScript = "$BUILD_TOOLS_PATH/metadata-filter/seed.js"
+    def generatedSeed = file("$rootDir/whitelist.mdg")
+
+    inputs.property("enabled", nsFilterMetadata)
+    inputs.dir(APP_DIR)
+    inputs.files(fileTree("$BUILD_TOOLS_PATH/metadata-filter") { include "*.js" })
+    outputs.file(generatedSeed)
+
+    doLast {
+        if (!nsFilterMetadata) {
+            // Leaving a stale seed behind would keep filtering on for a build
+            // that did not ask for it -- the confusing direction to fail.
+            if (generatedSeed.exists()) {
+                generatedSeed.delete()
+                outLogger.withStyle(Style.Info).println "\t ~ metadata filtering off; removed generated whitelist.mdg"
+            }
+            return
+        }
+
+        def cmd = ["node", seedScript, APP_DIR,
+                   "--manifest", "$projectDir/src/main/AndroidManifest.xml",
+                   "--out", generatedSeed.absolutePath]
+
+        def bindings = file("$BUILD_TOOLS_PATH/$SBG_BINDINGS_NAME")
+        if (bindings.exists()) {
+            cmd.addAll(["--sbg-bindings", bindings.absolutePath])
+        }
+
+        // This app ships files that are invalid on purpose, to test how the
+        // loader reports them. Anywhere else an unparseable file disables
+        // filtering for the whole build.
+        cmd.addAll(["--allow-unparseable", "shared/Require/SyntaxErrorInModule",
+                    "--allow-unparseable", "shared/Workers/WorkerInvalidSyntax"])
+
+        // ProcessBuilder needs real Strings; interpolated paths are GStrings.
+        def process = new ProcessBuilder(cmd.collect { it.toString() })
+                .redirectErrorStream(true).start()
+        process.inputStream.eachLine { outLogger.withStyle(Style.Info).println "\t ~ [metadata-seed] $it" }
+        if (process.waitFor() != 0) {
+            throw new GradleException("NativeScript: metadata seed generation failed.")
+        }
+    }
+}
+
 task copyMetadataFilters {
+    dependsOn generateMetadataSeed
+
+    // Declared so the task re-runs when a filter file appears or disappears.
+    // Without inputs it has none to compare, stays up to date on the strength
+    // of its outputs alone, and leaves the previous build's filter in place --
+    // which silently keeps filtering on for a build that turned it off.
+    inputs.files("$rootDir/whitelist.mdg", "$rootDir/blacklist.mdg")
     outputs.files("$BUILD_TOOLS_PATH/whitelist.mdg", "$BUILD_TOOLS_PATH/blacklist.mdg")
-    // use an explicit copy task here because the copy task itselfs marks the whole built-tools as an output!
-    copy {
-        from file("$rootDir/whitelist.mdg"), file("$rootDir/blacklist.mdg")
-        into "$BUILD_TOOLS_PATH"
+
+    // Copies at execution time, not configuration time: the seed does not exist
+    // until generateMetadataSeed has run. Files.copy rather than project.copy,
+    // which Gradle 9 no longer allows during execution.
+    doLast {
+        ["whitelist.mdg", "blacklist.mdg"].each { name ->
+            def source = file("$rootDir/$name")
+            def target = file("$BUILD_TOOLS_PATH/$name")
+            if (source.exists()) {
+                Files.copy(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            } else {
+                target.delete()
+            }
+        }
     }
 }
 

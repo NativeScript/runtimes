@@ -20,6 +20,7 @@ import com.telerik.metadata.parsing.kotlin.metadata.bytecode.BytecodeClassMetada
 import com.telerik.metadata.security.classes.SecuredClassRepository;
 import com.telerik.metadata.security.classes.SecuredNativeClassDescriptor;
 import com.telerik.metadata.security.filtering.blacklisting.MetadataBlacklist;
+import com.telerik.metadata.security.filtering.closure.ClosureVerifier;
 import com.telerik.metadata.security.filtering.closure.MetadataClosure;
 import com.telerik.metadata.security.filtering.closure.ProguardRulesWriter;
 import com.telerik.metadata.security.filtering.input.PatternEntry;
@@ -125,6 +126,7 @@ public class Builder {
 
                 SecuredNativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClass(className);
                 if (clazz.isUsageAllowed()) {
+                    ClosureVerifier.INSTANCE.setCurrentContext(className);
                     generate(clazz.getNativeDescriptor(), root);
                 }
             } catch (Throwable e) {
@@ -135,6 +137,8 @@ public class Builder {
         }
 
         ensureSeedPackageSpine(root);
+
+        assertClosureIsSound();
 
         System.out.println("Added   Properties "+TreeNode.addedProperties);
         System.out.println("Ignored Properties "+TreeNode.skippedProperties+" duplicates.");
@@ -189,6 +193,7 @@ public class Builder {
         });
 
         SecuredClassRepository.INSTANCE.applyClosure(retained);
+        ClosureVerifier.INSTANCE.setEnabled(true);
 
         System.out.println(String.format(
                 "Metadata filter: seed %d classes -> retained %d after closure (depth %s).",
@@ -200,6 +205,45 @@ public class Builder {
             ProguardRulesWriter.INSTANCE.write(new File(proguardRulesPath), retained);
             System.out.println("Metadata filter: wrote keep rules to " + proguardRulesPath);
         }
+    }
+
+    /**
+     * Fails the build if the filter changed the meaning of any signature.
+     *
+     * A violation is a latent NoSuchMethodError -- the metadata is well-formed
+     * and describes a method that does not exist. It would surface only when
+     * the app happens to call that method, which is exactly the kind of defect
+     * that ships. The closure is meant to make this set empty; that it is
+     * checked separately is the point, since a closure bug would otherwise be
+     * invisible until runtime.
+     */
+    private static void assertClosureIsSound() throws MetadataSecurityViolationException {
+        Collection<ClosureVerifier.Widening> violations = ClosureVerifier.INSTANCE.violations();
+        if (violations.isEmpty()) {
+            return;
+        }
+
+        StringBuilder message = new StringBuilder();
+        message.append(String.format(
+                "Metadata filter is unsound: %d signature type(s) were replaced by a "
+                        + "supertype because the filter dropped them. Each is a "
+                        + "NoSuchMethodError waiting to happen at runtime.%n",
+                violations.size()));
+
+        int shown = 0;
+        for (ClosureVerifier.Widening violation : violations) {
+            if (shown++ == 25) {
+                message.append(String.format("  … and %d more%n", violations.size() - 25));
+                break;
+            }
+            message.append(String.format("  %s -> %s (needed by %s)%n",
+                    violation.getRequested(), violation.getSubstituted(), violation.getContext()));
+        }
+
+        message.append("This is a bug in the closure, not in the app: add the missing edge "
+                + "to MetadataClosure, or name the type in whitelist.mdg to unblock.");
+
+        throw new MetadataSecurityViolationException(message.toString());
     }
 
     /**
@@ -553,6 +597,15 @@ public class Builder {
                 return null;
             }
 
+            // A substitution here rewrites the signature being emitted. Only a
+            // type that exists on the classpath indicts the filter -- one that
+            // was never there is widened with or without filtering.
+            String resolved = clazz.getNativeDescriptor().getClassName();
+            if (!resolved.equals(name)
+                    && SecuredClassRepository.INSTANCE.findClassUnfiltered(name) != null) {
+                ClosureVerifier.INSTANCE.record(name, resolved);
+            }
+
             node = getOrCreateNode(root, clazz.getNativeDescriptor(), null);
         }
 
@@ -729,6 +782,14 @@ public class Builder {
                 SecuredNativeClassDescriptor securedNativeClassDescriptor = SecuredClassRepository.INSTANCE.findNearestAllowedClass(name);
                 if (securedNativeClassDescriptor.isUsageAllowed()) {
                     NativeClassDescriptor nativeClassDescriptor = securedNativeClassDescriptor.getNativeDescriptor();
+
+                    // Array element types reach signatures the same way; see
+                    // the sibling check in getOrCreateNode(root, type).
+                    if (!nativeClassDescriptor.getClassName().equals(name)
+                            && SecuredClassRepository.INSTANCE.findClassUnfiltered(name) != null) {
+                        ClosureVerifier.INSTANCE.record(name, nativeClassDescriptor.getClassName());
+                    }
+
                     child.nodeType = nativeClassDescriptor.isInterface() ? TreeNode.Interface
                             : TreeNode.Class;
                     if (nativeClassDescriptor.isStatic()) {

@@ -42,6 +42,11 @@ def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
 def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
     && Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
 
+// Restrict metadata to what the app's bundle can reach. Opt-in while it earns
+// trust; release builds only, since a debug build has no bundle on disk to
+// analyse and guessing from a partial view is what breaks apps.
+def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
+
 // Where the .dat files land. This is added to the asset source set rather than
 // written into src/, so a clean build regenerates and nothing lands in version
 // control. NativeScriptNativeApiModule copies them out of the APK on first run.
@@ -193,14 +198,32 @@ android.applicationVariants.all { variant ->
 
             // Optional filters, same file names and format the NativeScript CLI
             // uses. Absent means "everything on the classpath".
-            ["whitelist.mdg", "blacklist.mdg"].each { name ->
-                def source = file("${project.projectDir}/${name}")
-                def target = new File(workDir, name)
-                if (source.exists()) {
-                    target.text = source.text
-                } else {
-                    target.delete()
-                }
+            //
+            // whitelist.mdg has two possible sources: one derived from the
+            // app's bundle by generateNativeScriptMetadataSeed, and one the app
+            // author wrote. They are concatenated rather than one winning --
+            // both are keep-lists, and the generator takes the union before
+            // computing its closure. A hand-written entry can therefore only
+            // ever add, which is the safe direction.
+            def generatedSeed = new File(workDir, "generated-whitelist.mdg")
+            def authoredWhitelist = file("${project.projectDir}/whitelist.mdg")
+            def whitelistTarget = new File(workDir, "whitelist.mdg")
+
+            if (generatedSeed.exists() || authoredWhitelist.exists()) {
+                def parts = []
+                if (generatedSeed.exists()) parts.add(generatedSeed.text)
+                if (authoredWhitelist.exists()) parts.add(authoredWhitelist.text)
+                whitelistTarget.text = parts.join("\n")
+            } else {
+                whitelistTarget.delete()
+            }
+
+            def blacklistSource = file("${project.projectDir}/blacklist.mdg")
+            def blacklistTarget = new File(workDir, "blacklist.mdg")
+            if (blacklistSource.exists()) {
+                blacklistTarget.text = blacklistSource.text
+            } else {
+                blacklistTarget.delete()
             }
 
             logger.lifecycle("NativeScript: generating metadata from ${jars.size()} jars and " +
@@ -434,6 +457,67 @@ android.applicationVariants.all { variant ->
         // javac; it also makes javac depend on this task, which is why the
         // bundling above has to be free of any dependency on compiled classes.
         variant.registerJavaGeneratingTask(bindingsTask.get(), sbgJavaDir)
+
+        // Ship metadata for what the app can actually reach, rather than for
+        // every class on the compile classpath.
+        //
+        // Reuses the bundle the binding generator already produced -- the whole
+        // reason this is release-only is that debug has no JS on disk to read,
+        // and a filter built from a partial view of the program is how apps
+        // break in the field. The seed is only a starting point: the generator
+        // closes over supertypes, nested classes and signature types, and fails
+        // the build if that closure turns out unsound.
+        // See docs/metadata-filtering.md.
+        if (nsFilterMetadata) {
+            def seedTask = tasks.register("generateNativeScriptMetadataSeed${variantName}") {
+                group = "nativescript"
+                description = "Derives the metadata whitelist from the ${variant.name} bundle."
+
+                dependsOn(bindingsTask)
+
+                inputs.dir(sbgBundleDir)
+                inputs.files(fileTree(new File(toolsDir, "metadata-filter")))
+                outputs.file(new File(workDir, "generated-whitelist.mdg"))
+
+                doLast {
+                    workDir.mkdirs()
+
+                    def seedScript = new File(toolsDir, "metadata-filter/seed.js")
+                    if (!seedScript.exists()) {
+                        throw new GradleException(
+                                "NativeScript: ${seedScript} is missing. It ships with " +
+                                "@nativescript/react-native; reinstall the package, or run " +
+                                "scripts/build_react_native_android_tools.sh from a checkout.")
+                    }
+
+                    def cmd = ["node", seedScript.absolutePath, sbgBundleDir.absolutePath,
+                               "--out", new File(workDir, "generated-whitelist.mdg").absolutePath]
+
+                    def manifest = android.sourceSets.main.manifest.srcFile
+                    if (manifest != null && manifest.exists()) {
+                        cmd.addAll(["--manifest", manifest.absolutePath])
+                    }
+
+                    def bindings = new File(sbgWorkDir, "sbg-bindings.txt")
+                    if (bindings.exists()) {
+                        cmd.addAll(["--sbg-bindings", bindings.absolutePath])
+                    }
+
+                    logger.lifecycle("NativeScript: deriving metadata filter from ${sbgBundleDir}")
+
+                    // Real Strings: interpolated paths are GStrings, which
+                    // ProcessBuilder's List<String> will not take.
+                    def process = new ProcessBuilder(cmd.collect { it.toString() })
+                            .redirectErrorStream(true).start()
+                    process.inputStream.eachLine { logger.lifecycle("  [metadata-seed] $it") }
+                    if (process.waitFor() != 0) {
+                        throw new GradleException("NativeScript: metadata seed generation failed.")
+                    }
+                }
+            }
+
+            metadataTask.configure { it.dependsOn(seedTask) }
+        }
     }
 
     // Metadata describes the compiled classes, so it has to run after javac and
