@@ -282,9 +282,17 @@ with the generated keep rules). Clean build on each side.
 
 | | Unfiltered | Filtered + R8 | Saved |
 |---|---|---|---|
-| **APK total** | 28,899,229 | 26,432,698 | **-2,466,531 (-8.5%)** |
+| APK total, as built | 28,899,229 | 26,432,698 | -2,466,531 (-8.5%) |
+| **APK minus test fixtures** | **7,902,658** | **5,436,127** | **-2,466,531 (-31.2%)** |
 | dex (uncompressed) | 7,060,432 | 1,986,864 | **-5,073,568 (-71.9%)** |
 | metadata (compressed) | 939,188 | 238,698 | -700,490 (-74.6%) |
+
+Read the second row, not the first. 21 MB of this APK is four
+`assets/app/modules/libCalc-*.so` test fixtures -- the same native test module
+for all four ABIs, byte-identical in both builds. They live under `assets/`
+rather than `lib/`, so `-PonlyArm64` does not filter them, and no real app
+carries anything like them. Against the payload an app actually ships, the
+saving is about a third of the APK.
 
 **The dex is where the win is** -- 7.1 MB to 2.0 MB. Metadata filtering saves
 0.7 MB on its own; letting R8 strip the same set saves five megabytes more. The
@@ -292,8 +300,10 @@ two only work together: R8 cannot see that JS reaches a class, so without the
 generated keep rules it strips the app's own dependencies, and with a keep-all
 rule it strips nothing.
 
-The APK still being 26 MB is the four `.so` files (Hermes, the runtime, libc++,
-fbjni), which no metadata work touches.
+What is left after the dex is native code that no metadata work can touch:
+libhermesvm 1.83 MB, libNativeScript 0.50 MB, libc++_shared 0.45 MB, libfbjni
+0.06 MB, libjsi 0.04 MB -- 2.9 MB compressed in total. Once the dex is shrunk,
+the engine is the floor.
 
 Verified: **520 specs, 0 failures** on the shrunk release APK, not just on the
 filtered metadata.
