@@ -33,7 +33,14 @@
 #include "v8.h"
 #endif
 
-#if defined(TARGET_ENGINE_HERMES)
+// NS_JSI_HOST_RUNTIME is the guest flavour (@nativescript/react-native): the
+// jsi::Runtime belongs to the embedder, which created it, drives its microtask
+// queue and guarantees the thread it is entered on. There is no VM to build and
+// no ThreadSafeRuntime to register threads with, so the two things that need
+// the Hermes VM headers -- makeThreadSafeHermesRuntime and jsi/threadsafe.h --
+// are the only pieces of the engine that this build does not compile. That is
+// what lets the binary link nothing but the embedder's libjsi.so.
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
 #include <jsi/threadsafe.h>
 #endif
 
@@ -48,7 +55,14 @@ public:
     // `__collect = gc;` on its sixth line, so this is not optional on V8.
     static void SetFlags(const char *flags);
 
+#if defined(NS_JSI_HOST_RUNTIME)
+    // Adopts a runtime the embedder owns. The reference must outlive this host:
+    // React Native tears its runtime down only after the TurboModule that holds
+    // us has been invalidated, which is what ReleaseEngineState is wired to.
+    static std::shared_ptr<EngineHost> Adopt(::facebook::jsi::Runtime &runtime);
+#else
     static std::shared_ptr<EngineHost> Create();
+#endif
 
     ~EngineHost();
 
@@ -115,7 +129,7 @@ private:
     std::unique_ptr<v8::ArrayBuffer::Allocator> m_allocator;
 #endif
 
-#if defined(TARGET_ENGINE_HERMES)
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
     // Owns the VM. engine::Runtime only borrows getUnsafeRuntime().
     std::unique_ptr<facebook::jsi::ThreadSafeRuntime> m_threadSafe;
 #endif
@@ -154,13 +168,19 @@ public:
     }
 
     ~JSScope() {
-#if defined(TARGET_ENGINE_HERMES) || defined(TARGET_ENGINE_QUICKJS)
+#if (defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)) || \
+        defined(TARGET_ENGINE_QUICKJS)
         // Hermes and QuickJS run Promise jobs from an explicit microtask queue and
         // nothing else on Android drains it; V8 and JSC run theirs themselves when
         // the host stack unwinds. Draining as the *outermost* scope leaves JS is
         // what keeps the ordering the specs assert: a microtask queued during a
         // call runs before the next timer callback, which enters through its own
         // scope.
+        //
+        // NS_JSI_HOST_RUNTIME is excluded because the embedder already drains:
+        // React Native's RuntimeScheduler runs the queue at the end of each task
+        // it dispatches. Draining from inside a nested scope of ours would run
+        // application microtasks at a point RN did not choose.
         if (m_host->LockDepth() <= 1 && m_host->IsAlive()) {
             m_host->ExecutePendingJobs();
         }
