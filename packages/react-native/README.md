@@ -685,8 +685,25 @@ config. That is a standard plugin, not a NativeScript-specific transform.
 
 #### Naming a class
 
-`@NativeClass()` on its own generates the Java class on the device, keyed on the
-call site. That is all most classes need.
+`@NativeClass()` on its own generates the Java class on the device. The class is
+named after what it contains — its base class, its interfaces, and the names it
+overrides — rather than after the source position of the call, because a guest
+runs inside React Native's bundle and no source position computed here would
+match one a build-time tool computed from your source tree.
+
+One consequence is worth knowing: two classes that extend the same type, declare
+the same interfaces and override the same method names **share one generated
+Java class**. That is safe, because the generated Java is identical in both
+cases and only forwards into JavaScript — each instance still runs its own
+implementation.
+
+It stops being safe when *Java* constructs the class by name, because then the
+class name is all the runtime has to find the JavaScript side with. So:
+
+> **Name any class that Java instantiates for you** — an `Activity`, a
+> `Fragment`, a `Service`, a `Worker`, anything reached by reflection or named
+> in `AndroidManifest.xml`. Naming makes it unique. Classes you construct
+> yourself with `new` never need it.
 
 A class that has to exist *before* the app runs — one named in
 `AndroidManifest.xml`, for instance — needs a fixed name instead:
@@ -704,9 +721,11 @@ at build time. The runtime then *looks the class up* rather than generating it,
 which means a named class only resolves once the static binding generator has
 emitted it — see the note below.
 
-> **Not yet wired up.** The static binding generator does not currently run for
-> React Native apps, so `@JavaProxy` names do not resolve. Unnamed
-> `@NativeClass()` classes, which are generated on the device, work today.
+> **Release builds only.** The static binding generator reads the bundle, so it
+> needs one on disk. In debug, Metro serves the bundle over HTTP and there is
+> nothing to scan; unnamed `@NativeClass()` classes are generated on the device
+> and work as usual, but `@JavaProxy` names do not resolve until you build a
+> release bundle.
 
 If you would rather not use decorators, the runtime API is always available and
 needs nothing from the bundler:
