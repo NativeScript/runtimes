@@ -124,6 +124,27 @@ public class DexFactory {
         // just the interface name without the extra file, line, column information
         if (!baseClassName.isEmpty() && isInterface) {
             fullClassName = COM_TNS_GEN_PREFIX + classToProxy;
+
+            // The pre-generated lookup above ran against the name the caller
+            // asked for, which for an interface still carries the content key
+            // or extend name. Only here is the canonical one known -- and it is
+            // the name the static binding generator emits. Without this retry a
+            // pre-generated interface binding is never found, and every
+            // interface implementation is dexed on the device even though the
+            // class is sitting in the APK.
+            if (!fullClassName.equals(originalFullClassName)) {
+                try {
+                    Class<?> pregeneratedInterface = classLoader.loadClass(fullClassName.replace("-", "_"));
+                    if (logger.isEnabled()) {
+                        logger.write("Pre-generated interface class found:  " + fullClassName);
+                    }
+                    return pregeneratedInterface;
+                } catch (Exception e) {
+                    if (logger.isEnabled()) {
+                        logger.write("Pre-generated interface class not found:  " + fullClassName);
+                    }
+                }
+            }
         }
 
         File dexFile = this.getDexFile(desiredDexClassName);

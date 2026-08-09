@@ -526,8 +526,94 @@ if (failOnCompilationWarningsEnabled()) {
 ///////////////////////////// EXECUTION PHASE /////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
 
+// Compiles the app's own Java so the static binding generator can see it.
+//
+// Without this the generator detects an `extend` of an app class perfectly --
+// 48 rows for com.tns.tests.Button1 alone -- and then generates nothing for it,
+// because it cannot load the base class to read its methods. Only classes from
+// android.jar and the AAR dependencies got bindings; everything the app itself
+// declared fell through to being dexed on the device at run time.
+//
+// It cannot simply depend on the normal javac task: that one consumes the
+// generator's output, so the dependency would be circular. This compiles the
+// same sources *minus* the generated bindings into a scratch directory nothing
+// else reads, which breaks the cycle.
+//
+// Best-effort by design. A source that fails here (most often a Java class
+// referring to a Kotlin one, which is not compiled at this point) simply is not
+// on the generator's classpath, which is exactly today's behaviour for it. The
+// real javac still compiles everything and still fails the build if it cannot.
+task compileAppClassesForSbg {
+    dependsOn "collectAllJars"
+
+    def outDir = layout.buildDirectory.dir("nativescript/sbg-app-classes").get().asFile
+    def sourceRoot = file(OUTPUT_JAVA_DIR)
+
+    inputs.files(fileTree(sourceRoot) { include "**/*.java"; exclude "com/tns/gen/**" })
+    outputs.dir(outDir)
+
+    doLast {
+        def sources = []
+        sourceRoot.eachFileRecurse { f ->
+            if (f.isFile() && f.name.endsWith(".java")
+                    && !f.absolutePath.contains("${File.separator}com${File.separator}tns${File.separator}gen${File.separator}")) {
+                sources.add(f.absolutePath)
+            }
+        }
+
+        if (sources.isEmpty()) {
+            return
+        }
+
+        outDir.deleteDir()
+        outDir.mkdirs()
+
+        // The classpath collectAllJars just wrote, plus whatever the runtime
+        // module has already produced -- com.tns.* is what the app's own
+        // classes extend.
+        def cp = []
+        def depsFile = file("$BUILD_TOOLS_PATH/$SBG_JAVA_DEPENDENCIES")
+        if (depsFile.exists()) {
+            depsFile.eachLine { line -> if (line.trim()) cp.add(line.trim()) }
+        }
+        def runtimeProject = findProject(':runtime')
+        if (runtimeProject != null) {
+            runtimeProject.fileTree(runtimeProject.buildDir) {
+                include "intermediates/javac/**/classes"
+                include "tmp/kotlin-classes/**"
+            }.visit { d -> if (d.directory) cp.add(d.file.absolutePath) }
+        }
+
+        def argsFile = new File(outDir.parentFile, "sbg-javac-args.txt")
+        argsFile.text = sources.collect { "\"${it.replace('\\', '/')}\"" }.join("\n")
+
+        def cmd = ["javac", "-proc:none", "-nowarn", "-g",
+                   "-source", "17", "-target", "17",
+                   "-d", outDir.absolutePath]
+        if (!cp.isEmpty()) {
+            cmd.addAll(["-cp", cp.join(File.pathSeparator)])
+        }
+        cmd.add("@${argsFile.absolutePath}".toString())
+
+        def process = new ProcessBuilder(cmd.collect { it.toString() })
+                .redirectErrorStream(true).start()
+        def errors = 0
+        process.inputStream.eachLine { line -> if (line.contains("error:")) errors++ }
+        process.waitFor()
+
+        def produced = 0
+        if (outDir.exists()) {
+            outDir.eachFileRecurse { f -> if (f.isFile() && f.name.endsWith(".class")) produced++ }
+        }
+        outLogger.withStyle(Style.Info).println(
+                "\t ~ [sbg] compiled ${produced} app class file(s) for binding generation" +
+                (errors > 0 ? " (${errors} source(s) skipped -- see above)" : ""))
+    }
+}
+
 task runSbg(type: BuildToolTask) {
     dependsOn "collectAllJars"
+    dependsOn "compileAppClassesForSbg"
     def rootPath = ""
     if (!findProject(':static-binding-generator').is(null)) {
         rootPath = Paths.get(project(':static-binding-generator').projectDir.path, "build/libs").toString()
@@ -734,6 +820,9 @@ task 'collectAllJars' {
 
         new File("$BUILD_TOOLS_PATH/$SBG_JAVA_DEPENDENCIES").withWriter { out ->
             allJarPaths.each { out.println it }
+            // The app's own classes, compiled by compileAppClassesForSbg. A
+            // directory rather than a jar; the generator reads both.
+            out.println layout.buildDirectory.dir("nativescript/sbg-app-classes").get().asFile.absolutePath
         }
         new File("$BUILD_TOOLS_PATH/$MDG_JAVA_DEPENDENCIES").withWriter { out ->
             allJarPaths.each {
