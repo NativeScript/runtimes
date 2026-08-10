@@ -18,6 +18,11 @@
 #define  PRIVATE_IS_NAPI "#is_napi"
 #define  PROP_KEY_TOSTRING "toString"
 #define  PROP_KEY_IS_PROTOTYPE_IMPLEMENTATION_OBJECT "__isPrototypeImplementationObject"
+// Stamped onto the implementation object by ts_helpers' __extends, not written
+// by the user. They exist only after that helper has run, so the static binding
+// generator cannot see them -- see CollectMethodOverrideNames.
+#define  PROP_KEY_TS_PARENT "__parent"
+#define  PROP_KEY_TS_CHILD "__child"
 
 class Constants {
     public:

@@ -47,6 +47,40 @@ public class ContentKeyTest {
     }
 
     /**
+     * A nested interface is `Pack200$Unpacker` to the runtime and
+     * `Pack200.Unpacker` in JS source. Both sides collapse '$' to '.', so the
+     * two spellings have to hash alike -- before this held, every class
+     * implementing a nested interface was built on device instead.
+     *
+     * The literal is the real key for the test-app's
+     * MyTSTranspiledObjectThatExtendsInterfaces.
+     */
+    @Test
+    public void treatsNestedAndDottedInterfacesAlike() {
+        String[] dotted = {"java.util.jar.Pack200.Unpacker", "java.util.Formattable",
+                "java.util.Observer", "java.util.jar.Pack200.Packer"};
+        String[] binary = {"java/util/jar/Pack200$Unpacker", "java.util.Formattable",
+                "java.util.Observer", "java/util/jar/Pack200$Packer"};
+        String[] methods = {"greet", "unpack", "properties", "toString", "formatTo", "update",
+                "addPropertyChangeListener", "pack", "removePropertyChangeListener"};
+
+        assertEquals(ContentKey.of("java.lang.Object", dotted, methods),
+                ContentKey.of("java.lang.Object", binary, methods));
+        assertEquals("haa054d88a5def37b",
+                ContentKey.of("java.lang.Object", dotted, methods));
+    }
+
+    /** The same collapse applies to a nested base class. */
+    @Test
+    public void treatsNestedAndDottedBasesAlike() {
+        assertEquals(
+                ContentKey.of("com.tns.tests.DummyClass.DummyDerivedClass", new String[]{""},
+                        new String[]{"toString"}),
+                ContentKey.of("com/tns/tests/DummyClass$DummyDerivedClass", new String[]{""},
+                        new String[]{"toString"}));
+    }
+
+    /**
      * An absent field in sbg-bindings.txt splits to one empty string. The runtime
      * has no such element, so it has to be dropped rather than hashed as "".
      */

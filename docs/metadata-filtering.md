@@ -459,8 +459,7 @@ within a tree. Verified on napi (`-Pengine=V8-13 -Pcontent-keyed-bindings`):
 | | jsi | napi |
 |---|---|---|
 | spec suite | 520 / 0 | 520 / 0 |
-| classes generated on device | 27 | 27 |
-| of those, content-keyed | 17 | 17 |
+| classes generated on device | 7 | 7 |
 | `verify-coverage.js` under filtering | clean | clean |
 
 The one intentional difference: jsi's `ContentKeyedBindingsEnabled` also returns
@@ -468,6 +467,49 @@ true under `NS_JSI_HOST_RUNTIME`, because a guest runs inside the embedder's
 bundle and can never agree with the generator on source coordinates. napi is
 never embedded that way, so there it is the `NS_CONTENT_KEYED_BINDINGS` define
 alone.
+
+### Why a class is still built on device
+
+Both layers were at 27 until the two causes below were found by listing
+`code_cache/secondary-dexes` on the device and diffing it against the
+`com.tns.gen.*` classes in the APK. Neither showed up as a failure: a class the
+generator missed is built at startup and works.
+
+**The hash disagreed (11 → 1).** Two independent divergences, both invisible to
+the build:
+
+- `ts_helpers`' `__extends` writes `__parent` and `__child` onto the prototype
+  before deferring to `extend()`. `CollectMethodOverrideNames` takes every own
+  property, so both were hashed; the generator reads the class body from source
+  and cannot see them. Every TypeScript-transpiled subclass was therefore
+  permanently out of step. They are now excluded alongside `super`,
+  `constructor` and the runtime's own stamps.
+- Nested types reach the runtime as `Pack200$Unpacker` and the generator as
+  `Pack200.Unpacker` -- the generator reads JS source, where a nested type is
+  spelled with a dot and is indistinguishable from a package. Both sides now
+  collapse `/` and `$` to `.`, and both canonicalize *before* sorting, since
+  `$` and `.` sort differently.
+
+`ContentKeyTest` pins both, because the only other place the disagreement
+surfaces is a slower startup on a device.
+
+**The interface was never pre-generated (10 → 0).** `GetInterfaceNames` walked
+only classpath entries ending in `.jar`, and the app's own compiled classes
+arrive as a directory. An interface the app declares was therefore missing from
+`sbg-interface-names.txt`, so the parser did not recognise
+`new com.tns.tests.InterfaceOne({...})` as implementing one. Directories are now
+walked too: 23 app interfaces appeared, and the generator went from 71
+pre-generated classes to 84.
+
+**The 7 that remain** are cases a static parser genuinely cannot resolve, and
+are not worth chasing:
+
+| Class | Why |
+|---|---|
+| `ClassForNameDiscoveryObject`, `…Instantiated` | reached through `java.lang.Object[ext](…)` -- computed member access |
+| `Button1_btn1344`, `DummyDerivedClass_D1440` | the implementation object is a variable, so its method names are not in the source |
+| `TextView_h…`, `Button1_Button1_h…` | no binding emitted for that base at all; both have empty override sets |
+| `java.lang.Object_hd50…` | **not diagnosed.** The last surviving hash disagreement -- one unnamed `java.lang.Object` extend; the generator emitted two other `java.lang.Object` keys, neither of which matches |
 
 ## Status
 

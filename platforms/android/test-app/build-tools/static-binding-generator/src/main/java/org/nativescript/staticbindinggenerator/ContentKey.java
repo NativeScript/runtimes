@@ -41,12 +41,26 @@ public final class ContentKey {
 
     static String payload(String baseClassName, String[] interfaceNames, String[] methodNames) {
         StringBuilder builder = new StringBuilder();
-        builder.append(baseClassName == null ? "" : baseClassName.replace('/', '.'));
+        builder.append(canonicalize(baseClassName));
         builder.append('|');
         builder.append(String.join(",", sortedNonEmpty(interfaceNames)));
         builder.append('|');
         builder.append(String.join(",", sortedNonEmpty(methodNames)));
         return builder.toString();
+    }
+
+    /**
+     * Package and nested-type separators both collapse to '.'.
+     *
+     * This side reads names out of JS source, where a nested type is written
+     * with a dot and is indistinguishable from a package; the runtime holds them
+     * in binary form, with '/' between packages and '$' before a nested type.
+     * The dotted form is therefore the only one both sides can produce. Leaving
+     * '$' alone cost every class implementing a nested interface a content key
+     * that disagreed with the runtime's, so none of them resolved.
+     */
+    private static String canonicalize(String name) {
+        return name == null ? "" : name.replace('/', '.').replace('$', '.');
     }
 
     /**
@@ -59,7 +73,10 @@ public final class ContentKey {
         if (values != null) {
             for (String value : values) {
                 if (value != null && !value.isEmpty()) {
-                    result.add(value);
+                    // Canonicalized before sorting, not after: '$' sorts after
+                    // '.', so the two sides would otherwise order a nested
+                    // interface differently even once the names matched.
+                    result.add(canonicalize(value));
                 }
             }
         }

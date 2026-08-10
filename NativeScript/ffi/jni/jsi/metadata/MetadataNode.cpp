@@ -579,14 +579,34 @@ bool MetadataNode::ContentKeyedBindingsEnabled() {
 // generator's is source order; the binding treats both sets as unordered.
 // FNV-1a rather than std::hash, which is not stable across implementations and
 // so could not be reproduced by the generator.
+// Package separators and nested-type separators both become '.' -- see the
+// comment in CreateContentKey.
+static string Canonicalize(const string &name) {
+    string canonical = name;
+    canonical = Util::ReplaceAll(canonical, std::string("/"), std::string("."));
+    return Util::ReplaceAll(canonical, std::string("$"), std::string("."));
+}
+
 string MetadataNode::CreateContentKey(const string &baseClassName,
                                       vector<string> interfaceNames,
                                       vector<string> methodNames) {
+    // Canonicalized before sorting, not after: '$' and '.' are different bytes,
+    // so sorting the binary form and sorting the dotted form can disagree on
+    // order even once the names themselves match.
+    for (auto &interfaceName: interfaceNames) {
+        interfaceName = Canonicalize(interfaceName);
+    }
+
     sort(interfaceNames.begin(), interfaceNames.end());
     sort(methodNames.begin(), methodNames.end());
 
-    string canonicalBase = baseClassName;
-    canonicalBase = Util::ReplaceAll(canonicalBase, std::string("/"), std::string("."));
+    // Nested types reach here in their binary form -- `Pack200$Unpacker`, and
+    // `/` for package separators on the interface side. The generator reads the
+    // same names out of JS source, where both are written with a dot and there
+    // is no way to tell a nested type from a package. So the dotted form is the
+    // canonical one for hashing; the JNI arrays that actually load the classes
+    // keep the binary form, which is what Class.forName needs.
+    string canonicalBase = Canonicalize(baseClassName);
 
     string payload = canonicalBase;
     payload += "|";

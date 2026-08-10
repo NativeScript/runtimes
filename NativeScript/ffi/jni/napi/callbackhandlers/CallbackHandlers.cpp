@@ -687,6 +687,15 @@ CallbackHandlers::CollectMethodOverrideNames(napi_env env, napi_value implementa
             continue;
         }
 
+        // Written onto the prototype by ts_helpers' __extends before it defers
+        // to extend(), so every TypeScript-transpiled subclass carries them.
+        // They are invisible to the static binding generator, which reads the
+        // class body from source -- hashing them put the two sides permanently
+        // out of step and sent every such class down the on-device dex path.
+        if (name == PROP_KEY_TS_PARENT || name == PROP_KEY_TS_CHILD) {
+            continue;
+        }
+
         if (!functionsOnly) {
             // Hashing, not binding. The generator reads the implementation object
             // out of the bundle, where it cannot tell a function from any other
