@@ -47,6 +47,13 @@ def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
 // analyse and guessing from a partial view is what breaks apps.
 def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
 
+// Typings are on by default: without them TypeScript cannot type a single
+// native call. The task declares the classpath as an input and the typings
+// directory as its output, so an unchanged classpath skips it entirely and
+// only a dependency change pays for a run. -PnsGenerateTypings=false opts out.
+def nsTypingsEnabled = !project.hasProperty("nsGenerateTypings")
+        || Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
+
 // Where the .dat files land. This is added to the asset source set rather than
 // written into src/, so a clean build regenerates and nothing lands in version
 // control. NativeScriptNativeApiModule copies them out of the APK on first run.
@@ -237,13 +244,24 @@ android.applicationVariants.all { variant ->
         }
     }
 
+    // Alongside the app rather than in build/: these are checked in and
+    // referenced from tsconfig.json, the same way types/ios is on the Apple
+    // side. Declared out here so it can be the task's output.
+    def typingsDir = file("${rootProject.projectDir}/../types/android")
+
     def typingsTask = tasks.register("generateNativeScriptTypings${variantName}", JavaExec) {
         group = "nativescript"
         description = "Generates TypeScript declarations for the ${variant.name} classpath."
 
         workingDir workDir
         mainClass = "-jar"
-        onlyIf { nsGenerateTypings }
+        onlyIf { nsTypingsEnabled }
+
+        // Content-keyed, so a dependency upgrade that keeps the same path is
+        // still noticed, and an untouched classpath costs nothing.
+        inputs.files(variant.runtimeConfiguration).withPropertyName("classpath")
+        inputs.file(dtsGeneratorJar).withPropertyName("generator")
+        outputs.dir(typingsDir).withPropertyName("typings")
 
         doFirst {
             if (!dtsGeneratorJar.exists()) {
@@ -253,10 +271,6 @@ android.applicationVariants.all { variant ->
                         "scripts/build_react_native_android_tools.sh from a checkout.")
             }
 
-            // Alongside the app rather than in build/: these are checked in and
-            // referenced from tsconfig.json, the same way types/ios is on the
-            // Apple side.
-            def typingsDir = file("${rootProject.projectDir}/../types/android")
             typingsDir.mkdirs()
 
             def params = [dtsGeneratorJar.absolutePath, "-input"]
@@ -539,7 +553,7 @@ android.applicationVariants.all { variant ->
 
     tasks.matching { it.name == "merge${variantName}Assets" }.configureEach {
         it.dependsOn(metadataTask)
-        if (nsGenerateTypings) {
+        if (nsTypingsEnabled) {
             it.dependsOn(typingsTask)
         }
     }

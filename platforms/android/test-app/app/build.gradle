@@ -1292,8 +1292,16 @@ task buildMetadata(type: BuildToolTask) {
 }
 
 task generateTypescriptDefinitions(type: BuildToolTask) {
+    // allJarLibraries is filled by collectAllJars at execution time; without
+    // this the generator was invoked with an empty -input and failed. The task
+    // has been off by default, so nothing exercised it.
+    dependsOn "collectAllJars"
+
+    def dtsGeneratorJar = "dts-generator.jar"
     if (!findProject(':dts-generator').is(null)) {
         dependsOn ':dts-generator:jar'
+        dtsGeneratorJar = Paths.get(project(':dts-generator').projectDir.path,
+                "build/libs/dts-generator.jar").toString()
     }
 
     def paramz = new ArrayList<String>()
@@ -1302,10 +1310,28 @@ task generateTypescriptDefinitions(type: BuildToolTask) {
     workingDir "$BUILD_TOOLS_PATH"
     mainClass = "-jar"
 
+    // Declared so Gradle can skip the task outright when no jar has changed,
+    // which is what makes generating typings by default affordable: the common
+    // build does no work at all, and a classpath change costs one full run.
+    //
+    // Keyed on the jars' *contents*, not the list of paths -- a dependency
+    // upgrade keeps the same path and would otherwise go unnoticed.
+    inputs.dir(extractedDependenciesDir).withPropertyName("dependencyJars")
+    inputs.file(android.sdkDirectory.getAbsolutePath() + "/platforms/"
+            + android.compileSdkVersion + "/android.jar").withPropertyName("androidJar")
+    if (!findProject(':dts-generator').is(null)) {
+        // By path, not by task: the other project is not configured yet, so
+        // tasks.named("jar") would fail during evaluation.
+        inputs.files(fileTree("${project(':dts-generator').projectDir}/build/libs") {
+            include "*.jar"
+        }).withPropertyName("generator")
+    }
+    outputs.dir(TYPINGS_PATH).withPropertyName("typings")
+
     doFirst {
         delete "$TYPINGS_PATH"
 
-        paramz.add("dts-generator.jar")
+        paramz.add(dtsGeneratorJar)
         paramz.add("-input")
 
         for (String jarPath : allJarLibraries) {
@@ -1329,8 +1355,11 @@ task generateTypescriptDefinitions(type: BuildToolTask) {
     }
 }
 
+// On by default. TypeScript users need these to call anything native, and with
+// the caching above an unchanged classpath costs nothing.
+// -PgenerateTypings=false opts out.
 generateTypescriptDefinitions.onlyIf {
-    (project.hasProperty("generateTypings") && Boolean.parseBoolean(project.generateTypings)) || PASSED_TYPINGS_PATH != null
+    !project.hasProperty("generateTypings") || Boolean.parseBoolean(project.generateTypings.toString())
 }
 
 collectAllJars.finalizedBy(generateTypescriptDefinitions)
