@@ -290,6 +290,9 @@ MetadataTreeNode *MetadataReader::GetOrCreateTreeNodeByName(const string &classN
                 child = new MetadataTreeNode;
                 child->name = *it++;
                 child->parent = treeNode;
+                // Rebuilt by reflection because the metadata files did not
+                // describe it -- see the field's comment.
+                child->synthesizedAtRuntime = true;
 
                 string line;
                 string kind;

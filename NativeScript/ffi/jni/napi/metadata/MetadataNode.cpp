@@ -800,6 +800,67 @@ string MetadataNode::CreateFullClassName(const std::string &className,
     return fullClassName;
 }
 
+bool MetadataNode::ContentKeyedBindingsEnabled() {
+#if defined(NS_CONTENT_KEYED_BINDINGS)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// A class-name token derived from what the generated binding is actually made
+// of, rather than from where the extend() call happens to sit.
+//
+// The static binding generator writes a class out of exactly three inputs: the
+// base class, the implemented interfaces, and the overridden method names. Two
+// extend() sites that agree on all three produce byte-identical Java, so hashing
+// them is enough to name the class -- and two sites that collide are meant to
+// share, which is why the generator already treats a duplicate file with equal
+// content as a warning rather than an error.
+//
+// Location keys cannot do this once an embedder owns the bundler: the generator
+// reads source coordinates and the runtime reads bundle coordinates. A content
+// key needs no shared coordinate system at all.
+//
+// Sorted, because the runtime's order is JS own-property order and the
+// generator's is source order; the binding treats both sets as unordered.
+// FNV-1a rather than std::hash, which is not stable across implementations and
+// so could not be reproduced by the generator.
+string MetadataNode::CreateContentKey(const string &baseClassName,
+                                      vector<string> interfaceNames,
+                                      vector<string> methodNames) {
+    sort(interfaceNames.begin(), interfaceNames.end());
+    sort(methodNames.begin(), methodNames.end());
+
+    string canonicalBase = baseClassName;
+    canonicalBase = Util::ReplaceAll(canonicalBase, std::string("/"), std::string("."));
+
+    string payload = canonicalBase;
+    payload += "|";
+    for (size_t i = 0; i < interfaceNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += interfaceNames[i];
+    }
+    payload += "|";
+    for (size_t i = 0; i < methodNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += methodNames[i];
+    }
+
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c: payload) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+
+    char buffer[19];
+    snprintf(buffer, sizeof(buffer), "h%016llx", static_cast<unsigned long long>(hash));
+
+    DEBUG_WRITE("CreateContentKey: %s -> %s", payload.c_str(), buffer);
+
+    return string(buffer);
+}
+
 bool MetadataNode::IsValidExtendName(napi_env env, napi_value name) {
     string extendName = ArgConverter::ConvertToString(env, name);
 
@@ -1064,6 +1125,39 @@ MetadataNode *MetadataNode::GetOrCreate(const string &className) {
     return node;
 }
 
+#if defined(NS_METADATA_USAGE_TRACE)
+// Ground truth for the build-time metadata filter: every metadata node the app
+// actually materialises, emitted once, at the single point where a tree node
+// first becomes a MetadataNode. A build with this on is a measuring instrument,
+// not a shipping configuration -- see the metadata-filter lane in
+// docs/metadata-filtering.md for how the trace is diffed against the static
+// harvest.
+void MetadataNode::TraceUsage(MetadataTreeNode *treeNode) {
+    static std::set<std::string> *s_traced = new std::set<std::string>();
+
+    auto name = GetJniClassName(treeNode);
+    if (name.empty()) {
+        return;
+    }
+
+    if (!s_traced->insert(name).second) {
+        return;
+    }
+
+    uint8_t nodeType = s_metadataReader.GetNodeType(treeNode);
+    const char *kind = s_metadataReader.IsNodeTypePackage(nodeType)
+                       ? "P"
+                       : (s_metadataReader.IsNodeTypeInterface(nodeType) ? "I" : "C");
+
+    // R marks a node the metadata files did not contain, rebuilt by reflection.
+    // A filtered build is allowed to omit these -- that path is why omitting
+    // them is safe -- so the coverage check must not count them as misses.
+    const char *origin = treeNode->synthesizedAtRuntime ? "R" : "F";
+
+    __android_log_print(ANDROID_LOG_INFO, "NS_MD_USE", "%s%s %s", kind, origin, name.c_str());
+}
+#endif
+
 MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     MetadataNode *result = nullptr;
 
@@ -1072,6 +1166,9 @@ MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     if (it != s_treeNode2NodeCache.end()) {
         result = it->second;
     } else {
+#if defined(NS_METADATA_USAGE_TRACE)
+        TraceUsage(treeNode);
+#endif
             auto name = GetJniClassName(treeNode);
             if (!name.empty()) {
                 auto it2 = s_name2NodeCache.find(name);
@@ -2229,11 +2326,28 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
 
         auto node = reinterpret_cast<MetadataNode *>(data);
 
+        auto useContentKey = false;
+
         if (hasDot) {
             extendName = argv[0];
             implementationObject = argv[1];
         } else {
-            bool validExtend = GetExtendLocation(env, extendLocation, isTypeScriptExtend);
+            useContentKey = ContentKeyedBindingsEnabled();
+
+            // Skipped outright when content keying is on: this walks the stack
+            // purely to build a name, on every class creation.
+            bool validExtend =
+                    useContentKey || GetExtendLocation(env, extendLocation, isTypeScriptExtend);
+
+            if (!validExtend) {
+                // No usable call site -- an anonymous frame, or a bundle the
+                // generator never indexed. Naming by content still works here,
+                // where before this was fatal.
+                useContentKey = true;
+                validExtend = true;
+                extendLocation.clear();
+            }
+
             NAPI_GUARD(napi_create_string_utf8(env, "", 0, &extendName)) {
                 return nullptr;
             }
@@ -2246,11 +2360,35 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
             }
         }
 
-
-        string extendNameAndLocation =
-                extendLocation + ArgConverter::ConvertToString(env, extendName);
-        string fullClassName;
         string baseClassName = node->m_name;
+
+        // An explicitly named extend keeps its name in front of the hash. The
+        // generator reads the same name out of the bundle, so the two still
+        // agree, and it buys back two things the bare hash costs: a class name
+        // that says what it is in a stack trace, and uniqueness for the classes
+        // that need it. Anything Java instantiates by name -- an Activity, a
+        // Fragment, a Worker, anything reached by reflection -- cannot share a
+        // generated class, because the runtime has only the class name to find
+        // the JS implementation with. Naming such a class is what makes it
+        // unique; unnamed extends stay shared, which is the common case and the
+        // point of the scheme.
+        string extendNameString = ArgConverter::ConvertToString(env, extendName);
+        string extendNameAndLocation;
+
+        if (useContentKey) {
+            string contentKey =
+                    CreateContentKey(baseClassName,
+                                     CallbackHandlers::CollectImplementedInterfaceNames(
+                                             env, implementationObject),
+                                     CallbackHandlers::CollectMethodOverrideNames(
+                                             env, implementationObject, /* functionsOnly */ false));
+            extendNameAndLocation =
+                    extendNameString.empty() ? contentKey : extendNameString + "_" + contentKey;
+        } else {
+            extendNameAndLocation = extendLocation + extendNameString;
+        }
+
+        string fullClassName;
         if (!hasDot) {
             fullClassName = TNS_PREFIX + CreateFullClassName(baseClassName, extendNameAndLocation);
         } else {
@@ -2263,7 +2401,41 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                                                     implementationObject, isInterface);
         auto fullExtendedName = CallbackHandlers::ResolveClassName(env, clazz);
 
-        auto cachedData = GetCachedExtendedClassData(env, fullExtendedName);
+        // Which JS constructor to reuse is a different question from which Java
+        // class to load, and only the second one has to agree with the static
+        // binding generator.
+        //
+        // Two extend() calls with the same base, interfaces and overridden names
+        // share one generated Java class -- the Java is identical, and sharing it
+        // is the point. Their JS bodies are not identical, though, so caching the
+        // constructor under the class name would hand the second call the first
+        // call's implementation. Under content keying that is not a rare
+        // collision but the common case, so the constructor is cached per
+        // implementation object instead.
+        // The stamp identifies the object, not the class it was used to build:
+        // combining it with fullExtendedName keeps a second extend() of the same
+        // object against a *different* base a cache miss, so it still reaches the
+        // "used to extend another class" check below instead of silently
+        // returning the first class.
+        string ctorCacheKey = fullExtendedName;
+        if (useContentKey) {
+            napi_value stamped;
+            NAPI_GUARD(napi_get_named_property(env, implementationObject, EXTEND_CTOR_CACHE_KEY,
+                                               &stamped)) {}
+            string implObjectId;
+            if (napi_util::is_of_type(env, stamped, napi_string)) {
+                implObjectId = ArgConverter::ConvertToString(env, stamped);
+            } else {
+                static std::atomic<uint64_t> s_implObjectCounter{0};
+                implObjectId = std::to_string(s_implObjectCounter.fetch_add(1));
+                NAPI_GUARD(napi_set_named_property(
+                        env, implementationObject, EXTEND_CTOR_CACHE_KEY,
+                        ArgConverter::convertToJsString(env, implObjectId))) {}
+            }
+            ctorCacheKey = fullExtendedName + "#" + implObjectId;
+        }
+
+        auto cachedData = GetCachedExtendedClassData(env, ctorCacheKey);
         if (cachedData.extendedCtorFunction != nullptr) {
             auto value = napi_util::get_ref_value(env, cachedData.extendedCtorFunction);
             if (!napi_util::is_null_or_undefined(env, value)) return value;
@@ -2321,10 +2493,31 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
 
         s_name2NodeCache.emplace(fullExtendedName, node);
 
-        ExtendedClassCacheData cacheData(napi_util::make_ref(env, extendFuncCtor), fullExtendedName,
-                                         node);
         auto cache = GetMetadataNodeCache(env);
-        cache->ExtendedCtorFuncCache.emplace(fullExtendedName, cacheData);
+
+        // Two entries, because there are two ways in.
+        //
+        // From JS, extend() asks "have I already built a constructor for this
+        // implementation object?" -- keyed per object, so two identical-looking
+        // extends keep their own bodies.
+        //
+        // From Java, createJSInstanceNative has only the class name of the
+        // instance it is wrapping (CreateExtendedJSWrapper), so the class name
+        // has to resolve too. emplace leaves an existing entry alone, so for a
+        // shared generated class the first implementation registered is the one
+        // Java-side instantiation finds. That is unambiguous for a named extend
+        // -- naming it makes the class unique -- and inherently ambiguous for an
+        // unnamed one, which is why anything Java constructs by name should be
+        // named.
+        ExtendedClassCacheData byImplObject(napi_util::make_ref(env, extendFuncCtor),
+                                            fullExtendedName, node);
+        cache->ExtendedCtorFuncCache.emplace(ctorCacheKey, byImplObject);
+
+        if (ctorCacheKey != fullExtendedName) {
+            ExtendedClassCacheData byClassName(napi_util::make_ref(env, extendFuncCtor),
+                                               fullExtendedName, node);
+            cache->ExtendedCtorFuncCache.emplace(fullExtendedName, byClassName);
+        }
 
         return extendFuncCtor;
 

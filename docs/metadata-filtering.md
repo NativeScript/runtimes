@@ -33,8 +33,10 @@ a `MetadataNode`. It logs each node once. It is a diagnostic build only.
 > `grep NS_METADATA_USAGE_TRACE runtime/.cxx/Debug/*/arm64-v8a/compile_commands.json`
 > and match the APK's `.so` build-id to that config -- a stale `.so` packaged by
 > AGP has produced convincing all-green runs of a feature that was compiled out.
-> Note also that `-Pengine=V8-13` builds the **napi** tree; only
-> `-PbindingLayer=jsi` compiles the tree these instruments live in.
+> Note that `-Pengine=V8-13` builds the **napi** tree and `-Pengine=HERMES
+> -PbindingLayer=jsi` the jsi one. Both carry the tracer; they did not always,
+> and a trace taken against the tree you did not build is empty rather than
+> wrong, which is easy to misread as "nothing resolved".
 
 **Static harvest** -- what an analysis of the JS can see:
 
@@ -437,17 +439,44 @@ covered, so point it at the broadest run available.
 release. That is the safer direction (debug is unfiltered) but it means the
 filter's correctness is exercised on the less frequently run build.
 
-**Not yet run end to end on React Native.** The plugin registers
-`generateNativeScriptMetadataSeedRelease` and configures cleanly; a full RN
-release build has not been measured.
+## Both binding layers
+
+The instruments and the class-naming scheme they assume live in the runtime, and
+the runtime has two independent trees: `NativeScript/ffi/jni/napi` and
+`NativeScript/ffi/jni/jsi`. Everything here was built in the jsi tree first, so
+for a while the tracer, `synthesizedAtRuntime` and content-keyed bindings simply
+did not exist on the napi side -- which is also the **default** binding layer
+(`bindingLayer` defaults to `napi` in `runtime/build.gradle`). A napi build with
+`-Pmetadata-usage-trace` produced no trace at all, and `-Pcontent-keyed-bindings`
+was a no-op there while the static binding generator went on emitting hashed
+names, quietly sending every extend down the on-device dex path.
+
+The napi tree now carries all three, and `CollectImplementedInterfaceNames` /
+`CollectMethodOverrideNames` are factored out of the JNI array builders on both
+sides, so the hashed set and the set handed to the generator cannot drift apart
+within a tree. Verified on napi (`-Pengine=V8-13 -Pcontent-keyed-bindings`):
+
+| | jsi | napi |
+|---|---|---|
+| spec suite | 520 / 0 | 520 / 0 |
+| classes generated on device | 27 | 27 |
+| of those, content-keyed | 17 | 17 |
+| `verify-coverage.js` under filtering | clean | clean |
+
+The one intentional difference: jsi's `ContentKeyedBindingsEnabled` also returns
+true under `NS_JSI_HOST_RUNTIME`, because a guest runs inside the embedder's
+bundle and can never agree with the generator on source coordinates. napi is
+never embedded that way, so there it is the `NS_CONTENT_KEYED_BINDINGS` define
+alone.
 
 ## Status
 
 Done: the instruments, the taxonomy, the closure, the easing rules, the seed
-generator, the keep-rules emitter, the soundness check, and Gradle wiring for
-both the test-app and the RN plugin. Green on the 520-spec suite with filtering
-on, and the size numbers above.
+generator, the keep-rules emitter, the soundness check, Gradle wiring for both
+the test-app and the RN plugin, and parity across both binding layers. Green on
+the 520-spec suite with filtering on, on a React Native release build, and the
+size numbers above.
 
-Not done: the RN path is registered and configures, but has not been run through
-a full release build end to end. R8 shrinking is still off by default -- the
-keep rules make it safe to enable, they do not enable it.
+Not done: R8 shrinking is still off by default -- the keep rules make it safe to
+enable, they do not enable it. On React Native that is the whole dex saving, and
+the template ships `minifyEnabled false`.

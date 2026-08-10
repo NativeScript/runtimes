@@ -79,6 +79,14 @@ private:
 
     static string CreateFullClassName(const std::string& className, const std::string& extendNameAndLocation);
 
+    static string CreateContentKey(const std::string& baseClassName,
+                                   std::vector<std::string> interfaceNames,
+                                   std::vector<std::string> methodNames);
+
+    // Whether an unnamed extend() names its class by content rather than by call
+    // site. Always available as a fallback when no usable location exists.
+    static bool ContentKeyedBindingsEnabled();
+
     static napi_value CreateArrayObjectConstructor(napi_env env);
 
     static void SetInstanceMetadata(napi_env env, napi_value object, MetadataNode* node);
@@ -115,6 +123,10 @@ private:
     static bool GetExtendLocation(napi_env env, std::string& extendLocation, bool isTypeScriptExtend);
     static ExtendedClassCacheData GetCachedExtendedClassData(napi_env env, const std::string& proxyClassName);
     static std::string GetJniClassName(const MetadataTreeNode* node);
+
+#if defined(NS_METADATA_USAGE_TRACE)
+    static void TraceUsage(MetadataTreeNode *treeNode);
+#endif
 
 
     static void SetClassAccessor(napi_env env, napi_value constructor);
