@@ -162,6 +162,10 @@ android.applicationVariants.all { variant ->
     def variantName = variant.name.capitalize()
     def workDir = file("${buildDir}/nativescript/${variant.name}")
     def metadataOutDir = metadataOutDirFor(variant.name)
+    // R8 rules covering exactly the classes the filtered metadata kept. Only
+    // written when a filter is in play; without one the generator keeps
+    // everything and there is nothing to say.
+    def metadataKeepRules = new File(workDir, "metadata-keep-rules.pro")
 
     def metadataTask = tasks.register("generateNativeScriptMetadata${variantName}", JavaExec) {
         group = "nativescript"
@@ -173,7 +177,42 @@ android.applicationVariants.all { variant ->
         workingDir workDir
         mainClass = "-jar"
 
+        // Everything the emitted metadata is a function of. Without these the
+        // task is up to date whenever its output directory merely exists, so a
+        // dependency upgrade -- or turning filtering on -- silently reuses the
+        // previous tree, which reads exactly like the change having no effect.
+        //
+        // Through the artifact view resolveClasspathJars uses; consuming the
+        // configuration directly leaves artifactType unset and AGP cannot then
+        // choose between an AAR's variants. Providers keep both this and the
+        // compiled classes lazy, so they resolve at up-to-date-check time,
+        // after javac has run.
+        inputs.files(variant.runtimeConfiguration.incoming.artifactView { config ->
+            config.lenient(true)
+            config.attributes { container ->
+                container.attribute(
+                        org.gradle.api.attributes.Attribute.of("artifactType", String),
+                        "android-classes-jar")
+            }
+        }.artifacts.artifactFiles).withPropertyName("nsClasspath")
+        inputs.files(provider { resolveCompiledClassDirs(variant) })
+                .withPropertyName("compiledClasses")
+        inputs.file(metadataGeneratorJar).withPropertyName("generator")
+        // The seed is written by another task into this task's working
+        // directory, so it has to be named or the two never connect.
+        inputs.files(provider {
+            def sources = [file("${project.projectDir}/whitelist.mdg"),
+                           file("${project.projectDir}/blacklist.mdg")]
+            if (nsFilterMetadata) sources.add(new File(workDir, "generated-whitelist.mdg"))
+            sources.findAll { it.exists() }
+        }).withPropertyName("filters")
+        // Toggling the flag off leaves no filter file behind to notice.
+        inputs.property("filterMetadata", nsFilterMetadata)
+
         outputs.dir(metadataOutDir)
+        // Not beside the metadata: that directory's parent is an asset source
+        // root, and a keep-rules file dropped there ships inside the APK.
+        outputs.file(metadataKeepRules)
 
         doFirst {
             if (!metadataGeneratorJar.exists()) {
@@ -186,6 +225,9 @@ android.applicationVariants.all { variant ->
             workDir.mkdirs()
             metadataOutDir.deleteDir()
             metadataOutDir.mkdirs()
+            // A run with no filter writes no rules; the previous run's file
+            // would otherwise stay behind and keep a set that no longer matches.
+            metadataKeepRules.delete()
 
             def jars = resolveClasspathJars(variant)
             def classDirs = resolveCompiledClassDirs(variant)
@@ -212,13 +254,19 @@ android.applicationVariants.all { variant ->
             // both are keep-lists, and the generator takes the union before
             // computing its closure. A hand-written entry can therefore only
             // ever add, which is the safe direction.
+            //
+            // The generated half is gated on the flag rather than on the file
+            // existing: the seed task leaves its output in the working
+            // directory, so a later build without -PnsFilterMetadata would
+            // otherwise go on filtering against it.
             def generatedSeed = new File(workDir, "generated-whitelist.mdg")
+            def useGeneratedSeed = nsFilterMetadata && generatedSeed.exists()
             def authoredWhitelist = file("${project.projectDir}/whitelist.mdg")
             def whitelistTarget = new File(workDir, "whitelist.mdg")
 
-            if (generatedSeed.exists() || authoredWhitelist.exists()) {
+            if (useGeneratedSeed || authoredWhitelist.exists()) {
                 def parts = []
-                if (generatedSeed.exists()) parts.add(generatedSeed.text)
+                if (useGeneratedSeed) parts.add(generatedSeed.text)
                 if (authoredWhitelist.exists()) parts.add(authoredWhitelist.text)
                 whitelistTarget.text = parts.join("\n")
             } else {
@@ -237,6 +285,7 @@ android.applicationVariants.all { variant ->
                     "${classDirs.size()} class directories")
 
             def params = [metadataGeneratorJar.absolutePath]
+            params.add("proguardOut=" + metadataKeepRules.absolutePath)
             if (project.hasProperty("nsVerboseMetadata")) {
                 params.add("verbose")
             }
@@ -557,6 +606,24 @@ android.applicationVariants.all { variant ->
             }
 
             metadataTask.configure { it.dependsOn(seedTask) }
+
+            // Filtered metadata names a subset of the classpath, so R8 is now
+            // free to remove the rest -- but only if it is told which subset,
+            // and only if the app has minification on in the first place. This
+            // adds the rules; it deliberately does not turn minification on,
+            // which is the app's decision to make.
+            if (variant.buildType.minifyEnabled) {
+                variant.buildType.proguardFiles.add(metadataKeepRules)
+                tasks.matching {
+                    it.name == "minify${variantName}WithR8" ||
+                    it.name == "minify${variantName}WithProguard"
+                }.configureEach { it.dependsOn(metadataTask) }
+            } else {
+                logger.lifecycle("NativeScript: metadata filtering is on but ${variant.name} " +
+                        "has minifyEnabled=false, so the keep rules at ${metadataKeepRules} " +
+                        "are written and not applied. The metadata shrinks either way; the " +
+                        "dex does not.")
+            }
         }
     }
 

@@ -42,6 +42,12 @@ const JS_GLOBAL_OBJECTS = [
 ];
 
 /*
+ * Names for the global object itself. A chain rooted at one of these is
+ * unwrapped rather than rejected: the segment after it is the real root.
+ */
+const HOST_GLOBAL_ALIASES = ["global", "globalThis", "window", "self"];
+
+/*
  * Property names that appear in every JS program and in no Java package path.
  * Used only to keep the *package alias* heuristic from turning `a.length` into
  * a whitelist entry. Purely cosmetic: an alias wrongly emitted matches no
@@ -174,11 +180,32 @@ function staticChain(node) {
   if (!cur || cur.type !== "Identifier") {
     return null;
   }
+
+  /* `global.java.lang.System` is the same chain as `java.lang.System`: the
+   * runtime installs the package roots on the global object, and in a module
+   * (where `java` is not a declared binding) reaching them through `global` is
+   * the form TypeScript accepts. Left in place the root becomes a segment, and
+   * the entry is `global.java.lang:System` -- which matches no package, so the
+   * class is silently dropped from the seed. */
+  let rootIndex = stack.length - 1;
+  if (HOST_GLOBAL_ALIASES.indexOf(cur.name) !== -1 && rootIndex >= 0) {
+    const outermost = stack[rootIndex];
+    const promoted = outermost.computed
+      ? (outermost.property.type === "StringLiteral" ? outermost.property.value : null)
+      : (outermost.property.type === "Identifier" ? outermost.property.name : null);
+    if (promoted == null) {
+      /* global[expr] tells us nothing at all. */
+      return null;
+    }
+    cur = { name: promoted };
+    rootIndex--;
+  }
+
   /* A '$'-prefixed root is a JS-keyword package; recover the real name. */
   segments.push(unmangleRoot(cur.name));
   const keywordPrefixed = cur.name !== segments[0];
 
-  for (let i = stack.length - 1; i >= 0; i--) {
+  for (let i = rootIndex; i >= 0; i--) {
     const m = stack[i];
     if (m.computed) {
       /* obj["Literal"] is still static; obj[expr] is not. */

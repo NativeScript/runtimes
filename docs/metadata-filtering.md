@@ -251,9 +251,11 @@ generator already produces, so no third Metro run. An app-authored
 `whitelist.mdg` is concatenated with the generated one rather than replacing it
 -- both are keep-lists, so a hand-written entry can only ever add.
 
-Turning the flag off deletes the generated seed. A stale seed left behind would
-keep filtering on for a build that asked for it to be off, which is the
-confusing direction to fail.
+A build without the flag ignores any generated seed still sitting in the working
+directory. Consulting the file rather than the flag is how the RN plugin first
+went wrong: the seed task's output survives, so every later unfiltered build went
+on filtering against it. The flag is also a declared task input, since turning it
+off leaves no file change behind for Gradle to notice.
 
 ## The two checks
 
@@ -345,6 +347,48 @@ filtered metadata.
 > APK layout and pads the freed space instead of reclaiming it -- two debug APKs
 > whose metadata differed by 787KB came out **byte-identical in total size**,
 > which reads exactly like the filter having no effect.
+
+### On a React Native app
+
+The conformance fixture, release, all four ABIs, minification left at the
+template's `minifyEnabled false`:
+
+| | Unfiltered | Filtered | Saved |
+|---|---|---|---|
+| metadata (uncompressed) | 3,229,026 | 656,364 | -2,572,662 (-79.7%) |
+| APK total | 62,457,492 | 61,610,564 | -846,928 (-1.4%) |
+| dex | 11,637,348 | 11,637,348 | 0 |
+
+Seed 261 classes, 2,203 retained after closure, out of a classpath of 89 jars.
+
+The dex row is the whole point of the caveat the plugin logs: filtering shrinks
+the metadata whatever the app does, but the five-megabyte half of the test-app's
+win came from R8, and an app with `minifyEnabled false` gets none of it. The
+plugin writes the keep rules either way and wires them into R8 only if the app
+already minifies -- turning minification on is the app's decision, not a side
+effect of asking for smaller metadata.
+
+Verified on device: all 16 conformance checks pass on the filtered release APK.
+
+#### The `global.` prefix
+
+That device run is the only reason this section is not reporting a false
+success. Four checks failed on the first filtered APK --
+`System.currentTimeMillis`, `Build.VERSION.SDK_INT`, and two through
+`java.util.Collections` -- each with `Cannot read property … of undefined`, the
+JS-property-access failure mode described above.
+
+In a module, `java` is not a declared binding, so the natural spelling is
+`global.java.lang.System`. The harvester walked that chain from its root
+identifier and emitted `global.java.lang:System`, which matches no package and
+retained nothing. The build was green, the closure was sound, and the app broke
+on the fourth line. `staticChain` now unwraps a root of `global`, `globalThis`,
+`window` or `self` before reading the package path.
+
+Worth noting what did *not* catch it. The soundness check cannot: nothing ever
+asked the generator for `java.lang.System`. Neither would `verify-coverage.js`
+without a run that reaches those lines. A class the JS names but the seed never
+hears about is only visible from a device.
 
 ### Why the rules say -dontobfuscate
 
