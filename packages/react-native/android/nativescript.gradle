@@ -259,11 +259,28 @@ android.applicationVariants.all { variant ->
 
         // Content-keyed, so a dependency upgrade that keeps the same path is
         // still noticed, and an untouched classpath costs nothing.
-        inputs.files(variant.runtimeConfiguration).withPropertyName("classpath")
+        //
+        // Through the same artifact view resolveClasspathJars uses. Consuming
+        // the configuration directly leaves artifactType unset, and AGP then
+        // cannot choose between an AAR's variants ("cannot choose between
+        // android-aar-metadata, android-art-profile, android-assets, ...").
+        // artifactFiles stays lazy, so nothing resolves at configuration time.
+        inputs.files(variant.runtimeConfiguration.incoming.artifactView { config ->
+            config.lenient(true)
+            config.attributes { container ->
+                container.attribute(
+                        org.gradle.api.attributes.Attribute.of("artifactType", String),
+                        "android-classes-jar")
+            }
+        }.artifacts.artifactFiles).withPropertyName("nsClasspath")
         inputs.file(dtsGeneratorJar).withPropertyName("generator")
         outputs.dir(typingsDir).withPropertyName("typings")
 
         doFirst {
+            // Created here as well as by the metadata task: the two are
+            // independent, and typings can be asked for on their own.
+            workDir.mkdirs()
+
             if (!dtsGeneratorJar.exists()) {
                 throw new GradleException(
                         "NativeScript: ${dtsGeneratorJar} is missing. It ships with " +
