@@ -281,17 +281,38 @@ public class DtsApi {
             }
         }
 
+        // Bucketed by first character. Every candidate position used to be
+        // tested against all ~48 entries with startsWith; almost all of those
+        // comparisons fail on the first character, and this made
+        // replaceIgnoredNamespaces the hottest thing in the generator once the
+        // generics pass was fixed (34% of samples). Indexing by that character
+        // leaves one or two real comparisons per position.
+        List<List<String>> ignoredByFirstChar = bucketByFirstChar(ignored);
+
+        // Copied in runs rather than a character at a time. Matches are rare,
+        // so the old loop spent most of its life doing single-char appends and
+        // bounds checks across the whole document.
         StringBuilder out = new StringBuilder(content.length());
+        int contentLength = content.length();
         int i = 0;
-        while (i < content.length()) {
-            int length = ignoredTypeLengthAt(content, i, ignored);
+        int runStart = 0;
+
+        while (i < contentLength) {
+            int length = ignoredTypeLengthAt(content, i, ignoredByFirstChar);
             if (length > 0) {
+                if (i > runStart) {
+                    out.append(content, runStart, i);
+                }
                 out.append("any");
                 i += length;
+                runStart = i;
             } else {
-                out.append(content.charAt(i));
                 i++;
             }
+        }
+
+        if (runStart < contentLength) {
+            out.append(content, runStart, contentLength);
         }
 
         // replace "extends any" with "extends java.lang.Object"
@@ -306,7 +327,31 @@ public class DtsApi {
      * Length of the ignored-namespace type starting at {@code start}, or 0.
      * Includes the qualified name and its balanced generic arguments.
      */
-    private static int ignoredTypeLengthAt(String content, int start, List<String> ignored) {
+    private static List<List<String>> bucketByFirstChar(List<String> ignored) {
+        List<List<String>> buckets = new ArrayList<>(ASCII_BUCKETS);
+        for (int i = 0; i < ASCII_BUCKETS; i++) {
+            buckets.add(null);
+        }
+
+        for (String namespace : ignored) {
+            if (namespace.isEmpty()) {
+                continue;
+            }
+            char first = namespace.charAt(0);
+            if (first >= ASCII_BUCKETS) {
+                continue;
+            }
+            if (buckets.get(first) == null) {
+                buckets.set(first, new ArrayList<>());
+            }
+            buckets.get(first).add(namespace);
+        }
+        return buckets;
+    }
+
+    private static final int ASCII_BUCKETS = 128;
+
+    private static int ignoredTypeLengthAt(String content, int start, List<List<String>> ignoredByFirstChar) {
         // Must begin a name, not land in the middle of one.
         if (start > 0) {
             char previous = content.charAt(start - 1);
@@ -315,7 +360,14 @@ public class DtsApi {
             }
         }
 
-        for (String namespace : ignored) {
+        char firstChar = content.charAt(start);
+        List<String> ignored = firstChar < ASCII_BUCKETS ? ignoredByFirstChar.get(firstChar) : null;
+        if (ignored == null) {
+            return 0;
+        }
+
+        for (int n = 0; n < ignored.size(); n++) {
+            String namespace = ignored.get(n);
             if (!content.startsWith(namespace, start)) {
                 continue;
             }
@@ -1589,45 +1641,57 @@ public class DtsApi {
         globalAliases.put("android", "globalAndroid");
     }
 
+    /**
+     * Namespaces referenced by the SDK but not shipped in it; every type from
+     * them becomes `any`.
+     *
+     * Built once. It used to be rebuilt -- a fresh ArrayList and 24 adds -- on
+     * every call, and it is called once per class plus once per pass over the
+     * document. On android.jar that was tens of thousands of throwaway lists
+     * and, with the concatenation in isIgnoredNamespace below, roughly 170,000
+     * throwaway strings.
+     */
+    private static final List<String> IGNORED_NAMESPACES = List.of(
+            "kotlin",
+            "org.jetbrains",
+            "org.intellij",
+            "android.app.job",
+            "android.app.SharedElementCallback",
+            "android.arch",
+            "android.content.pm.ShortcutInfo",
+            "android.graphics.drawable.Icon",
+            "android.graphics.Outline",
+            "android.view.SearchEvent",
+            "android.view.KeyboardShortcutGroup",
+            "android.view.ViewStructure",
+            "android.view.textclassifier",
+            "android.telephony.mbms",
+            "android.text.PrecomputedText",
+            "android.media.browse",
+            "android.media.session",
+            "android.media.AudioAttributes",
+            "android.media.MediaMetadata",
+            "android.media.Rating",
+            "android.service.media",
+            "android.print",
+            "java.util.function",
+            "com.tom_roush.pdfbox.pdmodel.common.function");
+
+    /** `namespace + "."`, precomputed; the concatenation used to happen inside the loop. */
+    private static final List<String> IGNORED_NAMESPACE_PREFIXES =
+            IGNORED_NAMESPACES.stream().map(n -> n + ".").collect(Collectors.toList());
+
     private List<String> getIgnoredNamespaces(){
         // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
-        List<String> result = new ArrayList<>();
-
-        result.add("kotlin");
-        result.add("org.jetbrains");
-        result.add("org.intellij");
-
-        result.add("android.app.job");
-        result.add("android.app.SharedElementCallback");
-        result.add("android.arch");
-        result.add("android.content.pm.ShortcutInfo");
-        result.add("android.graphics.drawable.Icon");
-        result.add("android.graphics.Outline");
-        result.add("android.view.SearchEvent");
-        result.add("android.view.KeyboardShortcutGroup");
-        result.add("android.view.ViewStructure");
-        result.add("android.view.textclassifier");
-        result.add("android.telephony.mbms");
-        result.add("android.text.PrecomputedText");
-        result.add("android.media.browse");
-        result.add("android.media.session");
-        result.add("android.media.AudioAttributes");
-        result.add("android.media.MediaMetadata");
-        result.add("android.media.Rating");
-        result.add("android.service.media");
-        result.add("android.print");
-        result.add("java.util.function");
-
-        result.add("com.tom_roush.pdfbox.pdmodel.common.function"); // com.tom_roush:pdfbox-android:1.8.10.0
-
-        return result;
+        return IGNORED_NAMESPACES;
     }
 
     private boolean isIgnoredNamespace() {
         String[] namespaceOnlyParts = Arrays.copyOf(namespaceParts, namespaceParts.length-1);
         String namespace = String.join(".", namespaceOnlyParts);
-        for (String ignoredNamespace : getIgnoredNamespaces()) {
-            if(ignoredNamespace.equals(namespace) || namespace.startsWith(ignoredNamespace + ".")) {
+        for (int i = 0; i < IGNORED_NAMESPACES.size(); i++) {
+            if (namespace.equals(IGNORED_NAMESPACES.get(i))
+                    || namespace.startsWith(IGNORED_NAMESPACE_PREFIXES.get(i))) {
                 return true;
             }
         }
