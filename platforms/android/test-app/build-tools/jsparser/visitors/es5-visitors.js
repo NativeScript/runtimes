@@ -971,18 +971,33 @@ var es5_visitors = (function () {
    *	HELPER METHODS
    */
 
-  // Returns the Identifier name of a property's key, or null when the property
-  // is a SpreadElement, has a computed key, or uses a non-Identifier key
-  // (e.g. StringLiteral, NumericLiteral). Such properties cannot be mapped to
-  // a Java method binding, so callers should skip them.
+  // A method name a Java binding could carry, or null when the property cannot
+  // be mapped to one: a SpreadElement, a computed key, or a literal that is not
+  // a legal identifier.
+  //
+  // A quoted key counts. `{ "toString": function () {} }` is the same override
+  // as `{ toString: function () {} }` -- the runtime enumerates the object's
+  // own property names and cannot tell the two apart, so skipping the quoted
+  // form put this side's method list (and therefore the content key derived
+  // from it) permanently out of step with the runtime's for any app that writes
+  // its overrides that way. Minifiers and code generators emit it routinely.
+  var JAVA_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
   function _getIdentifierKeyName(property) {
     if (!property || property.computed) {
       return null;
     }
-    if (!property.key || !types.isIdentifier(property.key)) {
+    if (!property.key) {
       return null;
     }
-    return property.key.name;
+    if (types.isIdentifier(property.key)) {
+      return property.key.name;
+    }
+    if (types.isStringLiteral(property.key) &&
+        JAVA_IDENTIFIER.test(property.key.value)) {
+      return property.key.value;
+    }
+    return null;
   }
 
   function getTypeScriptExtendSuperCallLocation(extendPath, config) {

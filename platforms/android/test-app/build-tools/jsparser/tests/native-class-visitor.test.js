@@ -239,3 +239,36 @@ console.log("call-form decorator tests passed");
 }
 
 console.log("bundled-import decorator tests passed");
+
+// A quoted key is the same override as a bare one. The runtime enumerates own
+// property names and cannot tell them apart, so this side must not either --
+// skipping the quoted form gave the two sides different method lists, hence
+// different content keys, hence a class rebuilt on device every launch.
+{
+  const { unnamed } = parse(`
+    var O = java.lang.Object.extend({
+      "toString": function () { return "x"; },
+      hashCode: function () { return 1; }
+    });
+  `);
+  assert.strictEqual(unnamed.length, 1);
+  assert.deepStrictEqual(fields(unnamed[0])[5].split(","), ["toString", "hashCode"]);
+}
+
+// Keys that genuinely cannot name a Java method stay skipped, and must not
+// abort the traversal: bundled vendor code is full of them.
+{
+  const { unnamed } = parse(`
+    var O = java.lang.Object.extend({
+      ...base,
+      ["computed" + n]: function () {},
+      "not-an-identifier": function () {},
+      3: function () {},
+      hashCode: function () { return 1; }
+    });
+  `);
+  assert.strictEqual(unnamed.length, 1);
+  assert.deepStrictEqual(fields(unnamed[0])[5].split(","), ["hashCode"]);
+}
+
+console.log("implementation-object key tests passed");

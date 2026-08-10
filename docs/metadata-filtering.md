@@ -475,7 +475,7 @@ Both layers were at 27 until the two causes below were found by listing
 `com.tns.gen.*` classes in the APK. Neither showed up as a failure: a class the
 generator missed is built at startup and works.
 
-**The hash disagreed (11 → 1).** Two independent divergences, both invisible to
+**The hash disagreed (11 → 0).** Three independent divergences, all invisible to
 the build:
 
 - `ts_helpers`' `__extends` writes `__parent` and `__child` onto the prototype
@@ -490,8 +490,25 @@ the build:
   collapse `/` and `$` to `.`, and both canonicalize *before* sorting, since
   `$` and `.` sort differently.
 
-`ContentKeyTest` pins both, because the only other place the disagreement
-surfaces is a slower startup on a device.
+- A **quoted key** was skipped by the parser. `{ "toString": function () {} }`
+  is the same override as `{ toString: function () {} }` -- the runtime
+  enumerates own property names and cannot tell them apart -- but
+  `_getIdentifierKeyName` accepted only `Identifier` keys, so any app writing
+  its overrides that way was permanently out of step. Minifiers and code
+  generators emit the quoted form routinely, so this is the one of the three
+  most likely to bite a real app rather than a test fixture. Quoted keys that
+  are legal identifiers now count; spreads, computed keys and numeric keys stay
+  skipped, because nothing can map those to a Java method.
+
+`ContentKeyTest` and `tests/native-class-visitor.test.js` pin these, because the
+only other place the disagreement surfaces is a slower startup on a device.
+
+**Why a disagreement is safe.** Both sides derive the key from the method list,
+so any difference in the list changes the key, and a changed key simply misses
+the pre-generated class -- the runtime then builds the right one itself. The
+failure mode is always a slower launch, never a wrong class. That is worth
+knowing before hunting one of these: nothing is broken, something is just not
+being used.
 
 **The interface was never pre-generated (10 → 0).** `GetInterfaceNames` walked
 only classpath entries ending in `.jar`, and the app's own compiled classes
@@ -509,7 +526,14 @@ are not worth chasing:
 | `ClassForNameDiscoveryObject`, `…Instantiated` | reached through `java.lang.Object[ext](…)` -- computed member access |
 | `Button1_btn1344`, `DummyDerivedClass_D1440` | the implementation object is a variable, so its method names are not in the source |
 | `TextView_h…`, `Button1_Button1_h…` | no binding emitted for that base at all; both have empty override sets |
-| `java.lang.Object_hd50…` | **not diagnosed.** The last surviving hash disagreement -- one unnamed `java.lang.Object` extend; the generator emitted two other `java.lang.Object` keys, neither of which matches |
+| `java.lang.Object_hd50…` | the implementation object is assembled as a **string and `eval`'d** |
+
+> Do not classify these by matching the base-class stem. An unnamed extend's
+> name is just `<base>_h<hash>`, so the stem matches every other unnamed extend
+> of the same base, and a class the generator never emitted looks like a hash
+> disagreement. The `eval` case above was misread that way; the honest test is
+> whether the exact name is present. `FNV("java.lang.Object||hashCode")` --
+> recomputing the payload by hand -- is what identified it.
 
 ## Status
 
