@@ -71,6 +71,7 @@ mkdir -p \
   "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/host_objects" \
   "$PACKAGE_DIR/native-api/jsi/hermes" \
   "$PACKAGE_DIR/native-api/jsi/shared" \
+  "$PACKAGE_DIR/native-api/jsi" \
   "$PACKAGE_DIR/native-api/metadata/include" \
   "$PACKAGE_DIR/metadata" \
   "$PACKAGE_DIR/ios/vendor/libffi/include" \
@@ -78,18 +79,27 @@ mkdir -p \
   "$PACKAGE_DIR/types/objc-node-api" \
   "$PACK_DESTINATION"
 
-cp NativeScript/ffi/objc/hermes/NativeApiJsi*.mm "$PACKAGE_DIR/native-api/ffi/objc/hermes/"
-cp NativeScript/ffi/objc/hermes/NativeApiJsi*.h "$PACKAGE_DIR/native-api/ffi/objc/hermes/"
-cp NativeScript/ffi/objc/hermes/NativeApiJsiReactNative.h "$PACKAGE_DIR/native-api/ffi/objc/hermes/"
-cp NativeScript/ffi/objc/shared/bridge/*.mm "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/"
-cp NativeScript/ffi/objc/shared/bridge/*.h "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/"
-cp NativeScript/ffi/objc/shared/bridge/host_objects/*.mm \
-  "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/host_objects/"
-cp NativeScript/ffi/objc/shared/NativeApiBackendConfig.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
-cp NativeScript/ffi/objc/shared/SignatureDispatchCore.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
-cp NativeScript/ffi/objc/shared/PreparedSignatureDispatch.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
-cp NativeScript/jsi/hermes/*.h "$PACKAGE_DIR/native-api/jsi/hermes/"
-cp NativeScript/jsi/shared/*.h "$PACKAGE_DIR/native-api/jsi/shared/"
+# The platform-neutral engine layer. The Apple headers under ffi/objc are thin
+# forwarders onto it -- NativeApiJsi.h is a one-line #include of
+# "jsi/hermes/NativeApiJsi.h" -- so the pod does not compile without this tree,
+# even though it compiles nothing out of it directly. Header-only as far as the
+# TurboModule is concerned; it is on the pod's header search path via
+# native-api. Staged here rather than left to the Android step, because this
+# script owns native-api/ and wipes it above.
+cp -R "$REPO_ROOT/NativeScript/jsi/." "$PACKAGE_DIR/native-api/jsi/"
+
+# The Apple side of the bridge, staged whole rather than file by file.
+#
+# Only NativeApiJsi.mm is compiled: everything else arrives through #include,
+# either as a header or as a .mm folded into that translation unit (see
+# HostObjects.mm, which assembles host_objects/*.mm). An enumerated list has to
+# name every one of those transitively, so it silently goes stale whenever the
+# sources grow a file or a directory -- which is what happened here. Copying the
+# trees keeps the staged set equal to the source set by construction.
+cp -R "$REPO_ROOT/NativeScript/ffi/objc/hermes/." "$PACKAGE_DIR/native-api/ffi/objc/hermes/"
+cp -R "$REPO_ROOT/NativeScript/ffi/objc/shared/." "$PACKAGE_DIR/native-api/ffi/objc/shared/"
+# Build leftovers, not sources.
+find "$PACKAGE_DIR/native-api/ffi/objc" -name '*.stamp' -delete
 cp "$GENERATED_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/shared/GeneratedSignatureDispatch.inc"
 GENERATED_GSD_SIGNATURE_DISPATCH="$(dirname "$GENERATED_SIGNATURE_DISPATCH")/GeneratedGsdSignatureDispatch.inc"
 if [ -f "$GENERATED_GSD_SIGNATURE_DISPATCH" ]; then
