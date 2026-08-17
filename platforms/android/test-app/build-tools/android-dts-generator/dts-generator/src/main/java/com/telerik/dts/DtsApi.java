@@ -29,6 +29,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +95,14 @@ public class DtsApi {
         "try", "typeof", "var", "void",
         "volatile", "while", "with", "yield"
     );
+
+    /**
+     * Package prefixes skipped because a segment is a reserved word, discovered
+     * while walking the classpath. Feeds getIgnoredNamespaces() so references to
+     * their types collapse to {@code any} like any other unemitted namespace.
+     */
+    private final Set<String> reservedWordNamespaces = new LinkedHashSet<>();
+    private boolean scannedForReservedWords = false;
 
     public DtsApi(boolean allGenericImplements, InputParameters inputParameters) {
         this.allGenericImplements = allGenericImplements;
@@ -1681,17 +1690,85 @@ public class DtsApi {
     private static final List<String> IGNORED_NAMESPACE_PREFIXES =
             IGNORED_NAMESPACES.stream().map(n -> n + ".").collect(Collectors.toList());
 
-    private List<String> getIgnoredNamespaces(){
-        // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
-        return IGNORED_NAMESPACES;
+    /**
+     * Collects the reserved-word packages across the whole classpath, once.
+     *
+     * <p>Discovering them as classes are emitted is not enough: content is
+     * generated and replaced one class group at a time, so a group processed
+     * before the offending package is reached keeps raw references to types we
+     * never declare -- which tsc rejects just as loudly as the bad namespace
+     * did. Scanning every class name up front makes the ignore list complete
+     * from the first group on.
+     */
+    private void ensureReservedWordNamespaces() {
+        if (scannedForReservedWords) {
+            return;
+        }
+        scannedForReservedWords = true;
+        for (String className : ClassRepo.getAllClassNames()) {
+            String[] parts = className.split("\\.");
+            // parts[length-1] is the class name; only package segments matter.
+            for (int i = 0; i < parts.length - 1; i++) {
+                if (reservedJsKeywords.contains(parts[i])) {
+                    String prefix = String.join(".", Arrays.copyOf(parts, i + 1));
+                    if (reservedWordNamespaces.add(prefix)) {
+                        System.out.println(String.format(
+                                "Skipping package %s: \"%s\" is a reserved word and cannot be a TypeScript namespace. "
+                                        + "Types under it are typed as any.",
+                                prefix, parts[i]));
+                    }
+                    break;
+                }
+            }
+        }
     }
 
+    private List<String> getIgnoredNamespaces(){
+        // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
+        ensureReservedWordNamespaces();
+        if (reservedWordNamespaces.isEmpty()) {
+            return IGNORED_NAMESPACES;
+        }
+        List<String> all = new ArrayList<>(IGNORED_NAMESPACES);
+        all.addAll(reservedWordNamespaces);
+        return all;
+    }
+
+    /**
+     * A namespace is skipped when it is listed in IGNORED_NAMESPACES, or when
+     * any of its segments is a word TypeScript will not accept as a namespace
+     * name.
+     *
+     * <p>A package such as org.apache.commons.lang3.function is emitted as
+     * "export module function {", which does not parse -- and because the brace
+     * can never be closed, it takes the rest of the .d.ts down with
+     * it rather than just its own declarations. Java forbids its own keywords in
+     * package names, so the collisions that actually reach here are the words
+     * only JavaScript reserves ({@code function}, {@code in}, {@code with},
+     * {@code let}, {@code yield}, ...). Two of them, java.util.function and
+     * com.tom_roush...common.function, were previously listed by hand above;
+     * this covers every such package on any classpath, including ones we have
+     * never seen.
+     *
+     * <p>The types are dropped rather than escaped: an escaped segment no longer
+     * matches the package path the runtime resolves from metadata, so a name
+     * that type-checks would fail at runtime. Dropping them yields `any`, which
+     * is honest about what we know.
+     */
     private boolean isIgnoredNamespace() {
         String[] namespaceOnlyParts = Arrays.copyOf(namespaceParts, namespaceParts.length-1);
         String namespace = String.join(".", namespaceOnlyParts);
         for (int i = 0; i < IGNORED_NAMESPACES.size(); i++) {
             if (namespace.equals(IGNORED_NAMESPACES.get(i))
                     || namespace.startsWith(IGNORED_NAMESPACE_PREFIXES.get(i))) {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < namespaceOnlyParts.length; i++) {
+            if (reservedJsKeywords.contains(namespaceOnlyParts[i])) {
+                // Everything from the reserved segment down is unnameable, so
+                // record that prefix -- not the individual class -- as ignored.
                 return true;
             }
         }
