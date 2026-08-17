@@ -13,8 +13,7 @@ bytecode-compiler/
   lib/
     index.js               engine registry + host resolution
     hermes.js              Hermes adapter (wired end-to-end today)
-    quickjs.js             wired; gated off (ready:false) until runtime read-support lands
-    quickjs-ng.js
+    quickjs-ng.js          serves both QUICKJS_NG and QUICKJS (the bellard tree was dropped)
     primjs.js
   native/
     qjs-compile.c          blob-emitting shim for QuickJS + QuickJS-NG (JS_* API)
@@ -25,9 +24,9 @@ bytecode-compiler/
 
 ## Building the compiler binaries
 
-The host binaries are built by [`.github/workflows/bytecode-compilers.yml`](../../.github/workflows/bytecode-compilers.yml)
+The host binaries are built by [`.github/workflows/bytecode-compilers.yml`](../../../../.github/workflows/bytecode-compilers.yml)
 (manual `workflow_dispatch`). It clones each engine's **upstream** repo
-(facebook/hermes, bellard/quickjs, quickjs-ng/quickjs, lynx-family/primjs), builds
+(facebook/hermes, quickjs-ng/quickjs, lynx-family/primjs), builds
 the CLI for every host, and uploads one artifact per `(engine, host)` named
 `bytecode-compiler-<engine>-<host>`. Download and drop them into
 `bin/<engine>/<host>/`.
@@ -40,12 +39,14 @@ that links the engine and emits a **NativeScript bytecode container**:
 [8-byte magic][4-byte format version, little-endian][engine JS_WriteObject payload]
 ```
 
-The magic (`NSBCQJS\0`, `NSBCNGS\0`, `NSBCPJS\0`) must match the adapter's `magic`
-and the runtime's detection. Hermes uses its native HBC magic instead (no container).
+The magic (`NSBCNGS\0`, `NSBCPJS\0`) must match the adapter's `magic` and the
+runtime's detection. Hermes uses its native HBC magic instead (no container).
 
 > Compatibility: the CLI must be built from the engine ref that matches what the
-> runtime bundles (prebuilt `.so` for Hermes/PrimJS, vendored source for
-> QuickJS/QuickJS-NG). Pin the workflow inputs to exact commits once validated.
+> runtime bundles (prebuilt binaries for Hermes/PrimJS, `vendor/quickjs/source_ng`
+> for QuickJS-NG). QuickJS-NG is the strict case: the compiler stamps its own
+> `BC_VERSION` and `JS_ReadObject` accepts only the runtime's, so a mismatched ref
+> produces blobs that load nowhere. Pin the workflow inputs to exact commits.
 
 Only the compiler binary and its command line are engine-specific; that lives in
 each adapter. Everything else (module wrapping, the raw-file list, idempotency,
