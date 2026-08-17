@@ -11,8 +11,9 @@
 //     Generated from the app's own resolved classpath, so a library the app
 //     installs is callable without anyone publishing bindings for it.
 //
-//   * TypeScript declarations for the same classpath, off by default because
-//     they take a while. Turn on with -PnsGenerateTypings=true.
+//   * TypeScript declarations for the same classpath, generated on the first
+//     build and refreshed only when the classpath changes. -PnsGenerateTypings=false
+//     opts out.
 //
 // Both are keyed to the variant being built, so debug and release get metadata
 // for the dependencies they actually resolve.
@@ -33,7 +34,34 @@ def reactExt = project.extensions.findByName("react")
 def reactRoot = reactExt?.root?.getOrNull()?.asFile ?: file("${project.projectDir}/../..")
 def reactCliFile = reactExt?.cliFile?.getOrNull()?.asFile?.absolutePath
         ?: new File(reactRoot, "node_modules/react-native/cli.js").absolutePath
-def nodeExecutable = (reactExt?.nodeExecutableAndArgs?.getOrNull() ?: ["node"])[0]
+// Node, as a full command rather than just its head: nodeExecutableAndArgs is a
+// list because an app may need flags with it (--max-old-space-size, a wrapper),
+// and dropping everything after [0] silently ignores them.
+//
+// -PnsNodePath wins over everything. A bare "node" is resolved through the
+// Gradle daemon's PATH, which is not the PATH of the shell that launched the
+// build: version managers (volta, nvm, fnm, asdf) install a shim there that
+// fails unless a default version is pinned, and the daemon outlives the
+// terminal it was started from. An absolute path sidesteps all of it.
+def nsNodeCommand = {
+    if (project.hasProperty("nsNodePath")) {
+        return [project.property("nsNodePath").toString()]
+    }
+    def fromReact = reactExt?.nodeExecutableAndArgs?.getOrNull()
+    if (fromReact != null && !fromReact.isEmpty()) {
+        return fromReact.collect { it.toString() }
+    }
+    return ["node"]
+}()
+def nodeExecutable = nsNodeCommand[0]
+
+// Shared by every step that shells out to node, so one broken toolchain reads
+// the same way wherever it surfaces.
+def nsNodeHelp = "Set -PnsNodePath=/absolute/path/to/node (or react { " +
+        "nodeExecutableAndArgs = [\"/absolute/path/to/node\"] } in " +
+        "android/app/build.gradle). Version managers such as volta, nvm, fnm " +
+        "and asdf put a shim on PATH that the Gradle daemon inherits without " +
+        "the shell state that makes it work."
 def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
         ?: (new File(reactRoot, "index.js").exists()
                 ? new File(reactRoot, "index.js").absolutePath
@@ -42,10 +70,109 @@ def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
 def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
     && Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
 
-// Restrict metadata to what the app's bundle can reach. Opt-in while it earns
-// trust; release builds only, since a debug build has no bundle on disk to
-// analyse and guessing from a partial view is what breaks apps.
-def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
+// Restrict metadata to what the app's bundle can reach.
+//
+// On by default, and release-only: a debug build has no bundle on disk to
+// analyse, and guessing from a partial view is what breaks apps. Shipping
+// metadata for the whole compile classpath means an app that touches 5% of the
+// platform pays for 100% of it, in both APK size and startup parse time.
+//
+// The seed is a lower bound that the generator widens (supertypes, nested
+// classes, signature types) before dropping anything, because usage alone is
+// not enough: android.os.Bundle is never named in JS and never resolved as a
+// node, yet removing it makes Activity.onCreate(Bundle) unbuildable and the app
+// crashes at launch. See docs/metadata-filtering.md.
+//
+// -PnsFilterMetadata=false opts out and ships the whole classpath, which is the
+// escape hatch if a filtered build misses something.
+def nsFilterMetadata = !project.hasProperty("nsFilterMetadata") ||
+        Boolean.parseBoolean(project.property("nsFilterMetadata").toString())
+
+// Classes the app declares it calls from JS, from nativescript.react-native.json
+// at the project root -- the same file the iOS side already uses:
+//
+//   { "reactNative": { "metadata": { "android": {
+//       "include": ["com.ammarahmed.reactnativeworkers.WorkerTurboModules"] } } } }
+//
+// Entries are added to the metadata whitelist, and a package named here is kept
+// out of the autolinked-module exclusion below. Accepts "pkg.Class", "pkg.*" or
+// raw .mdg form ("pkg:Class").
+def nsMetadataInclude = {
+    def configFile = new File(reactRoot, "nativescript.react-native.json")
+    if (!configFile.exists()) return []
+    try {
+        def parsed = new groovy.json.JsonSlurper().parse(configFile)
+        def declared = parsed?.reactNative?.metadata?.android?.include
+        if (declared instanceof List) {
+            return declared.findAll { it instanceof String && !it.trim().isEmpty() }
+                    .collect { it.toString().trim() }
+        }
+    } catch (Exception e) {
+        // Falling back to a different filter than the author asked for would be
+        // silent and wrong; a filtered build is not the place to guess.
+        throw new GradleException("NativeScript: could not read ${configFile}: ${e.message}")
+    }
+    return []
+}()
+
+// "com.foo.Bar" -> "com.foo:Bar", "com.foo.*" -> "com.foo:*", "a:b" unchanged.
+def nsToMdgEntry = { String raw ->
+    def value = raw.trim()
+    if (value.isEmpty()) return null
+    if (value.contains(":")) return value
+    if (value.endsWith(".*")) return value[0..-3] + ":*"
+    def segments = value.tokenize(".")
+    for (int i = 0; i < segments.size(); i++) {
+        if (segments[i] && Character.isUpperCase(segments[i].charAt(0))) {
+            return segments[0..<i].join(".") + ":" + segments[i..-1].join(".")
+        }
+    }
+    return value + ":*"
+}
+
+// The package half of a declaration, for comparing against module packages.
+def nsIncludedPackages = nsMetadataInclude.collect { raw ->
+    def entry = nsToMdgEntry(raw)
+    entry == null ? null : entry.substring(0, entry.indexOf(":"))
+}.findAll { it != null && !it.isEmpty() }
+
+// React Native's own native modules are reached from JS through the TurboModule
+// bridge, not through the interop, so describing them in metadata buys nothing
+// and costs bytes and startup parse time. Their packages are read from the
+// PackageList React Native's autolinking generates, so the exclusion tracks
+// whatever the app installs without anyone maintaining a list.
+//
+// This does NOT affect the R8 keep rules: those are written from what metadata
+// retains, so a module that is never described is simply never mentioned --
+// and it stays in the app because the Java that registers it references it,
+// which is what R8 follows. Excluded from metadata, untouched in the dex.
+//
+// A package the app named in `include` is left out of the exclusion: the
+// generator applies the blacklist *over* the whitelist
+// (`isSeed(d) && !isBlacklisted(d)` in MetadataClosure), so blacklisting a
+// package the author asked for would silently win over the request.
+def nsAutolinkedModulePackages = { variantName ->
+    def packageList = new File(buildDir,
+            "generated/autolinking/src/main/java/com/facebook/react/PackageList.java")
+    if (!packageList.exists()) return []
+
+    def packages = new LinkedHashSet<String>()
+    def entry = ~/new\s+([a-zA-Z0-9_.]+)\s*\(/
+    packageList.eachLine { line ->
+        def matcher = entry.matcher(line)
+        while (matcher.find()) {
+            def fqcn = matcher.group(1)
+            def lastDot = fqcn.lastIndexOf('.')
+            if (lastDot <= 0) return
+            def pkg = fqcn.substring(0, lastDot)
+            // The bridge's own packages are described by the runtime keep-list
+            // and by whatever the JS names; leave that judgement to the seed.
+            if (pkg.startsWith("com.facebook.react")) return
+            packages.add(pkg)
+        }
+    }
+    return packages.toList()
+}
 
 // Typings are on by default: without them TypeScript cannot type a single
 // native call. The task declares the classpath as an input and the typings
@@ -208,6 +335,9 @@ android.applicationVariants.all { variant ->
         }).withPropertyName("filters")
         // Toggling the flag off leaves no filter file behind to notice.
         inputs.property("filterMetadata", nsFilterMetadata)
+        // Editing the declaration changes both what is kept and which module
+        // packages are excluded, and neither is visible in the files above.
+        inputs.property("metadataInclude", nsMetadataInclude)
 
         outputs.dir(metadataOutDir)
         // Not beside the metadata: that directory's parent is an asset source
@@ -264,10 +394,22 @@ android.applicationVariants.all { variant ->
             def authoredWhitelist = file("${project.projectDir}/whitelist.mdg")
             def whitelistTarget = new File(workDir, "whitelist.mdg")
 
-            if (useGeneratedSeed || authoredWhitelist.exists()) {
+            // Only in a build that is already filtering. A declaration is meant
+            // to widen a filtered set, not to become the whole filter: adding it
+            // to an unfiltered (debug) build would turn a whitelist on for the
+            // first time and cut that build down to the declaration's closure.
+            def declaredEntries = useGeneratedSeed
+                    ? nsMetadataInclude.collect { nsToMdgEntry(it) }.findAll { it != null }
+                    : []
+
+            if (useGeneratedSeed || authoredWhitelist.exists() || !declaredEntries.isEmpty()) {
                 def parts = []
                 if (useGeneratedSeed) parts.add(generatedSeed.text)
                 if (authoredWhitelist.exists()) parts.add(authoredWhitelist.text)
+                if (!declaredEntries.isEmpty()) {
+                    parts.add("# from nativescript.react-native.json\n" +
+                            declaredEntries.join("\n") + "\n")
+                }
                 whitelistTarget.text = parts.join("\n")
             } else {
                 whitelistTarget.delete()
@@ -275,8 +417,63 @@ android.applicationVariants.all { variant ->
 
             def blacklistSource = file("${project.projectDir}/blacklist.mdg")
             def blacklistTarget = new File(workDir, "blacklist.mdg")
-            if (blacklistSource.exists()) {
-                blacklistTarget.text = blacklistSource.text
+
+            // Autolinked React Native modules, minus the ones this app actually
+            // reaches from JS.
+            //
+            // Gated with the whitelist because the generator only consults a
+            // blacklist once a whitelist exists, and an unfiltered build should
+            // stay unfiltered.
+            //
+            // Two things spare a module from the exclusion, and both matter
+            // because the blacklist beats the whitelist inside the generator
+            // (`isSeed(d) && !isBlacklisted(d)` in MetadataClosure) -- once a
+            // package is excluded here, nothing downstream can bring it back:
+            //
+            //   * the seed names it. A worker calling
+            //     `com.ammarahmed.reactnativeworkers.WorkerTurboModules` is
+            //     using that module as an interop class, whatever else the
+            //     TurboModule bridge is doing with it, so describing it is the
+            //     whole point.
+            //   * the app declared it in nativescript.react-native.json, for
+            //     the case where the analysis cannot see the use.
+            def seededPackages = []
+            if (useGeneratedSeed && whitelistTarget.exists()) {
+                whitelistTarget.eachLine { line ->
+                    def trimmed = line.trim()
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) return
+                    def colon = trimmed.indexOf(":")
+                    if (colon > 0) seededPackages.add(trimmed.substring(0, colon))
+                }
+            }
+
+            def keptPackages = (nsIncludedPackages + seededPackages).unique()
+            def excludedModules = useGeneratedSeed
+                    ? nsAutolinkedModulePackages(variantName)
+                            .findAll { pkg -> !keptPackages.any { it == pkg || it.startsWith(pkg + ".") } }
+                    : []
+
+            def blacklistParts = []
+            if (blacklistSource.exists()) blacklistParts.add(blacklistSource.text)
+            if (!excludedModules.isEmpty()) {
+                // Two patterns per module: the package itself, and its
+                // subpackages. The matcher globs the package name, but "a.b:*"
+                // matches only "a.b" -- a module that splits itself across
+                // a.b.core / a.b.views (nitro does) would otherwise leak.
+                blacklistParts.add(
+                        "# Autolinked React Native modules: reached over the TurboModule\n" +
+                        "# bridge rather than the interop, so they are not described here.\n" +
+                        "# Declare one in nativescript.react-native.json to keep it.\n" +
+                        excludedModules.collect { it + ":*\n" + it + ".*:*" }.join("\n") + "\n")
+                def keptModules = nsAutolinkedModulePackages(variantName) - excludedModules
+                logger.lifecycle("NativeScript: excluding ${excludedModules.size()} autolinked " +
+                        "React Native module package(s) from metadata: " + excludedModules.join(", ") +
+                        (keptModules.isEmpty() ? "" : "; kept because the app uses them: " +
+                                keptModules.join(", ")))
+            }
+
+            if (!blacklistParts.isEmpty()) {
+                blacklistTarget.text = blacklistParts.join("\n")
             } else {
                 blacklistTarget.delete()
             }
@@ -389,12 +586,62 @@ android.applicationVariants.all { variant ->
                 include "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"
                 exclude "**/node_modules/**", "**/android/**", "**/ios/**", "**/build/**"
             })
+            // The app's own sources are not the whole program: a dependency's JS
+            // is bundled into these graphs too, and a library that calls Java is
+            // as much a part of the analysis as the app is. node_modules is
+            // excluded above because hashing it on every build is far more
+            // expensive than the bundling it would guard -- the lockfiles stand
+            // in for it, since a dependency cannot change without one of them
+            // changing. Without this, upgrading a library silently leaves the
+            // bindings and the metadata filter describing the previous one.
+            //
+            // Searched up from the app as well as in it: in a workspace the app
+            // is a package and the lockfile belongs to the repository root, so
+            // looking only beside package.json finds nothing at all -- which
+            // fails silently, as an input that never changes.
+            inputs.files(provider {
+                def names = ["yarn.lock", "package-lock.json", "pnpm-lock.yaml", "bun.lockb"]
+                def found = []
+                def dir = reactRoot
+                // A handful of levels: enough for app-in-a-workspace, and never
+                // so far up that an unrelated lockfile outside the project is
+                // picked up.
+                for (int depth = 0; depth < 5 && dir != null; depth++) {
+                    names.each { name ->
+                        def candidate = new File(dir, name)
+                        if (candidate.exists()) found.add(candidate)
+                    }
+                    if (new File(dir, ".git").exists()) break
+                    dir = dir.parentFile
+                }
+                def appPackageJson = new File(reactRoot, "package.json")
+                if (appPackageJson.exists()) found.add(appPackageJson)
+                found
+            }).withPropertyName("dependencyLocks").optional()
+            // Which entry points exist at all. A worker added or repointed
+            // changes the set of graphs to analyse, and the journal is the only
+            // place that shows -- adding one usually adds a source file, which
+            // the tree above catches, but repointing an existing file does not.
+            inputs.files(provider {
+                def journal = new File(reactRoot, ".rn-workers/manifest.log")
+                journal.exists() ? [journal] : []
+            }).withPropertyName("workerEntries").optional()
             // The generator and its parser are inputs too. Without them a change
             // to either leaves the task up to date against stale output, which
             // reads exactly like the change having no effect.
             inputs.file(sbgGeneratorJar)
             inputs.files(fileTree(new File(toolsDir, "jsparser")))
+            // The analysis bundler is one as well; it decides what the parser
+            // and the seed get to see.
+            inputs.files(provider {
+                def script = new File(nsPackageDir, "scripts/bundle-for-analysis.js")
+                script.exists() ? [script] : []
+            }).withPropertyName("analysisBundler").optional()
             outputs.dir(sbgJavaDir)
+            // Declared so the bundles survive an up-to-date run: the metadata
+            // seed reads this directory, and a task that is skipped must still
+            // leave its inputs in place.
+            outputs.dir(sbgBundleDir)
 
             doFirst {
                 sbgWorkDir.mkdirs()
@@ -431,6 +678,45 @@ android.applicationVariants.all { variant ->
                 }
                 tsHelpersTarget.text = tsHelpersSource.text
 
+                // Secondary entry points, each of which is its own module graph
+                // and so appears in no other bundle. A worker's JS is invisible
+                // to everything here unless it is bundled separately: it neither
+                // contributes subclasses to the static binding generator nor
+                // Java usage to the metadata seed, and the result is a release
+                // build that drops exactly the classes a worker needs.
+                //
+                // Read from the journal a worker bundler leaves behind
+                // (.rn-workers/manifest.log, JSON lines of {id, absPath}) rather
+                // than from its output: that runs later in the build, and by
+                // then it has already compiled its bundles to Hermes bytecode,
+                // which no JS parser can read.
+                def workerJournal = new File(reactRoot, ".rn-workers/manifest.log")
+                def entriesById = [:]
+                if (workerJournal.exists()) {
+                    def slurper = new groovy.json.JsonSlurper()
+                    workerJournal.eachLine { line ->
+                        def trimmed = line.trim()
+                        if (trimmed.isEmpty()) return
+                        try {
+                            def parsed = slurper.parseText(trimmed)
+                            // Later lines win: the journal is appended to on
+                            // every transform, so it holds stale duplicates.
+                            if (parsed?.id && parsed?.absPath) entriesById[parsed.id] = parsed.absPath
+                        } catch (Exception ignored) {
+                            // A malformed line is one worker, not the build.
+                        }
+                    }
+                }
+                def workerEntries = entriesById.findAll { id, absPath -> new File(absPath).exists() }
+
+                // With workers to build, one Metro session builds the app entry
+                // and all of them together -- so the app entry is not bundled
+                // twice, and the copy that survives is the unminified one the
+                // analysis reads far better (minified input is what leaves most
+                // call sites unresolved).
+                def analysisScript = new File(nsPackageDir, "scripts/bundle-for-analysis.js")
+                def useAnalysisScript = !workerEntries.isEmpty() && analysisScript.exists()
+
                 logger.lifecycle("NativeScript: bundling ${variant.name} JavaScript for binding generation")
 
                 // --unstable-transform-profile is what keeps `class X extends Y {}`
@@ -446,25 +732,125 @@ android.applicationVariants.all { variant ->
                 //
                 // The value is "hermes-stable"; the CLI's own help text still
                 // says "hermes", which the preset does not match.
-                def bundleCmd = [nodeExecutable, reactCliFile, "bundle",
-                                 "--platform", "android",
-                                 "--dev", "false",
-                                 "--unstable-transform-profile", "hermes-stable",
-                                 "--entry-file", nsEntryFile,
-                                 "--bundle-output", new File(sbgBundleDir, "index.android.bundle").absolutePath,
-                                 "--assets-dest", new File(sbgWorkDir, "assets").absolutePath]
+                def runCliMainBundle = {
+                    def bundleCmd = nsNodeCommand + [reactCliFile, "bundle",
+                                     "--platform", "android",
+                                     "--dev", "false",
+                                     "--unstable-transform-profile", "hermes-stable",
+                                     "--entry-file", nsEntryFile,
+                                     "--bundle-output", new File(sbgBundleDir, "index.android.bundle").absolutePath,
+                                     "--assets-dest", new File(sbgWorkDir, "assets").absolutePath]
 
-                def bundleProcess = new ProcessBuilder(bundleCmd)
-                        .directory(reactRoot)
-                        .redirectErrorStream(true)
-                        .start()
-                bundleProcess.inputStream.eachLine { logger.info(it) }
-                def bundleExit = bundleProcess.waitFor()
-                if (bundleExit != 0) {
-                    throw new GradleException(
-                            "NativeScript: bundling for binding generation failed (exit ${bundleExit}). " +
-                            "Re-run with --info to see the bundler output, or pass " +
-                            "-PnsSkipStaticBindings to build without pre-generated bindings.")
+                    // Kept so a failure can name the node that actually ran: the
+                    // whole class of toolchain problems here is "not the node you
+                    // think", and the exit code alone does not show which one.
+                    def bundleOutput = new StringBuilder()
+                    def bundleProcess = new ProcessBuilder(bundleCmd)
+                            .directory(reactRoot)
+                            .redirectErrorStream(true)
+                            .start()
+                    bundleProcess.inputStream.eachLine {
+                        logger.info(it)
+                        bundleOutput.append(it).append("\n")
+                    }
+                    def bundleExit = bundleProcess.waitFor()
+                    if (bundleExit != 0) {
+                        // 126 is "found but not executable", which is what a version
+                        // manager's shim returns when it has no version to delegate
+                        // to; 127 is "not on PATH at all". Both mean the node lookup,
+                        // not the bundle.
+                        def nodeProblem = bundleExit == 126 || bundleExit == 127
+                        throw new GradleException(
+                                "NativeScript: bundling for binding generation failed (exit ${bundleExit}) " +
+                                "using node '${nsNodeCommand.join(' ')}'.\n" +
+                                (nodeProblem ? "That exit code means the node command could not be run. " +
+                                        nsNodeHelp + "\n" : "") +
+                                (bundleOutput.length() > 0
+                                        ? "Bundler output:\n${bundleOutput.toString().trim()}\n"
+                                        : "The bundler produced no output; re-run with --info.\n") +
+                                "Or pass -PnsSkipStaticBindings to build without pre-generated bindings.")
+                    }
+                }
+
+                // Skipped when the analysis script runs: that builds this same
+                // entry alongside the workers, in one Metro session.
+                if (!useAnalysisScript) {
+                    runCliMainBundle()
+                }
+
+                if (useAnalysisScript) {
+                    {
+                        logger.lifecycle("NativeScript: bundling the app entry and " +
+                                "${workerEntries.size()} worker " +
+                                "entr${workerEntries.size() == 1 ? 'y' : 'ies'} in one Metro session")
+
+                        // One session for all of them. A `react-native bundle`
+                        // per entry would pay a fresh Node process, a fresh
+                        // config load and a cold transform cache each time;
+                        // loading the config once and reusing it is what React
+                        // Native's own tooling does.
+                        def analysisCmd = nsNodeCommand + [analysisScript.absolutePath,
+                                         "--project-root", reactRoot.absolutePath,
+                                         "--out", sbgBundleDir.absolutePath,
+                                         "--entry", nsEntryFile,
+                                         // Worker graphs swap `react-native` for
+                                         // the worker shim; without this the
+                                         // analysis would read a graph the
+                                         // device never runs.
+                                         "--resolver-option", "rnworkers=true"]
+                        workerEntries.each { id, absPath -> analysisCmd.addAll(["--worker", "${id}=${absPath}"]) }
+
+                        def analysisOutput = new StringBuilder()
+                        def analysisProcess = new ProcessBuilder(analysisCmd.collect { it.toString() })
+                                .directory(reactRoot)
+                                .redirectErrorStream(true)
+                                .start()
+                        analysisProcess.inputStream.eachLine {
+                            logger.info(it)
+                            analysisOutput.append(it).append("\n")
+                        }
+                        def analysisExit = analysisProcess.waitFor()
+
+                        // Exit 3 is "this React Native has no programmatic
+                        // bundle API"; anything else is a real failure, and
+                        // carrying on would filter metadata against a view of
+                        // the program that is missing these workers -- a launch
+                        // crash in the field rather than an error here.
+                        if (analysisExit == 3) {
+                            logger.lifecycle("NativeScript: falling back to one bundler run per entry")
+                            // The app entry was skipped above on the assumption
+                            // this session would build it.
+                            runCliMainBundle()
+                            workerEntries.each { id, absPath ->
+                                def safeName = id.replaceAll("[^A-Za-z0-9]", "_")
+                                def workerOut = new File(sbgBundleDir, "worker-${safeName}.js")
+                                def workerCmd = nsNodeCommand + [reactCliFile, "bundle",
+                                                 "--platform", "android",
+                                                 "--dev", "false",
+                                                 "--unstable-transform-profile", "hermes-stable",
+                                                 "--entry-file", absPath,
+                                                 "--bundle-output", workerOut.absolutePath]
+                                def workerOutput = new StringBuilder()
+                                def workerProcess = new ProcessBuilder(workerCmd.collect { it.toString() })
+                                        .directory(reactRoot)
+                                        .redirectErrorStream(true)
+                                        .start()
+                                workerProcess.inputStream.eachLine {
+                                    logger.info(it)
+                                    workerOutput.append(it).append("\n")
+                                }
+                                if (workerProcess.waitFor() != 0) {
+                                    throw new GradleException(
+                                            "NativeScript: bundling worker '${id}' for analysis failed.\n" +
+                                            workerOutput.toString().trim())
+                                }
+                            }
+                        } else if (analysisExit != 0) {
+                            throw new GradleException(
+                                    "NativeScript: bundling the app and its workers for analysis " +
+                                    "failed (exit ${analysisExit}).\n" + analysisOutput.toString().trim())
+                        }
+                    }
                 }
 
                 def bundles = sbgBundleDir.listFiles()?.findAll { it.isFile() } ?: []
@@ -525,6 +911,51 @@ android.applicationVariants.all { variant ->
                 // node_modules rather than beside the copied tree.
                 environment "NODE_PATH", new File(reactRoot, "node_modules").absolutePath
 
+                // The generator spawns `node` for jsparser itself, so the node
+                // resolved above has to be on the PATH it inherits -- otherwise
+                // the bundle step uses ours and the parser step silently uses a
+                // different one (or a version manager's shim, which fails).
+                def resolvedNode = new File(nodeExecutable)
+                if (resolvedNode.isAbsolute() && resolvedNode.parentFile != null) {
+                    environment "PATH", resolvedNode.parentFile.absolutePath +
+                            File.pathSeparator + System.getenv("PATH")
+                }
+
+                // An app that subclasses nothing has no bindings to generate,
+                // which is an ordinary outcome -- most React Native apps call
+                // native APIs without ever extending a Java class. The generator
+                // does not treat it as one: jsparser writes sbg-bindings.txt
+                // only when it finds something, and the generator then fails
+                // with "Couldn't find ... bindings input file". Pre-creating the
+                // file does not help, because the generator deletes it before
+                // running the parser itself.
+                //
+                // So run the parser here first -- the same script, with the node
+                // and NODE_PATH resolved above -- and skip the generator when it
+                // comes back empty. The generator would re-run it anyway, so
+                // this costs one parse of an already-built bundle.
+                def parserScript = new File(sbgWorkDir, "jsparser/js_parser.js")
+                def sbgBindings = new File(sbgWorkDir, "sbg-bindings.txt")
+                if (parserScript.exists()) {
+                    sbgBindings.delete()
+                    def probeBuilder = new ProcessBuilder(
+                            (nsNodeCommand + [parserScript.absolutePath]).collect { it.toString() })
+                            .directory(sbgWorkDir)
+                            .redirectErrorStream(true)
+                    probeBuilder.environment().put("NODE_PATH",
+                            new File(reactRoot, "node_modules").absolutePath)
+                    def probe = probeBuilder.start()
+                    probe.inputStream.eachLine { logger.info("  [sbg-parser] $it") }
+                    probe.waitFor()
+
+                    if (!sbgBindings.exists() || sbgBindings.text.trim().isEmpty()) {
+                        logger.lifecycle("NativeScript: no Java subclasses found in the bundle, " +
+                                "so there are no static bindings to generate. Any subclassing the " +
+                                "app does at runtime is still bound on the device, as in debug.")
+                        throw new org.gradle.api.tasks.StopExecutionException()
+                    }
+                }
+
                 def params = [sbgGeneratorJar.absolutePath]
                 // The generated names must be derived the same way the runtime
                 // derives them; the guest runtime always uses content keys.
@@ -570,7 +1001,7 @@ android.applicationVariants.all { variant ->
                                 "scripts/build_react_native_android_tools.sh from a checkout.")
                     }
 
-                    def cmd = ["node", seedScript.absolutePath, sbgBundleDir.absolutePath,
+                    def cmd = nsNodeCommand + [seedScript.absolutePath, sbgBundleDir.absolutePath,
                                "--out", new File(workDir, "generated-whitelist.mdg").absolutePath]
 
                     def manifest = android.sourceSets.main.manifest.srcFile
@@ -599,8 +1030,12 @@ android.applicationVariants.all { variant ->
                     def process = new ProcessBuilder(cmd.collect { it.toString() })
                             .redirectErrorStream(true).start()
                     process.inputStream.eachLine { logger.lifecycle("  [metadata-seed] $it") }
-                    if (process.waitFor() != 0) {
-                        throw new GradleException("NativeScript: metadata seed generation failed.")
+                    def seedExit = process.waitFor()
+                    if (seedExit != 0) {
+                        throw new GradleException(
+                                "NativeScript: metadata seed generation failed (exit ${seedExit}) " +
+                                "using node '${nsNodeCommand.join(' ')}'." +
+                                ((seedExit == 126 || seedExit == 127) ? "\n" + nsNodeHelp : ""))
                     }
                 }
             }
@@ -640,6 +1075,39 @@ android.applicationVariants.all { variant ->
         if (nsTypingsEnabled) {
             it.dependsOn(typingsTask)
         }
+    }
+
+    // The typings land next to the app (types/android, checked in and named by
+    // tsconfig, the way types/ios is on the Apple side), which puts them inside
+    // the tree React Native's bundler reads. Gradle sees one task writing into
+    // another's input directory and fails the build rather than risk ordering
+    // them wrongly -- but only when both are scheduled, which is why a
+    // single-variant build never hit it and `assembleRelease assembleDebug`
+    // does: the *debug* typings task and the *release* bundle task have no
+    // relationship at all.
+    //
+    // Ordering rather than a dependency: the bundler does not consume the
+    // typings, it merely reads a directory that contains them. Making it depend
+    // on them would serialise a JS bundle behind a full classpath scan for no
+    // reason.
+    //
+    // Only across variants. Within one variant the bundle task runs *before*
+    // javac (its output feeds the resource pipeline) while typings run after it,
+    // so ordering that pair asks for a cycle:
+    //
+    //   createBundleRelease -> typingsRelease -> compileReleaseJavaWithJavac
+    //     -> ... -> mapReleaseSourceSetPaths -> createBundleRelease
+    //
+    // and Gradle rejects it. The conflict this fixes is a cross-variant one
+    // anyway: the release bundle and the *debug* typings task have no
+    // relationship at all, which is why they only collide when both variants
+    // are built in a single invocation.
+    def ownBundleTask = "createBundle${variantName}JsAndAssets"
+    tasks.matching {
+        it.name.startsWith("createBundle") && it.name.endsWith("JsAndAssets") &&
+                it.name != ownBundleTask
+    }.configureEach {
+        it.mustRunAfter(typingsTask)
     }
 
     // Lint reads the asset source sets, which now include a generated directory.
