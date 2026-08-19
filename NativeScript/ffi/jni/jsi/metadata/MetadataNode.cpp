@@ -549,7 +549,9 @@ string MetadataNode::CreateFullClassName(const std::string &className,
     return fullClassName;
 }
 
-bool MetadataNode::ContentKeyedBindingsEnabled() {
+// The compile-time policy, which is also the floor: a build that hard-wires
+// content keying cannot be talked out of it by an app's config.
+static bool ContentKeyedBindingsForcedOn() {
 #if defined(NS_CONTENT_KEYED_BINDINGS)
     return true;
 #elif defined(NS_JSI_HOST_RUNTIME)
@@ -559,6 +561,22 @@ bool MetadataNode::ContentKeyedBindingsEnabled() {
 #else
     return false;
 #endif
+}
+
+// Resolved once, before any JS runs. The naming scheme has to match what the
+// static binding generator used for this app, so the value comes from the build
+// that ran the generator (app/package.json -> AppConfig -> Runtime::Init) rather
+// than from anything decided here.
+static bool s_contentKeyedBindings = ContentKeyedBindingsForcedOn();
+
+void MetadataNode::SetContentKeyedBindings(bool enabled) {
+    // Only ever widens: an app may turn content keying on, never off under a
+    // runtime that was built to require it.
+    s_contentKeyedBindings = s_contentKeyedBindings || enabled;
+}
+
+bool MetadataNode::ContentKeyedBindingsEnabled() {
+    return s_contentKeyedBindings;
 }
 
 // A class-name token derived from what the generated binding is actually made

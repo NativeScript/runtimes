@@ -21,6 +21,7 @@
 */
 
 import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
 import groovy.xml.XmlSlurper
 import org.apache.commons.io.FileUtils
 
@@ -611,6 +612,22 @@ task compileAppClassesForSbg {
     }
 }
 
+// Name generated bindings after what they contain rather than after the extend()
+// call site. Off by default; an app opts in with -PuseContentBindings, or with
+//
+//     project.ext.useContentBindings = true
+//
+// in App_Resources/Android/app.gradle or before-plugins.gradle. The value drives
+// both halves of the scheme from one place: the static binding generator (which
+// writes the names) and the runtime (which looks them up, via the app config
+// written by writeRuntimeAppConfig). -Pcontent-keyed-bindings is the older
+// spelling, kept because it is what a runtime build passes to :runtime.
+def nsContentKeyedBindings = ["useContentBindings", "content-keyed-bindings"].any { name ->
+    project.hasProperty(name) &&
+            (project.property(name).toString().isEmpty()
+                    || Boolean.parseBoolean(project.property(name).toString()))
+}
+
 task runSbg(type: BuildToolTask) {
     dependsOn "collectAllJars"
     dependsOn "compileAppClassesForSbg"
@@ -638,10 +655,11 @@ task runSbg(type: BuildToolTask) {
         paramz.add("-line-column-primjs")
     }
 
-    // Must be passed together with -Pcontent-keyed-bindings on :runtime -- the
-    // generated names and the names the runtime looks up are two halves of one
-    // scheme, and half of it is a silent LookedUpClassNotFound.
-    if (project.hasProperty("content-keyed-bindings")) {
+    // The generated names and the names the runtime looks up are two halves of
+    // one scheme, and half of it is a silent LookedUpClassNotFound. The other
+    // half is no longer a runtime rebuild: writeRuntimeAppConfig hands the same
+    // value to the runtime through the app's package.json.
+    if (nsContentKeyedBindings) {
         paramz.add("-content-keyed-bindings")
     }
 
@@ -1614,6 +1632,33 @@ tasks.configureEach({ DefaultTask currentTask ->
 
     if (currentTask =~ /merge.*Assets/) {
         currentTask.dependsOn(buildMetadata)
+        // Hand the runtime what it cannot infer, by patching the app's
+        // package.json where the assets were merged -- the app's own source file
+        // is never touched, and AppConfig already reads this one at startup.
+        //
+        // Driven off this task's own outputs rather than
+        // getMergedAssetsOutputPath(), which follows the pinned
+        // project.ext.selectedBuildType and so names the release assets even in
+        // a debug build.
+        currentTask.doLast {
+            if (!nsContentKeyedBindings) return
+            currentTask.outputs.files.files.each { File out ->
+                if (out.path.contains("${File.separator}incremental${File.separator}")) return
+                def packageJson = new File(out, "app/package.json")
+                if (!packageJson.exists()) return
+
+                def json = new JsonSlurper().parseText(packageJson.text)
+                def androidConfig = json.android ?: [:]
+                // The static binding generator wrote the class names during this
+                // same build; the runtime has to look them up the same way.
+                androidConfig.contentKeyedBindings = true
+                json.android = androidConfig
+                packageJson.text = JsonOutput.prettyPrint(JsonOutput.toJson(json))
+
+                outLogger.withStyle(Style.SuccessHeader).println \
+                        "\t + [bindings] content-keyed bindings on (generator + runtime)"
+            }
+        }
         // Compile the freshly-merged app JS to engine bytecode right after the
         // assets are merged (the onlyIf guard makes this a no-op unless it's a
         // release build with bytecode enabled). Packaging is made to wait for it below.

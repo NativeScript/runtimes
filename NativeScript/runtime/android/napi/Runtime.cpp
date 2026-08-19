@@ -232,6 +232,14 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
 
     JniLocalRef profilerOutputDir(_env->GetObjectArrayElement(args, 2));
 
+    /* Index 14 == AppConfig.KnownKeys.ContentKeyedBindings, which the app's
+     * build sets when it generated content-keyed static bindings. The generated
+     * names and the names looked up here are halves of one scheme, so this must
+     * come from the build that ran the generator -- never from a guess made
+     * here. A runtime compiled to require content keys ignores a false. */
+    JniLocalRef contentKeyedBindings(_env->GetObjectArrayElement(args, 14));
+    MetadataNode::SetContentKeyedBindings((bool) contentKeyedBindings);
+
     js_set_runtime_flags(flags.c_str());
     auto runtimeStatus = js_create_runtime(&rt);
     if (runtimeStatus != napi_ok || rt == nullptr) {

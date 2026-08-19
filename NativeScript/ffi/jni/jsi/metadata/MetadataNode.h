@@ -14,6 +14,12 @@ using namespace tns;
 
 class MetadataNode {
 public:
+    // Set once from Runtime::Init, out of the app's config: the static binding
+    // generator picked the naming scheme at build time and the runtime has to
+    // look names up the same way. Only ever widens -- a runtime compiled to
+    // require content keys cannot be turned back off by an app.
+    static void SetContentKeyedBindings(bool enabled);
+
     static void Init(JsRuntime &rt);
 
     static void BuildMetadata(const std::string &filesPath);
