@@ -105,11 +105,10 @@ jobs:
             'v8-13': 'V8-13',
             'hermes': 'HERMES',
             'jsc': 'JSC',
-            'quickjs': 'QUICKJS',
             'quickjs-ng': 'QUICKJS_NG',
             'primjs': 'PRIMJS',
           };
-          const ANDROID_DEFAULT = ['v8', 'hermes', 'jsc', 'quickjs', 'quickjs-ng', 'primjs'];
+          const ANDROID_DEFAULT = ['v8', 'hermes', 'jsc', 'quickjs-ng', 'primjs'];
 
           const iosTarget = (engine) => ({
             key: `ios-${engine}`,
@@ -129,6 +128,14 @@ jobs:
             const gradleEngine = ANDROID_ENGINES[engine];
             // v8-10 / v8-11 / v8-13 all publish as android-v8.
             const pkgEngine = engine.startsWith('v8') ? 'v8' : engine;
+            // Output naming, mirroring platforms/android/build.gradle: the
+            // engine lowercased with '-' -> '_' (quickjs_ng keeps the plain
+            // name), plus the runtime tree the AAR was compiled from. Release
+            // builds ship the napi runtime.
+            const binding = 'napi';
+            const slug = gradleEngine.toLowerCase().replace(/-/g, '_')
+              .replace(/^quickjs_ng$/, 'quickjs');
+            const variant = `android_${slug}_${binding}`;
             return {
               key: `android-${engine}`,
               platform: 'android',
@@ -136,10 +143,10 @@ jobs:
               runner: 'ubuntu-latest',
               package_dir: `packages/android-${pkgEngine}`,
               package_name: `@nativescript/android-${pkgEngine}`,
-              tarball_basename: `nativescript-android-${pkgEngine}`,
+              tarball_basename: `nativescript-${variant}`,
               npm_tag_target: `android-${pkgEngine}`,
-              npm_tag_script: 'platforms/android/scripts/get-npm-tag.js',
-              artifact_dir: `platforms/android/dist_${gradleEngine.toLowerCase()}`,
+              npm_tag_script: 'scripts/get-npm-tag.js',
+              artifact_dir: 'build/npm-tarballs',
               gradle_engine: gradleEngine,
             };
           };
@@ -289,8 +296,12 @@ jobs:
         run: npm install
       - name: Set up engine submodules, patches, and jsparser
         if: ${{ matrix.platform == 'android' }}
-        working-directory: platforms/android
-        run: npm run setup
+        run: |
+          # Fetching the engine source is a deliberate manual step (never
+          # --remote, which would move it off the pin); the setup script only
+          # applies the patches and installs the jsparser deps.
+          git submodule update --init --force vendor/quickjs/source_ng
+          npm run setup-android
       - name: Bump version
         id: bump
         shell: bash
