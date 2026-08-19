@@ -28,10 +28,10 @@ on:
       quickjs_ng_ref:
         # MUST match the vendored source in vendor/quickjs/source_ng, or
         # JS_ReadObject rejects the blob: the compiler writes its own BC_VERSION
-        # and the runtime accepts only its own. v0.11.0 == BC_VERSION 21, which
+        # and the runtime accepts only its own. d950d55e == BC_VERSION 27, which
         # is what the vendored quickjs.c defines.
         description: "quickjs-ng/quickjs ref (match vendor/quickjs/source_ng)"
-        default: "6a9fe9af5ca0bf7c49ae697edef44864272317d1"
+        default: "d950d55e950dd7994a96c669c31efa967b8b79f3"
       primjs_ref:
         description: "lynx-family/primjs ref"
         default: "9c1fe150179b86f0ae5c6fbe670af7d76eca9df6"
@@ -77,7 +77,7 @@ jobs:
         # accepts branch/tag names). GitHub allows fetching arbitrary SHAs.
         run: |
           set -euxo pipefail
-          ref="${{ github.event.inputs.hermes_ref || 'master' }}"
+          ref="${{ github.event.inputs.hermes_ref || '10a40b5f1de81d007cba6afe567c4ba7a0b45f5d' }}"
           git init hermes
           git -C hermes remote add origin "$HERMES_REPO"
           git -C hermes fetch --depth 1 origin "$ref"
@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          ref="${{ github.event.inputs.quickjs_ng_ref || 'master' }}"
+          ref="${{ github.event.inputs.quickjs_ng_ref || 'd950d55e950dd7994a96c669c31efa967b8b79f3' }}"
           git init quickjs-ng
           git -C quickjs-ng remote add origin "$QUICKJS_NG_REPO"
           git -C quickjs-ng fetch --depth 1 origin "$ref"
@@ -225,7 +225,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          ref="${{ github.event.inputs.primjs_ref || 'develop' }}"
+          ref="${{ github.event.inputs.primjs_ref || '9c1fe150179b86f0ae5c6fbe670af7d76eca9df6' }}"
           git init primjs
           git -C primjs remote add origin "$PRIMJS_REPO"
           git -C primjs fetch --depth 1 origin "$ref"

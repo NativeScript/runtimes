@@ -1,5 +1,5 @@
 diff --git a/quickjs.c b/quickjs.c
-index 9053c26..83233d1 100644
+index 9053c26..7227326 100644
 --- a/quickjs.c
 +++ b/quickjs.c
 @@ -379,6 +379,7 @@ struct JSRuntime {
@@ -118,7 +118,17 @@ index 9053c26..83233d1 100644
      if (unlikely(throw_ref_error)) {
          return JS_ThrowReferenceErrorNotDefined(ctx, prop);
      } else {
-@@ -62187,6 +62231,7 @@ static JSValue js_weakref_constructor(JSContext *ctx, JSValueConst new_target,
+@@ -37877,7 +37921,8 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
+     /* Could add a flag to avoid resolution if necessary */
+     if (m) {
+         m->func_obj = fun_obj;
+-        if (js_resolve_module(ctx, m) < 0)
++        if (!(flags & JS_EVAL_FLAG_COMPILE_ONLY_NO_RESOLVE) &&
++            js_resolve_module(ctx, m) < 0)
+             goto fail1;
+         fun_obj = JS_NewModuleValue(ctx, m);
+     }
+@@ -62187,6 +62232,7 @@ static JSValue js_weakref_constructor(JSContext *ctx, JSValueConst new_target,
      wr->kind = JS_WEAK_REF_KIND_WEAK_REF;
      wr->u.weak_ref_data = wrd;
      insert_weakref_record(arg, wr);
@@ -126,7 +136,7 @@ index 9053c26..83233d1 100644
  
      JS_SetOpaqueInternal(obj, wrd);
      return obj;
-@@ -62549,6 +62594,35 @@ static void insert_weakref_record(JSValueConst target,
+@@ -62549,6 +62595,35 @@ static void insert_weakref_record(JSValueConst target,
      *pwr = wr;
  }
  
@@ -162,7 +172,7 @@ index 9053c26..83233d1 100644
  /* CallSite */
  
  static void js_callsite_finalizer(JSRuntime *rt, JSValueConst val)
-@@ -63992,6 +64066,32 @@ uintptr_t js_std_cmd(int cmd, ...) {
+@@ -63992,6 +64067,32 @@ uintptr_t js_std_cmd(int cmd, ...) {
      return rv;
  }
  
@@ -196,10 +206,20 @@ index 9053c26..83233d1 100644
  #undef free
  #undef realloc
 diff --git a/quickjs.h b/quickjs.h
-index 6763f83..36c1f82 100644
+index 6763f83..9fb1860 100644
 --- a/quickjs.h
 +++ b/quickjs.h
-@@ -557,6 +557,8 @@ JS_EXTERN int JS_AddIntrinsicTypedArrays(JSContext *ctx);
+@@ -456,6 +456,9 @@ static inline bool JS_VALUE_IS_NAN(JSValue v)
+    JS_TAG_FUNCTION_BYTECODE or JS_TAG_MODULE tag. It can be executed
+    with JS_EvalFunction(). */
+ #define JS_EVAL_FLAG_COMPILE_ONLY (1 << 5)
++/* NativeScript: compile a module without resolving its imports yet. Reuses the
++   unused bit; consumed in JS_EvalThis. Needed by the Apple node:vm module. */
++#define JS_EVAL_FLAG_COMPILE_ONLY_NO_RESOLVE JS_EVAL_FLAG_UNUSED
+ /* don't include the stack frames before this eval in the Error() backtraces */
+ #define JS_EVAL_FLAG_BACKTRACE_BARRIER (1 << 6)
+ /* allow top-level await in normal script. JS_Eval() returns a
+@@ -557,6 +560,8 @@ JS_EXTERN int JS_AddIntrinsicTypedArrays(JSContext *ctx);
  JS_EXTERN int JS_AddIntrinsicPromise(JSContext *ctx);
  JS_EXTERN int JS_AddIntrinsicBigInt(JSContext *ctx);
  JS_EXTERN int JS_AddIntrinsicWeakRef(JSContext *ctx);
@@ -208,7 +228,7 @@ index 6763f83..36c1f82 100644
  JS_EXTERN int JS_AddPerformance(JSContext *ctx);
  JS_EXTERN int JS_AddIntrinsicDOMException(JSContext *ctx);
  JS_EXTERN int JS_AddIntrinsicAToB(JSContext *ctx);
-@@ -1428,6 +1430,13 @@ JS_EXTERN int JS_SetModuleExport(JSContext *ctx, JSModuleDef *m, const char *exp
+@@ -1428,6 +1433,13 @@ JS_EXTERN int JS_SetModuleExport(JSContext *ctx, JSModuleDef *m, const char *exp
  JS_EXTERN int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
                                       const JSCFunctionListEntry *tab, int len);
  

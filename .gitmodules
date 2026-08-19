@@ -2,3 +2,9 @@
 	path = libffi
 	url = https://github.com/NativeScript/libffi.git
 	branch = darind/v8-ios
+[submodule "vendor/quickjs/source_ng"]
+	path = vendor/quickjs/source_ng
+	url = https://github.com/quickjs-ng/quickjs
+	# The NativeScript patch is applied into the work tree by
+	# platforms/android/scripts/setup.js, so the submodule is always dirty.
+	ignore = dirty

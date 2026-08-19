@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 //
 // One-shot developer/CI setup for the android-runtime repo:
-//   1. Fetch the engine source submodules (QuickJS / QuickJS-NG) and reset them
-//      to their pinned commit.
-//   2. Apply the NativeScript local patches onto the pristine submodules.
+//   1. Fetch the QuickJS-NG engine source submodule and reset it
+//      to its pinned commit.
+//   2. Apply the NativeScript local patch onto the pristine submodule.
 //   3. Install the jsparser build-tool dependencies (the previous `npm run setup`).
 //
 // Idempotent: re-running resets the submodules to the pinned commit (discarding
@@ -27,11 +27,11 @@ const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 const NAPI_QJS = 'vendor/quickjs';
 const PATCHES = path.join(ANDROID_ROOT, 'tools/patches');
+// QuickJS-NG only: the bellard tree was dropped, and QUICKJS is an alias for
+// QUICKJS_NG (runtime/build.gradle). The pinned commit fixes the engine's
+// BC_VERSION, which the bytecode compiler must be built from as well -- see
+// tools/patches/README.md.
 const ENGINES = [
-  {
-    sub: `${NAPI_QJS}/source`,
-    patch: path.join(PATCHES, 'quickjs/0001-nativescript-local-changes.patch'),
-  },
   {
     sub: `${NAPI_QJS}/source_ng`,
     patch: path.join(PATCHES, 'quickjs_ng/0001-nativescript-local-changes.patch'),

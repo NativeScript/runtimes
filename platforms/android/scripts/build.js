@@ -8,10 +8,10 @@ const path = require('path');
 const readline = require('readline');
 
 // SHERMES is kept as an input alias for the unified Static Hermes backend.
-const VALID_ENGINES = ['V8-10', 'V8-11', 'V8-13', 'QUICKJS', 'QUICKJS_NG', 'HERMES', 'SHERMES', 'JSC', 'PRIMJS'];
+const VALID_ENGINES = ['V8-10', 'V8-11', 'V8-13', 'QUICKJS_NG', 'HERMES', 'SHERMES', 'JSC', 'PRIMJS'];
 // Hermes and JSC gained host-object support in the engine updates, so every
 // engine now supports them; SHERMES rides along as an alias for HERMES.
-const HOST_OBJECTS_SUPPORTED = new Set(['V8-10', 'V8-11', 'V8-13', 'QUICKJS', 'QUICKJS_NG', 'HERMES', 'SHERMES', 'JSC', 'PRIMJS']);
+const HOST_OBJECTS_SUPPORTED = new Set(['V8-10', 'V8-11', 'V8-13', 'QUICKJS_NG', 'HERMES', 'SHERMES', 'JSC', 'PRIMJS']);
 
 // Host objects are enabled by default whenever the selected engine supports
 // them. They can be force-disabled with --disable-host-objects (or by
