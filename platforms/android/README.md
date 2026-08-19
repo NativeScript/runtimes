@@ -74,17 +74,30 @@ Set the following environment variables:
 - `ANDROID_HOME` pointing to where you have installed the Android SDK
 - `ANDROID_NDK_HOME` pointing to the version of the Android NDK needed for this version of NativeScript
 
-Run the following commands to build the runtime:
+Run the following commands **from the repository root** -- the Android build
+entry points live in `scripts/` alongside the Apple ones:
 
 ```
-npm run setup
+git submodule update --init --force vendor/quickjs/source_ng
+npm run setup-android
 ```
 
+The first command fetches the vendored QuickJS-NG source at its pinned commit --
+a deliberate manual step, so nothing moves you off the pin behind your back (see
+`vendor/quickjs/patches/README.md`). `npm run setup-android` then applies the
+NativeScript patches to it and installs the jsparser build-tool dependencies.
+
 ```
-npm run build
+npm run build-android
 ```
 
-The command will let you interactively choose the JS engine you want to build with. i.e V8, QuickJS, Hermes or JSC, PrimJS, Static Hermes.
+The command will let you interactively choose the JS engine you want to build
+with, i.e. V8, QuickJS-NG, Hermes, JSC, PrimJS or Static Hermes. Pass the engine
+directly to skip the prompt:
+
+```
+npm run build-android -- --engine=QUICKJS_NG
+```
 
 - The build process includes building of the runtime package (both optimized and with unstripped v8 symbol table), as well as all supplementary tools used for the android builds: metadata-generator, binding-generator, metadata-generator, static-binding-generator
 - The result of the build will be in the dist\_[engine] folder. For example if you are building with V8, the result will be in the dist_v8 folder.
