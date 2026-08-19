@@ -6,5 +6,5 @@
 	path = vendor/quickjs/source_ng
 	url = https://github.com/quickjs-ng/quickjs
 	# The NativeScript patch is applied into the work tree by
-	# platforms/android/scripts/setup.js, so the submodule is always dirty.
+	# scripts/apply_quickjs_patches.js, so the submodule is always dirty.
 	ignore = dirty

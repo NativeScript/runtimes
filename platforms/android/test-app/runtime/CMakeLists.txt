@@ -205,9 +205,9 @@ if (QUICKJS OR QUICKJS_NG)
     # a git submodule pinned to an upstream commit; our patches (JS_WeakRef_Deref,
     # JS_NewString16, JS_ClearWeakRefKeepAlives -- required by quickjs-api.c and
     # in no upstream release) are applied into its work tree by
-    # platforms/android/scripts/setup.js. The pin also fixes BC_VERSION, so the
+    # scripts/apply_quickjs_patches.js. The pin also fixes BC_VERSION, so the
     # bytecode compiler must be built from the same commit; see
-    # platforms/android/tools/patches/README.md.
+    # vendor/quickjs/patches/README.md.
     set(QJS_SOURCE_DIR ${VENDOR_DIR}/quickjs/source_ng)
     add_compile_definitions(__QUICKJS_NG__)
 

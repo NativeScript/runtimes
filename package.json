@@ -36,6 +36,7 @@
     "pack:ios": "./scripts/build_npm_ios.sh",
     "pack:macos": "./scripts/build_npm_macos.sh",
     "pack:visionos": "./scripts/build_npm_vision.sh",
+    "patch-quickjs": "node ./scripts/apply_quickjs_patches.js",
     "setup-ci": "./scripts/build_metadata_generator.sh",
     "update-version": "./scripts/update_version.sh ios",
     "update-version:ios": "./scripts/update_version.sh ios",
