@@ -11,9 +11,9 @@
 //     Generated from the app's own resolved classpath, so a library the app
 //     installs is callable without anyone publishing bindings for it.
 //
-//   * TypeScript declarations for the same classpath, generated on the first
-//     build and refreshed only when the classpath changes. -PnsGenerateTypings=false
-//     opts out.
+//   * TypeScript declarations for the same classpath, on by default, generated
+//     on the first build and refreshed only when the classpath changes.
+//     -PnsGenerateTypings=false opts out.
 //
 // Both are keyed to the variant being built, so debug and release get metadata
 // for the dependencies they actually resolve.
@@ -66,9 +66,6 @@ def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
         ?: (new File(reactRoot, "index.js").exists()
                 ? new File(reactRoot, "index.js").absolutePath
                 : new File(reactRoot, "index.android.js").absolutePath)
-
-def nsGenerateTypings = project.hasProperty("nsGenerateTypings")
-    && Boolean.parseBoolean(project.property("nsGenerateTypings").toString())
 
 // Restrict metadata to what the app's bundle can reach.
 //
