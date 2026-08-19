@@ -35,7 +35,24 @@ def generateRegularRuntimePackage = !project.hasProperty("skipUnoptimized")
 
 def jsEngine = engine ?: 'V8-10'
 
-def DIST_PATH = "$rootDir/dist_${jsEngine.toLowerCase()}"
+// Which runtime tree the AAR was compiled from -- see test-app/runtime/build.gradle.
+// It is part of the output name because the two are different runtimes, not two
+// flavours of one, and a build of each has to be able to sit on disk at once.
+def bindingLayer = project.findProperty("bindingLayer") ?: "napi"
+
+// QUICKJS_NG is the only quickjs lane left (QUICKJS is an alias for it), so it
+// carries the plain name; everything else is just lowercased with '-' -> '_'.
+def engineSlug = jsEngine.toLowerCase().replace('-', '_')
+if (engineSlug == "quickjs_ng") {
+    engineSlug = "quickjs"
+}
+
+// Build outputs live in the repo-root dist/ and build/ folders, next to the
+// Apple ones, rather than in a platforms/android/dist_<engine> of their own.
+def REPO_ROOT = file("$rootDir/../..").canonicalPath
+def PACKAGE_VARIANT = "android_${engineSlug}_${bindingLayer}"
+def DIST_PATH = "$REPO_ROOT/dist/$PACKAGE_VARIANT"
+def TARBALL_PATH = "$REPO_ROOT/build/npm-tarballs"
 def TEST_APP_PATH = "$rootDir/test-app"
 def BUILD_TOOLS_PATH = "$TEST_APP_PATH/build-tools"
 def DIST_FRAMEWORK_PATH = "$DIST_PATH/framework"
@@ -417,12 +434,30 @@ task copyReadme(type: Copy) {
 task createNpmPackage(type: Exec) {
     doFirst {
         workingDir "$DIST_PATH"
+        new File(TARBALL_PATH).mkdirs()
 
         if (isWinOs) {
-            commandLine "cmd", "/c", "npm", "pack"
+            commandLine "cmd", "/c", "npm", "pack", "--pack-destination", TARBALL_PATH
         } else {
-            commandLine "npm", "pack"
+            commandLine "npm", "pack", "--pack-destination", TARBALL_PATH
         }
+    }
+
+    // npm names the tarball after the package (nativescript-android-<version>),
+    // which is identical for every engine and runtime tree. Rename it to the
+    // variant so parallel builds don't overwrite each other in the shared
+    // tarball folder.
+    doLast {
+        def version = new JsonSlurper().parseText(new File("$DIST_PATH/package.json").text).version
+        def packed = new File("$TARBALL_PATH/nativescript-android-${version}.tgz")
+        def named = new File("$TARBALL_PATH/nativescript-${PACKAGE_VARIANT}-${version}.tgz")
+        if (packed.exists()) {
+            named.delete()
+            if (!packed.renameTo(named)) {
+                throw new GradleException("Failed to rename ${packed} to ${named}")
+            }
+        }
+        println "Tarball: ${named}"
     }
 }
 

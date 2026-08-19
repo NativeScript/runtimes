@@ -7,7 +7,9 @@ NativeScript runtime package for Android, built with the JavaScriptCore engine.
 From the repo root:
 
 ```sh
-./gradlew -Pengine=JSC
+npm run build-android -- --engine=JSC
 ```
 
-This produces the npm artifact in `dist_jsc/`.
+The staged package lands in `dist/android_jsc_napi/` and the tarball in
+`build/npm-tarballs/`. Add `--binding=jsi` for the jsi runtime tree
+(`dist/android_jsc_jsi/`).

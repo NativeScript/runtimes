@@ -7,7 +7,9 @@ NativeScript runtime package for Android, built with the QuickJS-ng JavaScript e
 From the repo root:
 
 ```sh
-./gradlew -Pengine=QUICKJS_NG
+npm run build-android -- --engine=QUICKJS_NG
 ```
 
-This produces the npm artifact in `dist_quickjs_ng/`.
+The staged package lands in `dist/android_quickjs_napi/` and the tarball in
+`build/npm-tarballs/`. Add `--binding=jsi` for the jsi runtime tree
+(`dist/android_quickjs_jsi/`).

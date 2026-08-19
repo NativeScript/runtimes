@@ -100,7 +100,10 @@ npm run build-android -- --engine=QUICKJS_NG
 ```
 
 - The build process includes building of the runtime package (both optimized and with unstripped v8 symbol table), as well as all supplementary tools used for the android builds: metadata-generator, binding-generator, metadata-generator, static-binding-generator
-- The result of the build will be in the dist\_[engine] folder. For example if you are building with V8, the result will be in the dist_v8 folder.
+- Output goes to the repo-root `dist/` and `build/` folders, next to the Apple build output:
+  - staged package: `dist/android_<engine>_<binding>/` -- e.g. `dist/android_quickjs_napi/`, `dist/android_v8_13_jsi/`
+  - tarball: `build/npm-tarballs/nativescript-android_<engine>_<binding>-<version>.tgz`
+- `<binding>` is the runtime tree the AAR was compiled from, `napi` (default) or `jsi` (`--binding=jsi`). They are two complete parallel runtimes, so each variant gets its own folder.
 
 ## How to Run Tests
 

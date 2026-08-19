@@ -7,7 +7,9 @@ NativeScript runtime package for Android, built with the V8 JavaScript engine.
 From the repo root:
 
 ```sh
-./gradlew -Pengine=V8
+npm run build-android -- --engine=V8-13
 ```
 
-This produces the npm artifact in `dist_v8/`.
+The staged package lands in `dist/android_v8_13_napi/` and the tarball in
+`build/npm-tarballs/`. Add `--binding=jsi` for the jsi runtime tree
+(`dist/android_v8_13_jsi/`).
