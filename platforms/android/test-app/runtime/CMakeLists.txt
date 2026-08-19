@@ -460,10 +460,6 @@ if (USE_HOST_OBJECTS)
     target_compile_definitions(NativeScript PRIVATE USE_HOST_OBJECT)
 endif ()
 
-if (IS_NAPI_MODULE)
-    target_compile_definitions(NativeScript PRIVATE IS_NAPI_MODULE)
-endif ()
-
 # Bytecode builds embed app-relative source names (no "file://" scheme). This
 # lets the JS stack-trace parser (BuildStacktraceFrames) accept those frames and
 # rebuild the full runtime URL from the app root. Wired from runtime/build.gradle.

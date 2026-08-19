@@ -18,7 +18,6 @@
 #   --binding=napi|jsi       which runtime tree to compile (default napi)
 #   --disable-host-objects   build without host-object support (on by default;
 #                            every engine supports it)
-#   --as-napi-module         build the runtime as a standalone Node-API module
 #   --dry-run                print the gradle command and exit
 #   anything else            passed through to gradle verbatim
 #
@@ -37,7 +36,6 @@ DEFAULT_ENGINE=V8-13
 ENGINE=${ENGINE:-}
 BINDING=${BINDING:-napi}
 DISABLE_HOST_OBJECTS=false
-AS_NAPI_MODULE=false
 DRY_RUN=false
 PASSTHROUGH=()
 
@@ -46,7 +44,6 @@ for arg in "$@"; do
     --engine=*) ENGINE="${arg#*=}" ;;
     --binding=*) BINDING="${arg#*=}" ;;
     --disable-host-objects) DISABLE_HOST_OBJECTS=true ;;
-    --as-napi-module) AS_NAPI_MODULE=true ;;
     --dry-run) DRY_RUN=true ;;
     *) PASSTHROUGH+=("$arg") ;;
   esac
@@ -94,7 +91,6 @@ esac
 GRADLE_ARGS=("-Pengine=$ENGINE" "-PbindingLayer=$BINDING")
 # Host objects are on by default for every engine; opting out is explicit.
 $DISABLE_HOST_OBJECTS || GRADLE_ARGS+=("-PuseHostObjects")
-$AS_NAPI_MODULE && GRADLE_ARGS+=("-PasNapiModule")
 [ ${#PASSTHROUGH[@]} -gt 0 ] && GRADLE_ARGS+=("${PASSTHROUGH[@]}")
 
 checkpoint "Building the Android runtime with $ENGINE ($BINDING runtime)"

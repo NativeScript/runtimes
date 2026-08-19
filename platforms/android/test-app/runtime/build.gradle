@@ -10,7 +10,6 @@ if (hasEngine) {
     jsEngine = engine
 }
 def hasHostObjects = true //project.hasProperty("useHostObjects")
-def isNapiModule = project.hasProperty("asNapiModule");
 
 // Which runtime to compile. These are two complete parallel implementations,
 // not a runtime plus a shim:
@@ -202,10 +201,6 @@ android {
                if (hasHostObjects) {
                    arguments.add("-DUSE_HOST_OBJECTS=true")
                }
-
-                if (isNapiModule) {
-                    arguments.add("-DIS_NAPI_MODULE=true")
-                }
 
                 arguments.add("-DNS_BINDING=${bindingLayer}")
 
