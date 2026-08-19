@@ -1355,11 +1355,14 @@ task generateTypescriptDefinitions(type: BuildToolTask) {
     }
 }
 
-// On by default. TypeScript users need these to call anything native, and with
-// the caching above an unchanged classpath costs nothing.
-// -PgenerateTypings=false opts out.
+// Off by default: the dts-generator walks the whole compile classpath, which is
+// slow, and most builds never look at the output. TypeScript users who need the
+// typings to call anything native opt in per build with -PgenerateTypings
+// (bare, or =true); -PgenerateTypings=false is still an explicit no.
 generateTypescriptDefinitions.onlyIf {
-    !project.hasProperty("generateTypings") || Boolean.parseBoolean(project.generateTypings.toString())
+    project.hasProperty("generateTypings") &&
+            (project.generateTypings.toString().isEmpty()
+                    || Boolean.parseBoolean(project.generateTypings.toString()))
 }
 
 collectAllJars.finalizedBy(generateTypescriptDefinitions)
