@@ -155,19 +155,27 @@ public class Builder {
     // Set from Generator before build() runs.
     private static int signatureClosureDepth = Integer.MAX_VALUE;
     private static String proguardRulesPath = null;
+    private static boolean enforceClosure = false;
 
-    public static void configureClosure(int depth, String proguardOut) {
+    public static void configureClosure(int depth, String proguardOut, boolean enforce) {
         signatureClosureDepth = depth;
         proguardRulesPath = proguardOut;
+        enforceClosure = enforce;
     }
 
     /**
      * Turns the whitelist into the concrete set of classes to emit, and writes
-     * the matching R8 keep rules. A no-op unless a whitelist was supplied: with
-     * no filter to seed from, the closure would just be every class there is.
+     * the matching R8 keep rules.
+     *
+     * A no-op unless the build asked for it *and* a whitelist was supplied. The
+     * flag matters as much as the file: only a seed the build generated may be
+     * grown and then held to the soundness check. An app's own hand-written
+     * whitelist.mdg is filtered exactly as authored -- widening included --
+     * which is how it behaved before the closure existed, and what an app that
+     * ships one is relying on.
      */
     private static void applyClosureIfRequested() {
-        if (!UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
+        if (!enforceClosure || !UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
             return;
         }
 

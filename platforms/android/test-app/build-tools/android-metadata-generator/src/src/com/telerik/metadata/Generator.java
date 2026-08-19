@@ -28,6 +28,7 @@ public class Generator {
     private static final String METADATA_JAVA_OUT = "mdg-java-out.txt";
     private static final String PROGUARD_RULES_OUT = "metadata-keep-rules.pro";
     private static final String CLOSURE_DEPTH_ARGUMENT_BEGINNING = "signatureClosureDepth=";
+    private static final String ENFORCE_CLOSURE_ARGUMENT_BEGINNING = "enforceClosure=";
     private static final String PROGUARD_OUT_ARGUMENT_BEGINNING = "proguardOut=";
 
     private static boolean verbose_mode = false;
@@ -41,6 +42,18 @@ public class Generator {
     /* Where to write the R8 keep rules. Set by the build; defaults to beside
      * the metadata output rather than inside it. */
     private static String proguardRulesPath = null;
+
+    /* Whether to grow the whitelist into a closure and then fail the build if
+     * that closure is unsound.
+     *
+     * Off unless the build says otherwise, because it may only be applied to a
+     * seed the build generated for it. A hand-written whitelist.mdg is an app
+     * author's own list, filtered as authored: signature types it does not name
+     * are widened, which is how a user whitelist has always behaved. Growing it
+     * would change what the app ships, and holding it to the closure's
+     * soundness bar would fail a build that was fine before the closure
+     * existed. */
+    private static boolean enforceClosure = false;
 
     /**
      * @param args arguments
@@ -80,7 +93,7 @@ public class Generator {
                     ? proguardRulesPath
                     : new File(metadataOutputDir, "../" + PROGUARD_RULES_OUT).getCanonicalPath();
 
-            Builder.configureClosure(signatureClosureDepth, proguardOut);
+            Builder.configureClosure(signatureClosureDepth, proguardOut, enforceClosure);
 
             TreeNode root = Builder.build(params, classes);
 
@@ -115,6 +128,9 @@ public class Generator {
             } else if (arg.startsWith(CLOSURE_DEPTH_ARGUMENT_BEGINNING)) {
                 signatureClosureDepth = Integer.parseInt(
                         arg.substring(CLOSURE_DEPTH_ARGUMENT_BEGINNING.length()));
+            } else if (arg.startsWith(ENFORCE_CLOSURE_ARGUMENT_BEGINNING)) {
+                enforceClosure = Boolean.parseBoolean(
+                        arg.substring(ENFORCE_CLOSURE_ARGUMENT_BEGINNING.length()));
             } else if (arg.startsWith(PROGUARD_OUT_ARGUMENT_BEGINNING)) {
                 proguardRulesPath = arg.substring(PROGUARD_OUT_ARGUMENT_BEGINNING.length());
             } else if (VERBOSE_FLAG_NAME.equals(arg)) {

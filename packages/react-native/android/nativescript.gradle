@@ -480,6 +480,12 @@ android.applicationVariants.all { variant ->
 
             def params = [metadataGeneratorJar.absolutePath]
             params.add("proguardOut=" + metadataKeepRules.absolutePath)
+            // Only a generated seed may be grown into a closure and held to the
+            // soundness check; an app's own whitelist.mdg is filtered as
+            // authored. See Builder.applyClosureIfRequested.
+            if (nsFilterMetadata) {
+                params.add("enforceClosure=true")
+            }
             if (project.hasProperty("nsVerboseMetadata")) {
                 params.add("verbose")
             }

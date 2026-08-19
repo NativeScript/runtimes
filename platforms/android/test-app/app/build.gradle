@@ -853,9 +853,16 @@ task 'collectAllJars' {
 // build if that closure turns out to be unsound. See docs/metadata-filtering.md.
 def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
 
+// Build-owned, and deliberately NOT $rootDir/whitelist.mdg: that path belongs to
+// the app. An app may ship its own hand-written whitelist.mdg / blacklist.mdg
+// and filter without -PnsFilterMetadata at all, exactly as it could before the
+// generated seed existed -- writing the seed there overwrote that file, and
+// turning filtering off deleted it.
+def nsGeneratedSeed = file("$projectDir/build/nativescript/generated-whitelist.mdg")
+
 task generateMetadataSeed {
     def seedScript = "$BUILD_TOOLS_PATH/metadata-filter/seed.js"
-    def generatedSeed = file("$rootDir/whitelist.mdg")
+    def generatedSeed = nsGeneratedSeed
 
     inputs.property("enabled", nsFilterMetadata)
     inputs.dir(APP_DIR)
@@ -866,13 +873,17 @@ task generateMetadataSeed {
     doLast {
         if (!nsFilterMetadata) {
             // Leaving a stale seed behind would keep filtering on for a build
-            // that did not ask for it -- the confusing direction to fail.
+            // that did not ask for it -- the confusing direction to fail. Only
+            // the generated file is removed; an app's own whitelist.mdg is
+            // untouched and still filters.
             if (generatedSeed.exists()) {
                 generatedSeed.delete()
-                outLogger.withStyle(Style.Info).println "\t ~ metadata filtering off; removed generated whitelist.mdg"
+                outLogger.withStyle(Style.Info).println "\t ~ metadata filtering off; removed the generated seed"
             }
             return
         }
+
+        generatedSeed.parentFile.mkdirs()
 
         def cmd = ["node", seedScript, APP_DIR,
                    "--manifest", "$projectDir/src/main/AndroidManifest.xml",
@@ -949,21 +960,41 @@ task copyMetadataFilters {
     // Without inputs it has none to compare, stays up to date on the strength
     // of its outputs alone, and leaves the previous build's filter in place --
     // which silently keeps filtering on for a build that turned it off.
-    inputs.files("$rootDir/whitelist.mdg", "$rootDir/blacklist.mdg")
+    inputs.files("$rootDir/whitelist.mdg", "$rootDir/blacklist.mdg", nsGeneratedSeed)
     outputs.files("$BUILD_TOOLS_PATH/whitelist.mdg", "$BUILD_TOOLS_PATH/blacklist.mdg")
 
     // Copies at execution time, not configuration time: the seed does not exist
     // until generateMetadataSeed has run. Files.copy rather than project.copy,
     // which Gradle 9 no longer allows during execution.
     doLast {
-        ["whitelist.mdg", "blacklist.mdg"].each { name ->
-            def source = file("$rootDir/$name")
-            def target = file("$BUILD_TOOLS_PATH/$name")
-            if (source.exists()) {
-                Files.copy(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            } else {
-                target.delete()
-            }
+        // The whitelist MDG reads is the app's own file, the generated seed, or
+        // both concatenated. Either alone is a complete filter: an app with a
+        // hand-written whitelist and no -PnsFilterMetadata filters by its list
+        // (and MDG leaves it alone -- see enforceClosure in buildMetadata),
+        // while a build with the flag and no app file filters by the seed.
+        def whitelistParts = []
+        def appWhitelist = file("$rootDir/whitelist.mdg")
+        if (appWhitelist.exists()) {
+            whitelistParts.add(appWhitelist.text)
+        }
+        if (nsFilterMetadata && nsGeneratedSeed.exists()) {
+            whitelistParts.add(nsGeneratedSeed.text)
+        }
+
+        def whitelistTarget = file("$BUILD_TOOLS_PATH/whitelist.mdg")
+        if (whitelistParts.isEmpty()) {
+            whitelistTarget.delete()
+        } else {
+            whitelistTarget.text = whitelistParts.join("\n")
+        }
+
+        def blacklistSource = file("$rootDir/blacklist.mdg")
+        def blacklistTarget = file("$BUILD_TOOLS_PATH/blacklist.mdg")
+        if (blacklistSource.exists()) {
+            Files.copy(blacklistSource.toPath(), blacklistTarget.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING)
+        } else {
+            blacklistTarget.delete()
         }
     }
 }
@@ -1286,6 +1317,14 @@ task buildMetadata(type: BuildToolTask) {
         }
 
         paramz.add("proguardOut=$METADATA_KEEP_RULES")
+
+        // Grow the whitelist into a closure, and fail the build if that closure
+        // is unsound, only when the seed is the one we generated. An app's own
+        // whitelist.mdg is filtered as authored -- see the comment on
+        // generateMetadataSeed and Builder.applyClosureIfRequested.
+        if (nsFilterMetadata) {
+            paramz.add("enforceClosure=true")
+        }
 
         args paramz.toArray()
     }
