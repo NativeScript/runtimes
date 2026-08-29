@@ -4,7 +4,7 @@
   "version": "9.0.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/runtimes.git",
+    "url": "git+https://github.com/NativeScript/runtimes.git",
     "directory": "platforms/android"
   },
   "files": [

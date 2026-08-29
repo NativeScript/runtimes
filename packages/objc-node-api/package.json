@@ -4,7 +4,7 @@
   "description": "Typings for the common Objective-C runtime APIs used by both @nativescript/ios-node-api and @nativescript/macos-node-api",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/runtime-node-api.git",
+    "url": "git+https://github.com/NativeScript/runtimes.git",
     "directory": "packages/objc-node-api"
   },
   "main": "index.js",
