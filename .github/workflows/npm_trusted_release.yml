@@ -414,7 +414,12 @@ jobs:
       - name: Install Dependencies
         run: npm install
       - name: Install Android NDK
-        run: echo y | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" >/dev/null
+        # sdkmanager is not on PATH on the hosted ubuntu runners; call it from
+        # ANDROID_HOME. Skip the install when the image already ships this NDK.
+        run: |
+          if [ ! -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" ]; then
+            echo y | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${ANDROID_NDK_VERSION}" >/dev/null
+          fi
       - name: Prepare Android build
         run: ./scripts/setup_android.sh
       - name: Bump version
