@@ -328,10 +328,34 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: ./scripts/build_all_ios.sh "--${TARGET#ios-}"
+      # The package ships both halves. The Android half is generated -- both
+      # android/tools (the build-time jars) and android/src/main/java-runtime
+      # are gitignored -- so without these steps npm pack produces a tarball
+      # with an Android directory that has no runtime and no tools in it.
+      - name: Verify Android runtime sources
+        if: ${{ matrix.target == 'react-native' }}
+        run: |
+          if [ ! -d platforms/android/test-app ]; then
+            echo "::error::The checked-out ref has no Android runtime, so @nativescript/react-native would publish without its Android half. Set build-ref to a branch that contains it (e.g. android-react-native)."
+            exit 1
+          fi
+      - uses: actions/setup-java@99b8673ff64fbf99d8d325f52d9a5bdedb8483e9 # v4.2.1
+        if: ${{ matrix.target == 'react-native' }}
+        with:
+          distribution: temurin
+          java-version: 17
       - name: Build @nativescript/react-native
         if: ${{ matrix.target == 'react-native' }}
         run: |
           ./scripts/build_all_react_native.sh
+          # Staging only: copies the runtime C++ and com.tns.* Java into the
+          # package. No SDK or NDK involved -- the consuming app compiles them.
+          ./scripts/build_react_native_android.sh
+          # Builds the metadata/dts/static-binding jars through the test-app
+          # Gradle build, which configures Android modules and so needs the SDK
+          # the runner image ships.
+          ./scripts/build_react_native_android_tools.sh
+          # Stages the iOS half and packs; run last, it is what produces the tarball.
           ./scripts/build_react_native_turbomodule.sh
       - name: Record metadata
         shell: bash
