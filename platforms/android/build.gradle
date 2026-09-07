@@ -15,6 +15,7 @@ import groovy.json.JsonBuilder
 import groovy.json.JsonOutput
 
 def onlyX86 = project.hasProperty("onlyX86")
+def onlyArm64 = project.hasProperty("onlyArm64")
 def useCCache = !project.hasProperty("noCCache")
 def hasNdkVersion = project.hasProperty("ndkVersion")
 
@@ -224,6 +225,9 @@ def getAssembleReleaseBuildArguments = { ->
     arguments += [":runtime:assembleRelease", "-PpackageVersion=${pVersion}", "-PgitCommitVersion=${arVersion}"]
     if (onlyX86) {
         arguments.add("-PonlyX86")
+    }
+    if (onlyArm64) {
+        arguments.add("-PonlyArm64")
     }
     if (useCCache) {
         arguments.add("-PuseCCache")
@@ -521,6 +525,9 @@ def getRunTestsBuildArguments = { taskName ->
     arguments += ["-b", "runtests.gradle", taskName]
     if (onlyX86) {
         arguments.add("-PonlyX86")
+    }
+    if (onlyArm64) {
+        arguments.add("-PonlyArm64")
     }
     if (useCCache) {
         arguments.add("-PuseCCache")

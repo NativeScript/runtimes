@@ -342,6 +342,7 @@ if(ENABLE_JS_RUNTIME)
     runtime/modules/url/ada/ada.cpp
     runtime/modules/url/URL.cpp
     runtime/modules/url/URLSearchParams.cpp
+    runtime/modules/esm/ESModuleSupport.cpp
   )
 
   if(TARGET_ENGINE_V8)
