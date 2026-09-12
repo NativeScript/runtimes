@@ -3,7 +3,8 @@
  *
  * The stock `qjsc` emits a C source array, not a loadable blob, so it can't feed
  * our runtime. This tiny tool instead reads a JS file, compiles it with
- * JS_EVAL_FLAG_COMPILE_ONLY, serializes it via JS_WriteObject(JS_WRITE_OBJ_BYTECODE),
+ * JS_EVAL_FLAG_COMPILE_ONLY, serializes it via JS_WriteObject (bytecode with the
+ * per-function source text stripped -- see the flags below),
  * and writes a small NativeScript bytecode *container*:
  *
  *     [8 bytes magic][4 bytes format version, little-endian][JS_WriteObject payload]
@@ -81,9 +82,15 @@ int main(int argc, char **argv) {
         JS_FreeValue(ctx, exc);
         return 1;
     }
+    
+    int write_flags = JS_WRITE_OBJ_BYTECODE;
+    const char *keep_source = getenv("NSBC_KEEP_SOURCE");
+    if (!(keep_source && keep_source[0] && strcmp(keep_source, "0") != 0)) {
+        write_flags |= JS_WRITE_OBJ_STRIP_SOURCE;
+    }
 
     size_t bc_len = 0;
-    uint8_t *bc = JS_WriteObject(ctx, &bc_len, obj, JS_WRITE_OBJ_BYTECODE);
+    uint8_t *bc = JS_WriteObject(ctx, &bc_len, obj, write_flags);
     JS_FreeValue(ctx, obj);
     if (!bc) { fprintf(stderr, "JS_WriteObject failed for %s\n", in_path); return 1; }
 

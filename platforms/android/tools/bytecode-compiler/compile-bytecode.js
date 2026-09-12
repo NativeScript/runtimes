@@ -29,7 +29,15 @@
  *   node compile-bytecode.js --app <dir> --engine <ENGINE> [options]
  *
  * Options:
- *   --app <dir>        Directory to process recursively (required).
+ *   --app <dir>        Merged assets directory to process (required). Only the
+ *                      subtrees named by --roots are touched.
+ *   --roots <list>      Comma-separated subdirectories of --app that hold runtime
+ *                      JS (default: "app,internal"). Everything else under
+ *                      assets/ -- a WebView bundle, a plugin's own payload -- is
+ *                      left alone: it is not loaded through the module loader,
+ *                      so bytecode there is unreadable to whoever does load it.
+ *                      Pass "." to process the directory itself, which is what a
+ *                      --app pointing straight at assets/app already implies.
  *   --engine <name>    ns_engine value, e.g. HERMES, QUICKJS, QUICKJS_NG, PRIMJS,
  *                      V8-13, JSC (required). Engines without a bytecode compiler
  *                      are a no-op.
@@ -39,6 +47,10 @@
  *   --compiler <path>  Explicit compiler binary path (overrides --bin-dir lookup).
  *   --raw <paths>      Comma-separated app-relative paths compiled unwrapped
  *                      (default: "internal/ts_helpers.js").
+ *   --keep-source      Keep each function's source text in the blob. QuickJS
+ *                      strips it by default: it is ~4x the bytecode on a bundle,
+ *                      and nothing but Function.prototype.toString() reads it.
+ *                      Needed only by code that sniffs toString() output.
  *   --source-maps      Emit source maps next to each file (<file>.map) when the
  *                      engine's compiler supports them.
  *   --optimize <flag>  Override the engine's default optimization flag.
@@ -69,6 +81,9 @@ function parseArgs(argv) {
     binDir: path.join(__dirname, 'bin'),
     compiler: null,
     raw: ['internal/ts_helpers.js'],
+    // The runtime loads JS from these two only; see listJsFiles.
+    roots: ['app', 'internal'],
+    keepSource: false,
     sourceMaps: false,
     optimize: undefined,
     strict: false,
@@ -79,10 +94,12 @@ function parseArgs(argv) {
     const a = argv[i];
     switch (a) {
       case '--app': opts.app = argv[++i]; break;
+      case '--roots': opts.roots = argv[++i].split(',').map((r) => r.trim()).filter(Boolean); break;
       case '--engine': opts.engine = argv[++i]; break;
       case '--bin-dir': opts.binDir = argv[++i]; break;
       case '--compiler': opts.compiler = argv[++i]; break;
       case '--raw': opts.raw = argv[++i].split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--keep-source': opts.keepSource = true; break;
       case '--source-maps': opts.sourceMaps = true; break;
       case '--optimize': opts.optimize = argv[++i]; break;
       case '--strict': opts.strict = true; break;
@@ -96,7 +113,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-function listJsFiles(dir) {
+function listJsFiles(dir, roots) {
   const out = [];
   const walk = (d) => {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
@@ -105,7 +122,11 @@ function listJsFiles(dir) {
       else if (entry.isFile() && entry.name.endsWith('.js')) out.push(full);
     }
   };
-  walk(dir);
+  for (const root of roots) {
+    const start = root === '.' ? dir : path.join(dir, root);
+    if (!fs.existsSync(start)) continue;
+    walk(start);
+  }
   return out;
 }
 
@@ -140,7 +161,13 @@ function isPlaceholder(file) {
   }
 }
 
-function compileFile(opts, adapter, compiler, file, isRaw, appDir) {
+// `nameBase` is what the embedded source name is relative to, and it is NOT the
+// directory being walked: the runtime resolves a relative require() against the
+// requiring module's name, and its module root is assets/app. A module named
+// "app/shared/Workers/EvalWorker.js" makes "./EvalWorker" resolve under
+// app/app/shared/Workers/ and the load fails. Files outside app/ (internal/) are
+// run by absolute path, so their name only shows up in stack traces.
+function compileFile(opts, adapter, compiler, file, isRaw, nameBase) {
   const source = fs.readFileSync(file, 'utf8');
   const wrapped = isRaw ? source : MODULE_PROLOGUE + source + MODULE_EPILOGUE;
 
@@ -157,7 +184,7 @@ function compileFile(opts, adapter, compiler, file, isRaw, appDir) {
   // used here: hermesc must be given a real, openable host file (no URL scheme /
   // device path), and that prefix is device-specific anyway. The app-relative
   // path is the identity all engines can embed consistently.
-  const rel = relKey(appDir, file);
+  const rel = relKey(nameBase, file);
   const relParts = rel.split('/');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nsbc-'));
   const tmpSrc = path.join(tmpDir, ...relParts);
@@ -175,7 +202,12 @@ function compileFile(opts, adapter, compiler, file, isRaw, appDir) {
       sourceMap: wantMap ? adapter.sourceMapOutput(tmpOut) : null,
       optimize,
     });
-    const res = spawnSync(compiler, args, { cwd: tmpDir, encoding: 'utf8' });
+    // The quickjs shim reads this: strip the per-function source text unless the
+    // build asked to keep it. Harmless for compilers that ignore it.
+    const env = { ...process.env };
+    if (opts.keepSource) env.NSBC_KEEP_SOURCE = '1';
+    else delete env.NSBC_KEEP_SOURCE;
+    const res = spawnSync(compiler, args, { cwd: tmpDir, encoding: 'utf8', env });
     if (res.status !== 0) {
       const detail = (res.stderr || res.stdout || (res.error && res.error.message) || '').toString().trim();
       throw new Error(`compiler failed for ${file} (exit ${res.status}):\n${detail}`);
@@ -236,7 +268,12 @@ function main() {
 
   const rawSet = new Set(opts.raw);
   const magicLen = adapter.magic ? adapter.magic.length : 0;
-  const files = listJsFiles(appDir);
+  // Called with --app pointing at assets/app itself (the historical shape): the
+  // roots are relative to assets/, so fall back to walking the directory given.
+  const roots = opts.roots.some((r) => r === '.' || fs.existsSync(path.join(appDir, r)))
+      ? opts.roots
+      : ['.'];
+  const files = listJsFiles(appDir, roots);
   let compiled = 0;
   let skipped = 0;
   let rawCount = 0;
@@ -249,8 +286,12 @@ function main() {
       continue;
     }
     const isRaw = rawSet.has(relKey(appDir, file));
+    // Modules under app/ are named relative to app/, which is the runtime's
+    // module root; anything else keeps its assets-relative name.
+    const appRoot = path.join(appDir, 'app');
+    const nameBase = file.startsWith(appRoot + path.sep) ? appRoot : appDir;
     try {
-      compileFile(opts, adapter, compiler, file, isRaw, appDir);
+      compileFile(opts, adapter, compiler, file, isRaw, nameBase);
       compiled++;
       if (isRaw) rawCount++;
       if (opts.verbose) {
