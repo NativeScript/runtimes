@@ -1,5 +1,5 @@
 diff --git a/quickjs.c b/quickjs.c
-index 9053c26..7227326 100644
+index 9053c26..f224ad5 100644
 --- a/quickjs.c
 +++ b/quickjs.c
 @@ -379,6 +379,7 @@ struct JSRuntime {
@@ -128,7 +128,39 @@ index 9053c26..7227326 100644
              goto fail1;
          fun_obj = JS_NewModuleValue(ctx, m);
      }
-@@ -62187,6 +62232,7 @@ static JSValue js_weakref_constructor(JSContext *ctx, JSValueConst new_target,
+@@ -42267,11 +42312,21 @@ static JSValue js_function_toString(JSContext *ctx, JSValueConst this_val,
+         return JS_EXCEPTION;
+ 
+     p = JS_VALUE_GET_OBJ(this_val);
++    /* NativeScript: a JS function whose source was stripped at build time must
++       not stringify like a C function. Release builds compile the app to
++       bytecode with JS_WRITE_OBJ_STRIP_SOURCE, and library code routinely asks
++       "is this native?" by looking for "[native code]" in toString() output --
++       @nativescript/core's Style does it to tell a WeakRef from a view. Without
++       this, every class in the app answers yes and that check inverts.
++       js_class_has_bytecode() is the real distinction: true only for functions
++       backed by JS bytecode, never for a C function. */
++    bool js_source_stripped = false;
+     if (js_class_has_bytecode(p->class_id)) {
+         JSFunctionBytecode *b = p->u.func.function_bytecode;
+         /* `b->source` must be pure ASCII or UTF-8 encoded */
+         if (b->source)
+             return JS_NewStringLen(ctx, b->source, b->source_len);
++        js_source_stripped = true;
+     }
+     {
+         JSValue name;
+@@ -42292,7 +42347,8 @@ static JSValue js_function_toString(JSContext *ctx, JSValueConst this_val,
+             pref = "async function *";
+             break;
+         }
+-        suff = "() {\n    [native code]\n}";
++        suff = js_source_stripped ? "() {\n    [stripped code]\n}"
++                                  : "() {\n    [native code]\n}";
+         name = JS_GetProperty(ctx, this_val, JS_ATOM_name);
+         if (JS_IsUndefined(name))
+             name = js_empty_string(ctx->rt);
+@@ -62187,6 +62243,7 @@ static JSValue js_weakref_constructor(JSContext *ctx, JSValueConst new_target,
      wr->kind = JS_WEAK_REF_KIND_WEAK_REF;
      wr->u.weak_ref_data = wrd;
      insert_weakref_record(arg, wr);
@@ -136,7 +168,7 @@ index 9053c26..7227326 100644
  
      JS_SetOpaqueInternal(obj, wrd);
      return obj;
-@@ -62549,6 +62595,35 @@ static void insert_weakref_record(JSValueConst target,
+@@ -62549,6 +62606,35 @@ static void insert_weakref_record(JSValueConst target,
      *pwr = wr;
  }
  
@@ -172,7 +204,7 @@ index 9053c26..7227326 100644
  /* CallSite */
  
  static void js_callsite_finalizer(JSRuntime *rt, JSValueConst val)
-@@ -63992,6 +64067,32 @@ uintptr_t js_std_cmd(int cmd, ...) {
+@@ -63992,6 +64078,32 @@ uintptr_t js_std_cmd(int cmd, ...) {
      return rv;
  }
  
