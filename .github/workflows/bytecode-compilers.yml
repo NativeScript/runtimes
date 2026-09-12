@@ -109,6 +109,10 @@ jobs:
           bin="$(find build -type f \( -name hermesc -o -name hermesc.exe \) | head -n1)"
           test -n "$bin"
           cp "$bin" "out/hermes/${{ matrix.host }}/"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            codesign --sign - --force "out/hermes/${{ matrix.host }}/$(basename "$bin")"
+            codesign --verify --verbose "out/hermes/${{ matrix.host }}/$(basename "$bin")"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -184,6 +188,10 @@ jobs:
           out="out/quickjs-ng/${{ matrix.host }}"; mkdir -p "$out"
           bin="$(find quickjs-ng/build -type f \( -name 'nsbc-quickjs-ng' -o -name 'nsbc-quickjs-ng.exe' \) | head -n1)"
           test -n "$bin"; cp "$bin" "$out/"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            codesign --sign - --force "$out/nsbc-quickjs-ng"
+            codesign --verify --verbose "$out/nsbc-quickjs-ng"
+          fi
           [ "${{ runner.os }}" = "Windows" ] || "$out/nsbc-quickjs-ng" || true
 
       - uses: actions/upload-artifact@v4
@@ -265,6 +273,10 @@ jobs:
           ninja -C out/Default nsbc-primjs
           out="../out/primjs/${{ matrix.host }}"; mkdir -p "$out"
           cp out/Default/nsbc-primjs "$out/nsbc-primjs"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            codesign --sign - --force "$out/nsbc-primjs"
+            codesign --verify --verbose "$out/nsbc-primjs"
+          fi
           "$out/nsbc-primjs" || true  # usage line (exit 2) proves it links & runs
 
       - uses: actions/upload-artifact@v4
@@ -298,6 +310,10 @@ jobs:
 
       - name: Show merged layout
         run: find bin -type f | sort
+
+      - name: Restore executable permissions
+        shell: bash
+        run: find bin -type f -path '*/darwin-*/*' -exec chmod +x {} \;
 
       - uses: actions/upload-artifact@v4
         with:
