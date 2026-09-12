@@ -1537,7 +1537,8 @@ task compileBytecode {
     // merged assets are refreshed.
     onlyIf { project.ext.bytecodeEnabled }
     doLast {
-        def appDir = getMergedAssetsOutputPath() + "/app"
+        def assetsDir = getMergedAssetsOutputPath()
+        def appDir = assetsDir + "/app"
         if (!new File(appDir).exists()) {
             outLogger.withStyle(Style.Info).println "\t ~ [bytecode] no merged app assets at ${appDir}, skipping"
             return
@@ -1550,10 +1551,17 @@ task compileBytecode {
         // (the runtime loads source directly) and the build continues. Opt into
         // fail-the-build behaviour with -PnsBytecodeStrict.
         def strict = project.hasProperty("nsBytecodeStrict")
+        // QuickJS bytecode drops each function's source text, so
+        // Function.prototype.toString() returns "[native code]" for every
+        // function. Code that sniffs that string to tell a native class from a
+        // JS one then misreads every class as native -- @nativescript/core's
+        // Style constructor does exactly this. -PnsBytecodeKeepSource keeps the
+        // text, at roughly 4x the blob size.
+        def keepSource = project.hasProperty("nsBytecodeKeepSource")
 
         outLogger.withStyle(Style.SuccessHeader).println "\t + [bytecode] compiling app JS → ${ns_engine} bytecode"
         outLogger.withStyle(Style.Info).println "\t   ~ engine:      ${ns_engine}"
-        outLogger.withStyle(Style.Info).println "\t   ~ app assets:  ${appDir}"
+        outLogger.withStyle(Style.Info).println "\t   ~ app assets:  ${assetsDir} (app/, internal/)"
         outLogger.withStyle(Style.Info).println "\t   ~ driver:      ${script}"
         if (project.hasProperty("bytecodeCompilerBinary")) {
             outLogger.withStyle(Style.Info).println "\t   ~ compiler:    ${bytecodeCompilerBinary}"
@@ -1561,9 +1569,12 @@ task compileBytecode {
         outLogger.withStyle(Style.Info).println "\t   ~ source maps: ${sourceMaps ? "on" : "off"}"
         outLogger.withStyle(Style.Info).println "\t   ~ on error:    ${strict ? "fail the build (strict)" : "skip file, keep source"}"
 
-        def cmd = [node, script, "--app", appDir, "--engine", ns_engine as String]
+        def cmd = [node, script, "--app", assetsDir, "--engine", ns_engine as String]
         if (project.hasProperty("bytecodeCompilerBinary")) {
             cmd += ["--compiler", bytecodeCompilerBinary as String]
+        }
+        if (keepSource) {
+            cmd += ["--keep-source"]
         }
         if (sourceMaps) {
             cmd += ["--source-maps"]
