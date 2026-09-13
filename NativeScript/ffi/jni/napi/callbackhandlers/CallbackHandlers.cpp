@@ -71,7 +71,8 @@ void CallbackHandlers::Init(napi_env env) {
 napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, const string &className,
                                  const string &methodName, MetadataEntry *entry,
                                  bool isFromInterface, bool isStatic, napi_callback_info info, size_t argc, napi_value* argv,
-                                 ObjectManager *objectManager) {
+                                 ObjectManager *objectManager,
+                                 bool metadataSignatureIsUnambiguous) {
 
     JEnv jEnv;
     jclass clazz;
@@ -83,7 +84,29 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
     bool isSuper = false;
     napi_status status;
 
-    if ((entry != nullptr) && entry->getIsResolved()) {
+    if (metadataSignatureIsUnambiguous && entry != nullptr && entry->memberId == nullptr) {
+        JEnv metadataEnv;
+        auto metadataClass = metadataEnv.FindClass(className);
+        if (metadataClass != nullptr) {
+            auto metadataMethod = isStatic
+                                  ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
+                                                                   entry->getSig())
+                                  : metadataEnv.GetMethodID(metadataClass, methodName,
+                                                            entry->getSig());
+            if (metadataMethod != nullptr) {
+                entry->memberId = reinterpret_cast<void *>(metadataMethod);
+                entry->clazz = metadataClass;
+            } else {
+                metadataEnv.ExceptionClear();
+                metadataSignatureIsUnambiguous = false;
+            }
+        } else {
+            metadataEnv.ExceptionClear();
+            metadataSignatureIsUnambiguous = false;
+        }
+    }
+
+    if ((entry != nullptr) && (entry->getIsResolved() || metadataSignatureIsUnambiguous)) {
         auto &entrySignature = entry->getSig();
         isStatic = entry->isStatic;
 
@@ -188,6 +211,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
         retType = mi.retType;
     }
 
+
     if (!isStatic) {
         DEBUG_WRITE("CallJavaMethod on instance %s", methodName.c_str());
     } else {
@@ -206,6 +230,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                                   : JsArgConverter(env, argv, argc, false, *sig, entry, (JNIEnv *) jEnv, objectManager);
 
 
+
     if (!argConverter.IsValid()) {
         JsArgConverter::Error err = argConverter.GetError();
         throw NativeScriptException(err.msg);
@@ -214,6 +239,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
     JniLocalRef callerJavaObject;
 
     jvalue *javaArgs = argConverter.ToArgs();
+
 
     if (!isStatic) {
         int objectId = -1;
@@ -235,6 +261,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
             throw NativeScriptException(ss.str());
         }
     }
+
 
     napi_value returnValue;
 
@@ -515,6 +542,7 @@ bool CallbackHandlers::RegisterInstance(napi_env env, napi_value jsObject,
         DEBUG_WRITE_FORCE("RegisterInstance failed with null new instance class: %s",
                           fullClassName.c_str());
     }
+
 
     return success;
 }

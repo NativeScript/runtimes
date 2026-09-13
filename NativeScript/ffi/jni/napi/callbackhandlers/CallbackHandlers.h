@@ -59,7 +59,8 @@ namespace tns {
         CallJavaMethod(napi_env env, napi_value caller, const std::string &className,
                        const std::string &methodName, MetadataEntry *entry, bool isFromInterface,
                        bool isStatic, napi_callback_info info,  size_t argc, napi_value* argv,
-                       ObjectManager *objectManager = nullptr);
+                       ObjectManager *objectManager = nullptr,
+                       bool metadataSignatureIsUnambiguous = false);
 
         static napi_value
         CallJSMethod(napi_env env, JNIEnv *jEnv, napi_value jsObject,jclass claz,
