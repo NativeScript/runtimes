@@ -2361,7 +2361,6 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                 NAPI_GUARD(napi_get_value_bool(env, argv[2], &isTypeScriptExtend)) {}
             };
         }
-
         auto node = reinterpret_cast<MetadataNode *>(data);
 
         auto useContentKey = false;
@@ -2397,7 +2396,6 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                 return nullptr;
             }
         }
-
         string baseClassName = node->m_name;
 
         // An explicitly named extend keeps its name in front of the hash. The
@@ -2414,12 +2412,13 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
         string extendNameAndLocation;
 
         if (useContentKey) {
+            auto interfaceNames = CallbackHandlers::CollectImplementedInterfaceNames(
+                    env, implementationObject);
+            auto methodNames = CallbackHandlers::CollectMethodOverrideNames(
+                    env, implementationObject, /* functionsOnly */ false);
             string contentKey =
                     CreateContentKey(baseClassName,
-                                     CallbackHandlers::CollectImplementedInterfaceNames(
-                                             env, implementationObject),
-                                     CallbackHandlers::CollectMethodOverrideNames(
-                                             env, implementationObject, /* functionsOnly */ false));
+                                     interfaceNames, methodNames);
             extendNameAndLocation =
                     extendNameString.empty() ? contentKey : extendNameString + "_" + contentKey;
         } else {
@@ -2696,9 +2695,93 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                 initialCallbackData->objectManager =
                         Runtime::GetRuntime(env)->GetObjectManager();
             }
+
+            size_t metadataMatches = 0;
+            MetadataEntry *metadataMatch = nullptr;
+            bool metadataSignatureIsUnambiguous = false;
+            auto metadataTypesMatch = [&](MetadataEntry &candidate) {
+                const auto signature = candidate.getSig();
+                if (signature.empty() || signature[0] != '(') {
+                    return false;
+                }
+
+                std::vector<std::string> parameterTypes;
+                size_t index = 1;
+                while (index < signature.size() && signature[index] != ')') {
+                    const size_t start = index;
+                    if (signature[index] == 'L') {
+                        const auto end = signature.find(';', index);
+                        if (end == std::string::npos) return false;
+                        index = end + 1;
+                    } else if (signature[index] == '[') {
+                        index++;
+                        if (index < signature.size() && signature[index] == 'L') {
+                            const auto end = signature.find(';', index);
+                            if (end == std::string::npos) return false;
+                            index = end + 1;
+                        } else {
+                            index++;
+                        }
+                    } else {
+                        index++;
+                    }
+                    parameterTypes.emplace_back(signature.substr(start, index - start));
+                }
+
+                if (parameterTypes.size() != argc) return false;
+
+                JEnv metadataEnv;
+                for (size_t i = 0; i < argc; i++) {
+                    const auto &parameterType = parameterTypes[i];
+                    napi_valuetype valueType;
+                    napi_typeof(env, argv[i], &valueType);
+                    if (parameterType[0] == 'L' || parameterType[0] == '[') {
+                        if (valueType != napi_object && valueType != napi_function) return false;
+                        auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(argv[i]);
+                        if (actualObject.IsNull()) return false;
+                        auto expectedName = parameterType;
+                        if (expectedName[0] == 'L') {
+                            expectedName = expectedName.substr(1, expectedName.size() - 2);
+                        }
+                        auto expectedClass = metadataEnv.FindClass(expectedName);
+                        if (expectedClass == nullptr) {
+                            metadataEnv.ExceptionClear();
+                            return false;
+                        }
+                        if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                    } else if (parameterType[0] == 'Z') {
+                        if (valueType != napi_boolean) return false;
+                    } else if (valueType != napi_number) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (argc > 0 && methodName.rfind("get", 0) != 0 &&
+                !first.isStatic && !metadataSignatureIsUnambiguous) {
+                for (auto *candidateData = initialCallbackData;
+                     candidateData != nullptr;
+                     candidateData = candidateData->parent) {
+                    for (auto &candidate : candidateData->candidates) {
+                        if (!candidate.isExtensionFunction &&
+                            candidate.isStatic == first.isStatic &&
+                            candidate.getParamCount() == argc &&
+                            metadataTypesMatch(candidate)) {
+                            metadataMatches++;
+                            metadataMatch = &candidate;
+                        }
+                    }
+                }
+                metadataSignatureIsUnambiguous = metadataMatches == 1 &&
+                                                 metadataMatch != nullptr;
+            }
+            if (metadataSignatureIsUnambiguous) {
+                entry = metadataMatch;
+            }
             napi_value result = CallbackHandlers::CallJavaMethod(env, jsThis, *className, methodName, entry,
                                                     isFromInterface, first.isStatic, info,
-                                                    argc, argv, initialCallbackData->objectManager);
+                                                    argc, argv, initialCallbackData->objectManager,
+                                                    metadataSignatureIsUnambiguous);
 //            napi_value error;
 //            error = Runtime::GetRuntime(env)->getPendingError();
 //            if (error) {
