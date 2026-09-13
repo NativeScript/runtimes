@@ -254,6 +254,8 @@ for jar in android-metadata-generator dts-generator static-binding-generator; do
   [ -f "$PACKAGE_DIR/android/tools/$jar.jar" ] || missing+=("android/tools/$jar.jar (scripts/build_react_native_android_tools.sh)")
 done
 [ -d "$PACKAGE_DIR/android/tools/jsparser" ] || missing+=("android/tools/jsparser (scripts/build_react_native_android_tools.sh)")
+[ -f "$PACKAGE_DIR/android/tools/metadata-filter/seed.js" ] || missing+=("android/tools/metadata-filter/seed.js (scripts/build_react_native_android_tools.sh)")
+[ -f "$PACKAGE_DIR/android/tools/metadata-filter/harvest.js" ] || missing+=("android/tools/metadata-filter/harvest.js (scripts/build_react_native_android_tools.sh)")
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "error: the Android half of @nativescript/react-native is not staged; refusing to pack:" >&2
@@ -274,6 +276,8 @@ tarball=$(find "$OUTPUT_DIR" -name '*.tgz' | head -1)
 for required in package/android/tools/static-binding-generator.jar \
                 package/android/src/main/java-runtime \
                 package/android/nativescript.gradle \
+                package/android/tools/metadata-filter/seed.js \
+                package/android/tools/metadata-filter/harvest.js \
                 package/native-api/runtime/android \
                 package/native-api/ffi/jni \
                 package/native-api/ffi/objc \

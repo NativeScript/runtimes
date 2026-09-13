@@ -315,6 +315,15 @@ task copyFilesToProjectTemeplate {
             from "$BUILD_TOOLS_PATH/jsparser/build/js_parser.js"
             into "$DIST_FRAMEWORK_PATH/build-tools/jsparser"
         }
+        // Metadata filtering runs from the generated project template. Ship
+        // the scripts with the template, but not their development/runtime
+        // dependencies: seed.js invokes the sibling harvest.js and resolves
+        // Babel from the consuming app's node_modules.
+        copy {
+            from "$BUILD_TOOLS_PATH/metadata-filter"
+            include "*.js"
+            into "$DIST_FRAMEWORK_PATH/build-tools/metadata-filter"
+        }
         copy {
             from "$BUILD_TOOLS_PATH/android-metadata-generator/build/libs/android-metadata-generator.jar"
             into "$DIST_FRAMEWORK_PATH/build-tools"
