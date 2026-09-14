@@ -454,7 +454,7 @@ public class Builder {
                         }
                     }
                 }
-                mi.isResolved = countUnique == 1;
+                mi.isResolved = countUnique == 1 || clazz instanceof KotlinClassDescriptor;
 
 
                 NativeTypeDescriptor[] params = ownMethod.getArgumentTypes();

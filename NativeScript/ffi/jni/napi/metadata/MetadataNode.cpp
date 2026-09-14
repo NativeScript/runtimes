@@ -2757,14 +2757,14 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                 }
                 return true;
             };
-            if (argc > 0 && methodName.rfind("get", 0) != 0 &&
-                !first.isStatic && !metadataSignatureIsUnambiguous) {
+            if (!first.isStatic && !metadataSignatureIsUnambiguous) {
                 for (auto *candidateData = initialCallbackData;
                      candidateData != nullptr;
                      candidateData = candidateData->parent) {
                     for (auto &candidate : candidateData->candidates) {
                         if (!candidate.isExtensionFunction &&
                             candidate.isStatic == first.isStatic &&
+                            candidate.getIsResolved() &&
                             candidate.getParamCount() == argc &&
                             metadataTypesMatch(candidate)) {
                             metadataMatches++;
