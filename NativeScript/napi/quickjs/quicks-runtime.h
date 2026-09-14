@@ -37,6 +37,12 @@ NAPI_EXTERN JSContext* NAPI_CDECL qjs_get_context(napi_env env);
 
 NAPI_EXTERN JSRuntime* NAPI_CDECL qjs_get_runtime(napi_env env);
 
+NAPI_EXTERN void NAPI_CDECL
+qjs_shared_array_buffer_data_retain(uint8_t* data);
+
+NAPI_EXTERN void NAPI_CDECL
+qjs_shared_array_buffer_data_release(uint8_t* data);
+
 NAPI_EXTERN napi_status NAPI_CDECL qjs_create_scoped_value(napi_env env,
                                                            JSValue value,
                                                            napi_value* result);

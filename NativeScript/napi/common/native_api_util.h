@@ -62,9 +62,7 @@ struct char_traits<unsigned short> {
 #include "js_native_api.h"
 #include "js_native_api_types.h"
 
-#ifndef NAPI_PREAMBLE
-#define NAPI_PREAMBLE napi_status status;
-#endif
+#define NS_NAPI_PREAMBLE napi_status status;
 
 #define NAPI_CALLBACK_BEGIN(n_args)                                      \
   napi_status status;                                                    \
@@ -180,9 +178,9 @@ class PersistentObject {
   napi_env GetEnv() const { return env_; }
 
  private:
-  bool isOwnedRef_ = false;
   napi_env env_;
   napi_ref ref_;
+  bool isOwnedRef_ = false;
 };
 
 inline napi_property_descriptor desc(const char* name, napi_callback method,
@@ -341,23 +339,47 @@ inline napi_status define_property(
   return napi_define_properties(env, object, 1, &desc);
 }
 
-inline void setPrototypeOf(napi_env env, napi_value object,
-                           napi_value prototype) {
+inline napi_status define_property_value(
+    napi_env env, napi_value object, const char* propertyName,
+    napi_value value = nullptr,
+    napi_property_attributes attributes = napi_default_jsproperty,
+    void* data = nullptr) {
+  return napi_util::define_property(env, object, propertyName, value, nullptr,
+                                    nullptr, data, attributes);
+}
+
+inline napi_status define_property_get_set(
+    napi_env env, napi_value object, const char* propertyName,
+    napi_callback getter, napi_callback setter,
+    napi_property_attributes attributes = napi_default_jsproperty,
+    void* data = nullptr) {
+  return napi_util::define_property(env, object, propertyName, nullptr, getter,
+                                    setter, data, attributes);
+}
+
+inline napi_status setPrototypeOf(napi_env env, napi_value object,
+                                  napi_value prototype) {
+  if (object == nullptr || prototype == nullptr) return napi_invalid_arg;
+
   napi_value global, global_object, set_proto;
 
   // Get the global object
-  napi_get_global(env, &global);
+  auto status = napi_get_global(env, &global);
+  if (status != napi_ok) return status;
 
   // Get the Object global object
-  napi_get_named_property(env, global, OBJECT, &global_object);
+  status = napi_get_named_property(env, global, OBJECT, &global_object);
+  if (status != napi_ok) return status;
 
   // Get the setPrototypeOf function from the Object global object
-  napi_get_named_property(env, global_object, SET_PROTOTYPE_OF, &set_proto);
+  status = napi_get_named_property(env, global_object, SET_PROTOTYPE_OF, &set_proto);
+  if (status != napi_ok) return status;
 
   // Prepare the arguments for the setPrototypeOf call
   napi_value argv[]{object, prototype};
   // Call setPrototypeOf(object, prototype)
-  napi_call_function(env, global, set_proto, 2, argv, nullptr);
+  napi_value result;
+  return napi_call_function(env, global, set_proto, 2, argv, &result);
 }
 
 inline bool is_object_explicit(napi_env env, napi_value value) {
@@ -449,13 +471,14 @@ inline bool is_date(napi_env env, napi_value value) {
 inline bool is_undefined(napi_env env, napi_value value) {
   if (value == nullptr) return true;
   napi_valuetype type;
-  napi_typeof(env, value, &type);
+  if (napi_typeof(env, value, &type) != napi_ok) return false;
   return type == napi_undefined;
 }
 
 inline bool is_null(napi_env env, napi_value value) {
+  if (value == nullptr) return true;
   napi_valuetype type;
-  napi_typeof(env, value, &type);
+  if (napi_typeof(env, value, &type) != napi_ok) return false;
   return type == napi_null;
 }
 

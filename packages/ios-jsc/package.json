@@ -19,7 +19,7 @@
     "email": "oss@nativescript.org"
   },
   "scripts": {
-    "build": "cd ../.. && ./scripts/build_all_ios.sh --jsc"
+    "build": "cd ../.. && IOS_VARIANT=ios-jsc ./scripts/build_all_ios.sh --jsc"
   },
   "files": [
     "framework"

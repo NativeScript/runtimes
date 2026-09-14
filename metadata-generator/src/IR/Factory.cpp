@@ -96,20 +96,33 @@ bool MetadataFactory::shouldProcess(CXCursor cursor, bool required) {
   clang_disposeString(fileName);
 
   auto cached = shouldProcessCache.find(fileNameStr);
-  if (cached != shouldProcessCache.end()) {
-    return cached->second;
-  }
-
   bool shouldInclude = false;
-  for (const std::string& path : includePaths) {
-    if (fileNameStr.find(path) != std::string::npos) {
-      shouldInclude = true;
-      break;
+  if (cached != shouldProcessCache.end()) {
+    shouldInclude = cached->second;
+  } else {
+    for (const std::string& path : includePaths) {
+      if (fileNameStr.find(path) != std::string::npos) {
+        shouldInclude = true;
+        break;
+      }
     }
+    shouldProcessCache.emplace(std::move(fileNameStr), shouldInclude);
   }
 
-  shouldProcessCache.emplace(std::move(fileNameStr), shouldInclude);
-  return shouldInclude;
+  if (!shouldInclude || !metadataFilter.active()) {
+    return shouldInclude;
+  }
+
+  CXString cxSymbol = clang_getCursorSpelling(cursor);
+  const char* symbolCString = clang_getCString(cxSymbol);
+  std::string symbol = symbolCString ? symbolCString : "";
+  clang_disposeString(cxSymbol);
+
+  // Anonymous records and enums can contain multiple globally-visible child
+  // symbols. Keep them conservatively; referenced named declarations are
+  // also retained through the existing `required` dependency path.
+  return symbol.empty() ||
+         metadataFilter.isAllowed(getFrameworkName(cursor), symbol);
 }
 
 void MetadataFactory::implementClassProtocols(

@@ -33,10 +33,16 @@ ClassDecl::ClassDecl(CXCursor cursor) {
     }
   }
 
+  struct ClassVisitorState {
+    ClassDecl* cls;
+    size_t memberCount = 0;
+  } state = {this};
+
   clang_visitChildren(
       cursor,
       [](CXCursor cursor, CXCursor, CXClientData clientData) {
-        auto cls = (ClassDecl*)clientData;
+        auto* state = static_cast<ClassVisitorState*>(clientData);
+        auto* cls = state->cls;
 
         CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -72,13 +78,22 @@ ClassDecl::ClassDecl(CXCursor cursor) {
             break;
           }
 
+          case CXCursor_ObjCPropertyDecl:
+          case CXCursor_ObjCClassMethodDecl:
+          case CXCursor_ObjCInstanceMethodDecl: {
+            state->memberCount++;
+            break;
+          }
+
           default:
             break;
         }
 
         return CXChildVisit_Continue;
       },
-      this);
+      &state);
+
+  members.reserve(state.memberCount);
 
   clang_visitChildren(
       cursor,

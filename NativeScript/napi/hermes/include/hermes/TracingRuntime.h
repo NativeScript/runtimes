@@ -5,11 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#ifndef HERMES_TRACINGRUNTIME_H
-#define HERMES_TRACINGRUNTIME_H
+#pragma once
 
-#include "SynthTrace.h"
-
+#include <hermes/SynthTrace.h>
 #include <hermes/hermes.h>
 #include <jsi/decorator.h>
 #include "llvh/Support/raw_ostream.h"
@@ -18,12 +16,17 @@ namespace facebook {
 namespace hermes {
 namespace tracing {
 
-class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
+class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime>
+#ifdef JSI_UNSTABLE
+    ,
+                       public jsi::ISerialization
+#endif
+{
  public:
   using RD = RuntimeDecorator<jsi::Runtime>;
 
   TracingRuntime(
-      std::unique_ptr<jsi::Runtime> runtime,
+      std::shared_ptr<jsi::Runtime> runtime,
       const ::hermes::vm::RuntimeConfig &conf,
       std::unique_ptr<llvh::raw_ostream> traceStream);
 
@@ -37,6 +40,7 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
   /// @name jsi::Runtime methods.
   /// @{
 
+  jsi::ICast *castInterface(const jsi::UUID &interfaceUUID) override;
   jsi::Value evaluateJavaScript(
       const std::shared_ptr<const jsi::Buffer> &buffer,
       const std::string &sourceURL) override;
@@ -94,10 +98,13 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
       override;
   jsi::Value getProperty(const jsi::Object &obj, const jsi::PropNameID &name)
       override;
+  jsi::Value getProperty(const jsi::Object &obj, const jsi::Value &name)
+      override;
 
   bool hasProperty(const jsi::Object &obj, const jsi::String &name) override;
   bool hasProperty(const jsi::Object &obj, const jsi::PropNameID &name)
       override;
+  bool hasProperty(const jsi::Object &obj, const jsi::Value &name) override;
 
   void setPropertyValue(
       const jsi::Object &obj,
@@ -107,6 +114,15 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
       const jsi::Object &obj,
       const jsi::PropNameID &name,
       const jsi::Value &value) override;
+  void setPropertyValue(
+      const jsi::Object &obj,
+      const jsi::Value &name,
+      const jsi::Value &value) override;
+
+  void deleteProperty(const jsi::Object &obj, const jsi::PropNameID &name)
+      override;
+  void deleteProperty(const jsi::Object &obj, const jsi::String &name) override;
+  void deleteProperty(const jsi::Object &, const jsi::Value &name) override;
 
   void setPrototypeOf(const jsi::Object &object, const jsi::Value &prototype)
       override;
@@ -122,6 +138,22 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
   jsi::ArrayBuffer createArrayBuffer(
       std::shared_ptr<jsi::MutableBuffer> buffer) override;
 
+  jsi::Uint8Array createUint8Array(size_t length) override;
+  jsi::Uint8Array createUint8Array(
+      const jsi::ArrayBuffer &buffer,
+      size_t offset,
+      size_t length) override;
+
+  jsi::ArrayBuffer buffer(const jsi::TypedArray &typedArray) override;
+
+  jsi::Value createError(const jsi::String &msg) override;
+  jsi::Value createEvalError(const jsi::String &msg) override;
+  jsi::Value createRangeError(const jsi::String &msg) override;
+  jsi::Value createReferenceError(const jsi::String &msg) override;
+  jsi::Value createSyntaxError(const jsi::String &msg) override;
+  jsi::Value createTypeError(const jsi::String &msg) override;
+  jsi::Value createURIError(const jsi::String &msg) override;
+
   size_t size(const jsi::Array &arr) override;
   size_t size(const jsi::ArrayBuffer &buf) override;
 
@@ -133,6 +165,9 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
       const jsi::Array &arr,
       size_t i,
       const jsi::Value &value) override;
+
+  size_t push(const jsi::Array &arr, const jsi::Value *elements, size_t count)
+      override;
 
   jsi::Function createFunctionFromHostFunction(
       const jsi::PropNameID &name,
@@ -153,7 +188,20 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
   void setExternalMemoryPressure(const jsi::Object &obj, size_t amount)
       override;
 
+  std::shared_ptr<jsi::MutableBuffer> tryGetMutableBuffer(
+      const jsi::ArrayBuffer &buffer) override;
   /// @}
+
+#ifdef JSI_UNSTABLE
+  std::shared_ptr<jsi::Serialized> serialize(const jsi::Value &value) override;
+  jsi::Value deserialize(
+      const std::shared_ptr<jsi::Serialized> &serialized) override;
+  std::unique_ptr<jsi::Serialized> serializeWithTransfer(
+      const jsi::Value &value,
+      const jsi::Array &transferList) override;
+  jsi::Array deserializeWithTransfer(
+      std::unique_ptr<jsi::Serialized> &serialized) override;
+#endif
 
   void addMarker(const std::string &marker);
 
@@ -195,7 +243,7 @@ class TracingRuntime : public jsi::RuntimeDecorator<jsi::Runtime> {
 
   SynthTrace::TimeSinceStart getTimeSinceStart() const;
 
-  std::unique_ptr<jsi::Runtime> runtime_;
+  std::shared_ptr<jsi::Runtime> runtime_;
   SynthTrace trace_;
   std::deque<jsi::Function> savedFunctions;
   const SynthTrace::TimePoint startTime_{std::chrono::steady_clock::now()};
@@ -232,7 +280,7 @@ class TracingHermesRuntime final : public TracingRuntime {
   /// \p rollbackAction is invoked if the runtime is destructed prior to
   /// completion of tracing. It may or may not invoked if completion failed.
   TracingHermesRuntime(
-      std::unique_ptr<HermesRuntime> runtime,
+      std::shared_ptr<HermesRuntime> runtime,
       const ::hermes::vm::RuntimeConfig &runtimeConfig,
       std::unique_ptr<llvh::raw_ostream> traceStream,
       std::function<std::string()> commitAction,
@@ -280,7 +328,7 @@ class TracingHermesRuntime final : public TracingRuntime {
 /// The return value of \p traceCompletionCallback indicates whether the
 /// invocation completed successfully.
 std::unique_ptr<TracingHermesRuntime> makeTracingHermesRuntime(
-    std::unique_ptr<HermesRuntime> hermesRuntime,
+    std::shared_ptr<HermesRuntime> hermesRuntime,
     const ::hermes::vm::RuntimeConfig &runtimeConfig,
     const std::string &traceScratchPath,
     const std::string &traceResultPath,
@@ -291,7 +339,7 @@ std::unique_ptr<TracingHermesRuntime> makeTracingHermesRuntime(
 /// The \p forReplay parameter indicates whether the runtime is being used
 /// in trace replay.  (Its behavior can differ slightly in that case.)
 std::unique_ptr<TracingHermesRuntime> makeTracingHermesRuntime(
-    std::unique_ptr<HermesRuntime> hermesRuntime,
+    std::shared_ptr<HermesRuntime> hermesRuntime,
     const ::hermes::vm::RuntimeConfig &runtimeConfig,
     std::unique_ptr<llvh::raw_ostream> traceStream,
     bool forReplay = false);
@@ -299,5 +347,3 @@ std::unique_ptr<TracingHermesRuntime> makeTracingHermesRuntime(
 } // namespace tracing
 } // namespace hermes
 } // namespace facebook
-
-#endif // HERMES_TRACINGRUNTIME_H

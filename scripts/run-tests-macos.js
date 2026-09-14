@@ -8,7 +8,10 @@
 //  - MACOS_TEST_ENGINE selects the runtime engine build to use when runtime
 //    artifacts need rebuilding. Supported: v8, hermes, quickjs, jsc. Defaults to v8.
 //  - MACOS_TEST_FFI_BACKEND selects the FFI backend build to use when runtime
-//    artifacts need rebuilding. Supported: auto, napi, direct. Defaults to auto.
+//    artifacts need rebuilding. Supported: auto, napi, v8, hermes, quickjs, jsc.
+//    Defaults to auto.
+//  - MACOS_TEST_GSD_BACKEND selects generated signature dispatch backend.
+//    Supported: auto, v8, jsc, quickjs, hermes, napi, none. Defaults to auto.
 //  - MACOS_COMMAND_TIMEOUT_MS overrides timeout for build commands (default: 10 minutes).
 //  - MACOS_COMMAND_MAX_BUFFER_BYTES overrides spawnSync maxBuffer for captured command output (default: 64 MiB).
 //  - MACOS_TEST_TIMEOUT_MS overrides max test runtime after launch (default: 2 minutes).
@@ -24,11 +27,11 @@ const cp = require("child_process");
 const crypto = require("crypto");
 const os = require("os");
 
-const projectPath = path.join(__dirname, "../NativeScriptRuntime.xcodeproj");
+const projectPath = path.join(__dirname, "../platforms/apple/NativeScriptRuntime.xcodeproj");
 const scheme = "TestRunner";
 const configuration = "Debug";
 const derivedDataPath = path.join(__dirname, "../build", "derived-data", "macos-tests");
-const testRunnerAppSourcePath = path.join(__dirname, "../test/runtime/runner", "app");
+const testRunnerAppSourcePath = path.join(__dirname, "../platforms/apple/test/runtime/runner", "app");
 const nativeScriptXCFramework = path.join(__dirname, "../dist", "NativeScript.xcframework");
 const tkLiveSyncXCFramework = path.join(__dirname, "../dist", "TKLiveSync.xcframework");
 const nativeScriptSourceRoot = path.join(__dirname, "../NativeScript");
@@ -47,19 +50,33 @@ const metadataGeneratorBuildStepScript = path.join(
     "bin",
     "build-step-metadata-generator.py"
 );
-const buildStatePath = path.join(derivedDataPath, ".macos-test-build-state.json");
-const macosBuildInputs = [
-    path.join(__dirname, "../NativeScriptRuntime.xcodeproj", "project.pbxproj"),
-    path.join(__dirname, "../test/runtime/runner", "Source Files"),
-    path.join(__dirname, "../test/runtime/runner", "Info.plist"),
-    path.join(__dirname, "../test/runtime/fixtures"),
-    path.join(__dirname, "../TKLiveSync"),
+const metadataGeneratorSymbolAnalyzer = path.join(
+    metadataGeneratorRoot,
+    "dist",
+    "arm64",
+    "bin",
+    "ns-metadata-symbols"
+);
+const metadataGeneratorSourceInputs = [
     path.join(metadataGeneratorRoot, "src"),
     path.join(metadataGeneratorRoot, "include"),
+    path.join(metadataGeneratorRoot, "tests"),
+    path.join(metadataGeneratorRoot, "symbol-analyzer", "Cargo.toml"),
+    path.join(metadataGeneratorRoot, "symbol-analyzer", "Cargo.lock"),
+    path.join(metadataGeneratorRoot, "symbol-analyzer", "src"),
+    path.join(metadataGeneratorRoot, "symbol-analyzer", "tests"),
+    path.join(metadataGeneratorRoot, "build-step-metadata-generator.py"),
     path.join(metadataGeneratorRoot, "CMakeLists.txt"),
-    path.join(__dirname, "build_metadata_generator.sh"),
-    metadataGeneratorBinary,
-    metadataGeneratorBuildStepScript,
+    path.join(__dirname, "build_metadata_generator.sh")
+];
+const buildStatePath = path.join(derivedDataPath, ".macos-test-build-state.json");
+const macosBuildInputs = [
+    path.join(__dirname, "../platforms/apple/NativeScriptRuntime.xcodeproj", "project.pbxproj"),
+    path.join(__dirname, "../platforms/apple/test/runtime/runner", "Source Files"),
+    path.join(__dirname, "../platforms/apple/test/runtime/runner", "Info.plist"),
+    path.join(__dirname, "../platforms/apple/test/runtime/fixtures"),
+    path.join(__dirname, "../platforms/apple/TKLiveSync"),
+    ...metadataGeneratorSourceInputs,
     nativeScriptXCFramework,
     tkLiveSyncXCFramework
 ];
@@ -95,6 +112,7 @@ const requestedSpecs = (process.env.MACOS_TEST_SPECS || "").trim();
 const verboseSpecs = process.env.MACOS_TEST_VERBOSE_SPECS === "1";
 const requestedEngine = (process.env.MACOS_TEST_ENGINE || "v8").trim().toLowerCase();
 const requestedFfiBackend = (process.env.MACOS_TEST_FFI_BACKEND || "auto").trim().toLowerCase();
+const requestedGsdBackend = (process.env.MACOS_TEST_GSD_BACKEND || process.env.NS_GSD_BACKEND || "auto").trim().toLowerCase();
 
 const launchedMarker = "Application Start!";
 const junitPrefix = "TKUnit: ";
@@ -102,8 +120,10 @@ const junitEndTag = "</testsuites>";
 const consoleLogMarker = "CONSOLE LOG:";
 const crashReportsDir = path.join(os.homedir(), "Library", "Logs", "DiagnosticReports");
 const generatedRuntimeBuildOutputs = new Set([
-    path.join(nativeScriptSourceRoot, "ffi", "napi", "GeneratedSignatureDispatch.inc"),
-    path.join(nativeScriptSourceRoot, "ffi", "napi", "GeneratedSignatureDispatch.inc.stamp")
+    path.join(nativeScriptSourceRoot, "ffi", "objc", "shared", "GeneratedSignatureDispatch.inc"),
+    path.join(nativeScriptSourceRoot, "ffi", "objc", "shared", "GeneratedSignatureDispatch.inc.stamp"),
+    path.join(nativeScriptSourceRoot, "ffi", "objc", "shared", "GeneratedGsdSignatureDispatch.inc"),
+    path.join(nativeScriptSourceRoot, "ffi", "objc", "shared", "GeneratedGsdSignatureDispatch.inc.stamp")
 ]);
 
 function parseArgs() {
@@ -459,36 +479,34 @@ function runBuildAndRequireSuccess(command, args, timeoutMs = commandTimeoutMs) 
 }
 
 function ensureMetadataGeneratorBuilt() {
-    const sourceInputs = [
-        path.join(metadataGeneratorRoot, "src"),
-        path.join(metadataGeneratorRoot, "include"),
-        path.join(metadataGeneratorRoot, "CMakeLists.txt")
-    ];
-
-    const sourceMtime = sourceInputs.reduce(
+    const sourceMtime = metadataGeneratorSourceInputs.reduce(
         (latest, inputPath) => Math.max(latest, getPathStats(inputPath).maxMtimeMs),
         0
     );
-    const binaryMtime = getPathStats(metadataGeneratorBinary).maxMtimeMs;
+    const artifactMtime = Math.min(
+        getPathStats(metadataGeneratorBinary).maxMtimeMs,
+        getPathStats(metadataGeneratorSymbolAnalyzer).maxMtimeMs,
+        getPathStats(metadataGeneratorBuildStepScript).maxMtimeMs
+    );
 
-    if (binaryMtime > 0 && binaryMtime >= sourceMtime) {
+    if (artifactMtime > 0 && artifactMtime >= sourceMtime) {
         return;
     }
 
     console.log("Metadata generator is missing or stale; running build-metagen...");
-    runBuildAndRequireSuccess("npm", ["run", "build-metagen"], commandTimeoutMs);
+    const hostArch = os.arch() === "x64" ? "x86_64" : os.arch();
+    runBuildAndRequireSuccess(
+        "env",
+        [`METADATA_GENERATOR_ARCHS=${hostArch}`, "npm", "run", "build-metagen"],
+        commandTimeoutMs
+    );
 }
 
 function ensureMacOSRuntimeArtifactsBuilt() {
     const cachePath = path.join(__dirname, "../dist", "intermediates", "macos", "CMakeCache.txt");
     const sourceInputs = [
         nativeScriptSourceRoot,
-        path.join(metadataGeneratorRoot, "src"),
-        path.join(metadataGeneratorRoot, "include"),
-        path.join(metadataGeneratorRoot, "CMakeLists.txt"),
-        metadataGeneratorBinary,
-        metadataGeneratorBuildStepScript,
-        path.join(__dirname, "build_metadata_generator.sh"),
+        ...metadataGeneratorSourceInputs,
         path.join(__dirname, "build_nativescript.sh")
     ];
 
@@ -499,6 +517,7 @@ function ensureMacOSRuntimeArtifactsBuilt() {
     const artifactMtime = getPathStats(nativeScriptXCFramework).maxMtimeMs;
     let configuredEngine = null;
     let configuredFfiBackend = null;
+    let configuredGsdBackend = null;
 
     if (fs.existsSync(cachePath)) {
         try {
@@ -511,6 +530,10 @@ function ensureMacOSRuntimeArtifactsBuilt() {
             if (ffiBackendMatch) {
                 configuredFfiBackend = ffiBackendMatch[1].trim().toLowerCase();
             }
+            const gsdBackendMatch = cache.match(/^NS_GSD_BACKEND:STRING=(.+)$/m);
+            if (gsdBackendMatch) {
+                configuredGsdBackend = gsdBackendMatch[1].trim().toLowerCase();
+            }
         } catch (_) {
             configuredEngine = null;
             configuredFfiBackend = null;
@@ -520,7 +543,8 @@ function ensureMacOSRuntimeArtifactsBuilt() {
     if (artifactMtime > 0 &&
         artifactMtime >= sourceMtime &&
         configuredEngine === requestedEngine &&
-        configuredFfiBackend === requestedFfiBackend) {
+        configuredFfiBackend === requestedFfiBackend &&
+        configuredGsdBackend === requestedGsdBackend) {
         return;
     }
 
@@ -529,15 +553,20 @@ function ensureMacOSRuntimeArtifactsBuilt() {
         throw new Error(`Unsupported MACOS_TEST_ENGINE: ${requestedEngine}`);
     }
 
-    const supportedFfiBackends = new Set(["auto", "napi", "direct"]);
+    const supportedFfiBackends = new Set(["auto", "napi", "v8", "hermes", "quickjs", "jsc"]);
     if (!supportedFfiBackends.has(requestedFfiBackend)) {
         throw new Error(`Unsupported MACOS_TEST_FFI_BACKEND: ${requestedFfiBackend}`);
     }
 
-    console.log(`NativeScript macOS artifacts are missing, stale, or built for '${configuredEngine ?? "unknown"}/${configuredFfiBackend ?? "unknown"}'; running ${requestedEngine}/${requestedFfiBackend} build...`);
+    const supportedGsdBackends = new Set(["auto", "v8", "jsc", "quickjs", "hermes", "napi", "none"]);
+    if (!supportedGsdBackends.has(requestedGsdBackend)) {
+        throw new Error(`Unsupported MACOS_TEST_GSD_BACKEND: ${requestedGsdBackend}`);
+    }
+
+    console.log(`NativeScript macOS artifacts are missing, stale, or built for '${configuredEngine ?? "unknown"}/${configuredFfiBackend ?? "unknown"}/${configuredGsdBackend ?? "unknown"}'; running ${requestedEngine}/${requestedFfiBackend}/${requestedGsdBackend} build...`);
     runBuildAndRequireSuccess(
         path.join(__dirname, "build_nativescript.sh"),
-        ["--macos", "--no-iphone", "--no-simulator", `--${requestedEngine}`, `--ffi-backend=${requestedFfiBackend}`],
+        ["--macos", "--no-iphone", "--no-simulator", `--${requestedEngine}`, `--ffi-backend=${requestedFfiBackend}`, `--gsd-backend=${requestedGsdBackend}`],
         commandTimeoutMs
     );
 }
@@ -560,7 +589,7 @@ function buildTestRunnerApp() {
     ensureMetadataGeneratorBuilt();
     ensureMacOSRuntimeArtifactsBuilt();
 
-    const nativeFingerprint = `${requestedEngine}:${requestedFfiBackend}:${createBuildFingerprint(macosBuildInputs)}`;
+    const nativeFingerprint = `${requestedEngine}:${requestedFfiBackend}:${requestedGsdBackend}:${createBuildFingerprint(macosBuildInputs)}`;
     const existingBuildState = readBuildState();
     const canReuseBuild = process.env.MACOS_TEST_CLEAN_BUILD !== "1" &&
         fs.existsSync(appPath) &&

@@ -17,8 +17,7 @@ TARGET_ENGINE=${TARGET_ENGINE:=v8} # default to v8 for compat
 NS_FFI_BACKEND=${NS_FFI_BACKEND:=auto}
 NS_GSD_BACKEND=${NS_GSD_BACKEND:=auto}
 METADATA_SIZE=${METADATA_SIZE:=0}
-GENERATED_SIGNATURE_DISPATCH=${NS_SIGNATURE_BINDINGS_CPP_PATH:-${TNS_SIGNATURE_BINDINGS_CPP_PATH:-./NativeScript/ffi/napi/GeneratedSignatureDispatch.inc}}
-GENERATED_SIGNATURE_DISPATCH_STAMP="${GENERATED_SIGNATURE_DISPATCH}.stamp"
+REQUESTED_SIGNATURE_DISPATCH=${NS_SIGNATURE_BINDINGS_CPP_PATH:-${TNS_SIGNATURE_BINDINGS_CPP_PATH:-}}
 
 for arg in $@; do
   case $arg in
@@ -43,7 +42,6 @@ for arg in $@; do
     --embed-metadata) EMBED_METADATA=true ;;
     --hermes) TARGET_ENGINE=hermes ;;
     --no-engine|--generic-napi) TARGET_ENGINE=none ;;
-    --ffi-direct) NS_FFI_BACKEND=direct ;;
     --ffi-napi) NS_FFI_BACKEND=napi ;;
     --ffi-backend=*) NS_FFI_BACKEND="${arg#--ffi-backend=}" ;;
     --gsd-v8) NS_GSD_BACKEND=v8 ;;
@@ -94,8 +92,17 @@ function assemble_node_api_xcframework () {
 function effective_gsd_backend () {
   local is_macos_napi="${1:-false}"
 
-  if [ "$(effective_ffi_backend "$is_macos_napi")" == "direct" ]; then
-    echo none
+  local ffi_backend
+  ffi_backend=$(effective_ffi_backend "$is_macos_napi")
+  if [ "$ffi_backend" != "napi" ]; then
+    case "$NS_GSD_BACKEND" in
+      auto)
+        echo "$ffi_backend"
+        ;;
+      *)
+        echo "$NS_GSD_BACKEND"
+        ;;
+    esac
     return
   fi
 
@@ -124,10 +131,17 @@ function effective_ffi_backend () {
   case "$NS_FFI_BACKEND" in
     auto)
       if [[ "$TARGET_ENGINE" == "hermes" || "$TARGET_ENGINE" == "v8" || "$TARGET_ENGINE" == "jsc" || "$TARGET_ENGINE" == "quickjs" ]]; then
-        echo direct
+        echo "$TARGET_ENGINE"
       else
         echo napi
       fi
+      ;;
+    v8|jsc|quickjs|hermes)
+      if [ "$NS_FFI_BACKEND" != "$TARGET_ENGINE" ]; then
+        echo "NS_FFI_BACKEND=$NS_FFI_BACKEND requires TARGET_ENGINE=$NS_FFI_BACKEND" >&2
+        exit 1
+      fi
+      echo "$NS_FFI_BACKEND"
       ;;
     *)
       echo "$NS_FFI_BACKEND"
@@ -135,18 +149,42 @@ function effective_ffi_backend () {
   esac
 }
 
+function signature_dispatch_path () {
+  if [ -n "$REQUESTED_SIGNATURE_DISPATCH" ]; then
+    echo "$REQUESTED_SIGNATURE_DISPATCH"
+    return
+  fi
+  echo "./NativeScript/ffi/objc/shared/GeneratedSignatureDispatch.inc"
+}
+
+function metadata_generator_source_hash () {
+  find ./metadata-generator/src ./metadata-generator/include ./metadata-generator/tests \
+    ./metadata-generator/symbol-analyzer ./metadata-generator/CMakeLists.txt \
+    ./metadata-generator/build-step-metadata-generator.py \
+    \( -name target -type d -prune \) -o -type f -print | \
+    LC_ALL=C sort | xargs shasum | awk '{print $1}' | shasum | awk '{print $1}'
+}
+
 function signature_dispatch_stamp () {
   local platform="$1"
-  local is_macos_napi="${2:-false}"
-  local backend
-  backend=$(effective_gsd_backend "$is_macos_napi")
-  local ffi_backend
-  ffi_backend=$(effective_ffi_backend "$is_macos_napi")
   local generator_hash
-  generator_hash=$(find ./metadata-generator/src ./metadata-generator/include ./metadata-generator/CMakeLists.txt \
-    -type f -print | LC_ALL=C sort | xargs shasum | shasum | awk '{print $1}')
-  printf "platform=%s\nbackend=%s\nffi_backend=%s\ntarget_engine=%s\nmetadata_size=%s\ngenerator_hash=%s\n" \
-    "$platform" "$backend" "$ffi_backend" "$TARGET_ENGINE" "$METADATA_SIZE" "$generator_hash"
+  generator_hash=$(metadata_generator_source_hash)
+  printf "platform=%s\nmetadata_size=%s\ngenerator_hash=%s\n" \
+    "$platform" "$METADATA_SIZE" "$generator_hash"
+}
+
+function ensure_metadata_generator () {
+  local expected_hash
+  expected_hash=$(metadata_generator_source_hash)
+  local hash_file="./metadata-generator/dist/.source_hash"
+  local host_arch
+  host_arch=$(uname -m)
+  if [ ! -x "./metadata-generator/dist/$host_arch/bin/objc-metadata-generator" ] || \
+     [ ! -x "./metadata-generator/dist/$host_arch/bin/ns-metadata-symbols" ] || \
+     [ ! -f "$hash_file" ] || \
+     [ "$(cat "$hash_file")" != "$expected_hash" ]; then
+    METADATA_GENERATOR_ARCHS="$host_arch" "$SCRIPT_DIR/build_metadata_generator.sh"
+  fi
 }
 
 function ensure_signature_dispatch_bindings () {
@@ -164,20 +202,21 @@ function ensure_signature_dispatch_bindings () {
 
   local expected_stamp
   expected_stamp=$(signature_dispatch_stamp "$platform" "$is_macos_napi")
-  if [ -f "$GENERATED_SIGNATURE_DISPATCH" ] && \
-     [ -f "$GENERATED_SIGNATURE_DISPATCH_STAMP" ] && \
-     [ "$(cat "$GENERATED_SIGNATURE_DISPATCH_STAMP")" == "$expected_stamp" ]; then
+  local generated_signature_dispatch
+  generated_signature_dispatch=$(signature_dispatch_path "$is_macos_napi")
+  local generated_signature_dispatch_stamp="${generated_signature_dispatch}.stamp"
+  if [ -f "$generated_signature_dispatch" ] && \
+     [ -f "$generated_signature_dispatch_stamp" ] && \
+     [ "$(cat "$generated_signature_dispatch_stamp")" == "$expected_stamp" ]; then
     return
   fi
 
-  if [ ! -x "./metadata-generator/dist/arm64/bin/objc-metadata-generator" ]; then
-    "$SCRIPT_DIR/build_metadata_generator.sh"
-  fi
+  ensure_metadata_generator
 
   checkpoint "Generating signature dispatch bindings for $platform ($backend)..."
-  NS_SIGNATURE_BINDINGS_CPP_PATH="$GENERATED_SIGNATURE_DISPATCH" npm run metagen "$platform"
-  mkdir -p "$(dirname "$GENERATED_SIGNATURE_DISPATCH_STAMP")"
-  printf "%s" "$expected_stamp" > "$GENERATED_SIGNATURE_DISPATCH_STAMP"
+  NS_SIGNATURE_BINDINGS_CPP_PATH="$generated_signature_dispatch" npm run metagen "$platform"
+  mkdir -p "$(dirname "$generated_signature_dispatch_stamp")"
+  printf "%s" "$expected_stamp" > "$generated_signature_dispatch_stamp"
 }
 
 DEV_TEAM=${DEVELOPMENT_TEAM:-}

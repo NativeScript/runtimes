@@ -19,7 +19,7 @@
     "types"
   ],
   "scripts": {
-    "test": "node ../../examples/foundation.js",
+    "test": "node ../../platforms/apple/examples/foundation.js",
     "build": "cd ../.. && ./scripts/build_all_react_native.sh"
   },
   "keywords": [

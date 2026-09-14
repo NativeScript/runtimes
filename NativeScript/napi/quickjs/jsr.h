@@ -22,7 +22,7 @@ public:
         js_mutex.unlock();
     }
 
-    static tns::SimpleMap<napi_env, JSR *> env_to_jsr_cache;
+    static tns::ConcurrentMap<napi_env, JSR *> env_to_jsr_cache;
 };
 
 class NapiScope {

@@ -5,14 +5,15 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#ifndef HERMES_SYNTHTRACE_H
-#define HERMES_SYNTHTRACE_H
+#pragma once
 
+#include "hermes/ADT/StringSetVector.h"
 #include "hermes/Public/RuntimeConfig.h"
 #include "hermes/Support/JSONEmitter.h"
 #include "hermes/Support/SHA1.h"
-#include "hermes/Support/StringSetVector.h"
 #include "hermes/VM/GCExecTrace.h"
+
+#include "jsi/jsi.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -174,49 +175,68 @@ class SynthTrace {
   /// Represents the encoding type of a String or PropNameId
   enum class StringEncodingType { ASCII, UTF8, UTF16 };
 
+  /// Represents the type of JavaScript Error being created.
+  enum class JSErrorType {
+    Error,
+    EvalError,
+    RangeError,
+    ReferenceError,
+    SyntaxError,
+    TypeError,
+    URIError,
+  };
+
   /// A TimePoint is a time when some event occurred.
   using TimePoint = std::chrono::steady_clock::time_point;
   using TimeSinceStart = std::chrono::milliseconds;
 
-#define SYNTH_TRACE_RECORD_TYPES(RECORD) \
-  RECORD(BeginExecJS)                    \
-  RECORD(EndExecJS)                      \
-  RECORD(Marker)                         \
-  RECORD(CreateObject)                   \
-  RECORD(CreateObjectWithPrototype)      \
-  RECORD(CreateString)                   \
-  RECORD(CreatePropNameID)               \
-  RECORD(CreatePropNameIDWithValue)      \
-  RECORD(CreateHostObject)               \
-  RECORD(CreateHostFunction)             \
-  RECORD(QueueMicrotask)                 \
-  RECORD(DrainMicrotasks)                \
-  RECORD(GetProperty)                    \
-  RECORD(SetProperty)                    \
-  RECORD(HasProperty)                    \
-  RECORD(GetPropertyNames)               \
-  RECORD(CreateArray)                    \
-  RECORD(ArrayRead)                      \
-  RECORD(ArrayWrite)                     \
-  RECORD(CallFromNative)                 \
-  RECORD(ConstructFromNative)            \
-  RECORD(ReturnFromNative)               \
-  RECORD(ReturnToNative)                 \
-  RECORD(CallToNative)                   \
-  RECORD(GetPropertyNative)              \
-  RECORD(GetPropertyNativeReturn)        \
-  RECORD(SetPropertyNative)              \
-  RECORD(SetPropertyNativeReturn)        \
-  RECORD(GetNativePropertyNames)         \
-  RECORD(GetNativePropertyNamesReturn)   \
-  RECORD(CreateBigInt)                   \
-  RECORD(BigIntToString)                 \
-  RECORD(SetExternalMemoryPressure)      \
-  RECORD(Utf8)                           \
-  RECORD(Utf16)                          \
-  RECORD(GetStringData)                  \
-  RECORD(GetPrototype)                   \
-  RECORD(SetPrototype)                   \
+#define SYNTH_TRACE_RECORD_TYPES(RECORD)  \
+  RECORD(BeginExecJS)                     \
+  RECORD(EndExecJS)                       \
+  RECORD(Marker)                          \
+  RECORD(CreateObject)                    \
+  RECORD(CreateObjectWithPrototype)       \
+  RECORD(CreateString)                    \
+  RECORD(CreatePropNameID)                \
+  RECORD(CreatePropNameIDWithValue)       \
+  RECORD(CreateHostObject)                \
+  RECORD(CreateHostFunction)              \
+  RECORD(QueueMicrotask)                  \
+  RECORD(DrainMicrotasks)                 \
+  RECORD(GetProperty)                     \
+  RECORD(SetProperty)                     \
+  RECORD(HasProperty)                     \
+  RECORD(GetPropertyNames)                \
+  RECORD(CreateArray)                     \
+  RECORD(ArrayRead)                       \
+  RECORD(ArrayWrite)                      \
+  RECORD(ArrayPush)                       \
+  RECORD(CallFromNative)                  \
+  RECORD(ConstructFromNative)             \
+  RECORD(ReturnFromNative)                \
+  RECORD(ReturnToNative)                  \
+  RECORD(CallToNative)                    \
+  RECORD(GetPropertyNative)               \
+  RECORD(GetPropertyNativeReturn)         \
+  RECORD(SetPropertyNative)               \
+  RECORD(SetPropertyNativeReturn)         \
+  RECORD(GetNativePropertyNames)          \
+  RECORD(GetNativePropertyNamesReturn)    \
+  RECORD(CreateBigInt)                    \
+  RECORD(BigIntToString)                  \
+  RECORD(SetExternalMemoryPressure)       \
+  RECORD(Utf8)                            \
+  RECORD(Utf16)                           \
+  RECORD(GetStringData)                   \
+  RECORD(GetPrototype)                    \
+  RECORD(SetPrototype)                    \
+  RECORD(DeleteProperty)                  \
+  RECORD(Serialize)                       \
+  RECORD(Deserialize)                     \
+  RECORD(CreateUInt8Array)                \
+  RECORD(CreateUInt8ArrayFromArrayBuffer) \
+  RECORD(GetBufferFromTypedArray)         \
+  RECORD(CreateJSError)                   \
   RECORD(Global)
 
   /// RecordType is a tag used to differentiate which type of record it is.
@@ -288,8 +308,12 @@ class SynthTrace {
 
   template <typename T, typename... Args>
   void emplace_back(Args &&...args) {
-    records_.emplace_back(new T(std::forward<Args>(args)...));
-    flushRecordsIfNecessary();
+    if (json_) {
+      T record(std::forward<Args>(args)...);
+      record.toJSON(*json_);
+    } else {
+      records_.emplace_back(new T(std::forward<Args>(args)...));
+    }
   }
 
   const std::vector<std::unique_ptr<Record>> &records() const {
@@ -324,6 +348,14 @@ class SynthTrace {
   /// Decodes a string into a trace value.
   static TraceValue decode(const std::string &);
 
+#ifdef HERMESVM_API_TRACE_DEBUG
+  /// Given a Value, return a descriptive string. This should only be used to
+  /// provide more debugging info when creating records.
+  static std::string getDescriptiveString(
+      jsi::Runtime &runtime,
+      const jsi::Value &value);
+#endif
+
   /// The version of the Synth Benchmark
   constexpr static uint32_t synthVersion() {
     return 5;
@@ -337,27 +369,14 @@ class SynthTrace {
     return (*traceStream_);
   }
 
-  /// If we're tracing to a file, and the number of accumulated
-  /// records has reached the limit kTraceRecordsToFlush, below,
-  /// flush the records to the file, and reset the accumulated records
-  /// to be empty.
-  void flushRecordsIfNecessary();
-
-  /// Assumes we're tracing to a file; flush accumulated records to
-  /// the file, and reset the accumulated records to be empty.
-  void flushRecords();
-
-  static constexpr unsigned kTraceRecordsToFlush = 100;
-
   /// If we're tracing to a file, pointer to a stream onto
   /// traceFilename_.  Null otherwise.
   std::unique_ptr<llvh::raw_ostream> traceStream_;
   /// If we're tracing to a file, pointer to a JSONEmitter writting
   /// into *traceStream_.  Null otherwise.
   std::unique_ptr<::hermes::JSONEmitter> json_;
-  /// The records currently being accumulated in the trace.  If we are
-  /// tracing to a file, these will be only the records not yet
-  /// written to the file.
+  /// The records accumulated in the trace.  Only used when not tracing
+  /// to a file (i.e., when json_ is null).
   std::vector<std::unique_ptr<Record>> records_;
   /// The id of the global object.
   /// Note: Keeping this as optional to support replaying the older trace
@@ -819,7 +838,7 @@ class SynthTrace {
   struct GetPropertyRecord : public Record {
     /// The ObjectID of the object that was accessed for its property.
     const ObjectID objID_;
-    /// String or PropNameID passed to getProperty.
+    /// String or PropNameID or Value passed to getProperty.
     const TraceValue propID_;
 #ifdef HERMESVM_API_TRACE_DEBUG
     std::string propNameDbg_;
@@ -863,7 +882,7 @@ class SynthTrace {
   struct SetPropertyRecord : public Record {
     /// The ObjectID of the object that was accessed for its property.
     const ObjectID objID_;
-    /// String or PropNameID passed to setProperty.
+    /// String or PropNameID or Value passed to setProperty.
     const TraceValue propID_;
 #ifdef HERMESVM_API_TRACE_DEBUG
     std::string propNameDbg_;
@@ -984,6 +1003,29 @@ class SynthTrace {
     }
   };
 
+  struct DeletePropertyRecord final : public Record {
+    static constexpr RecordType type{RecordType::DeleteProperty};
+    /// The object ID of the object that was accessed for its property
+    const ObjectID objID_;
+    /// The name of the property being deleted
+    const TraceValue propID_;
+
+    DeletePropertyRecord(TimeSinceStart time, ObjectID objID, TraceValue propID)
+        : Record(time), objID_(objID), propID_(propID) {}
+
+    RecordType getType() const override {
+      return type;
+    }
+
+    std::vector<ObjectID> uses() const override {
+      std::vector<ObjectID> uses{objID_};
+      pushIfTrackedValue(propID_, uses);
+      return uses;
+    }
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+  };
+
   /// A GetPrototypeRecord is an event where native code gets the prototype of a
   /// JS Object
   struct GetPrototypeRecord : public Record {
@@ -1024,6 +1066,128 @@ class SynthTrace {
     }
     std::vector<ObjectID> defs() const override {
       return {objID_};
+    }
+  };
+
+  /// A CreateUInt8ArrayRecord is an event where a new UInt8Array is created
+  /// with a specific length.
+  struct CreateUInt8ArrayRecord final : public Record {
+    static constexpr RecordType type{RecordType::CreateUInt8Array};
+    /// The ObjectID of the UInt8Array that was created by createUint8Array().
+    const ObjectID objID_;
+    /// The length of the UInt8Array that was passed to createUint8Array().
+    const size_t length_;
+
+    explicit CreateUInt8ArrayRecord(
+        TimeSinceStart time,
+        ObjectID objID,
+        size_t length)
+        : Record(time), objID_(objID), length_(length) {}
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+    RecordType getType() const override {
+      return type;
+    }
+    std::vector<ObjectID> defs() const override {
+      return {objID_};
+    }
+  };
+
+  /// A CreateUInt8ArrayFromArrayBufferRecord is an event where a new UInt8Array
+  /// is created from an existing ArrayBuffer with offset and length.
+  struct CreateUInt8ArrayFromArrayBufferRecord final : public Record {
+    static constexpr RecordType type{
+        RecordType::CreateUInt8ArrayFromArrayBuffer};
+    /// The ObjectID of the UInt8Array that was created by createUint8Array().
+    const ObjectID objID_;
+    /// The ObjectID of the ArrayBuffer used to create the UInt8Array.
+    const ObjectID bufferID_;
+    /// The byte offset into the ArrayBuffer.
+    const size_t offset_;
+    /// The length of the UInt8Array view.
+    const size_t length_;
+
+    explicit CreateUInt8ArrayFromArrayBufferRecord(
+        TimeSinceStart time,
+        ObjectID objID,
+        ObjectID bufferID,
+        size_t offset,
+        size_t length)
+        : Record(time),
+          objID_(objID),
+          bufferID_(bufferID),
+          offset_(offset),
+          length_(length) {}
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+    RecordType getType() const override {
+      return type;
+    }
+    std::vector<ObjectID> defs() const override {
+      return {objID_};
+    }
+    std::vector<ObjectID> uses() const override {
+      return {bufferID_};
+    }
+  };
+
+  /// A GetBufferFromTypedArrayRecord is an event where the underlying
+  /// ArrayBuffer of a TypedArray is retrieved.
+  struct GetBufferFromTypedArrayRecord final : public Record {
+    static constexpr RecordType type{RecordType::GetBufferFromTypedArray};
+    /// The ObjectID of the ArrayBuffer returned by buffer().
+    const ObjectID bufferID_;
+    /// The ObjectID of the TypedArray whose buffer was queried.
+    const ObjectID typedArrayID_;
+
+    explicit GetBufferFromTypedArrayRecord(
+        TimeSinceStart time,
+        ObjectID bufferID,
+        ObjectID typedArrayID)
+        : Record(time), bufferID_(bufferID), typedArrayID_(typedArrayID) {}
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+    RecordType getType() const override {
+      return type;
+    }
+    std::vector<ObjectID> defs() const override {
+      return {bufferID_};
+    }
+    std::vector<ObjectID> uses() const override {
+      return {typedArrayID_};
+    }
+  };
+
+  /// A CreateJSErrorRecord is an event where a JavaScript Error object is
+  /// created with a specific type and message.
+  struct CreateJSErrorRecord final : public Record {
+    static constexpr RecordType type{RecordType::CreateJSError};
+    /// The ObjectID of the error Value that was created.
+    const ObjectID objID_;
+    /// The type of error being created.
+    const JSErrorType errorType_;
+    /// The ObjectID of the message String passed to create the error.
+    const ObjectID messageID_;
+
+    explicit CreateJSErrorRecord(
+        TimeSinceStart time,
+        ObjectID objID,
+        JSErrorType errorType,
+        ObjectID messageID)
+        : Record(time),
+          objID_(objID),
+          errorType_(errorType),
+          messageID_(messageID) {}
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+    RecordType getType() const override {
+      return type;
+    }
+    std::vector<ObjectID> defs() const override {
+      return {objID_};
+    }
+    std::vector<ObjectID> uses() const override {
+      return {messageID_};
     }
   };
 
@@ -1076,6 +1240,37 @@ class SynthTrace {
       pushIfTrackedValue(value_, uses);
       return uses;
     }
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+  };
+
+  struct ArrayPushRecord final : public Record {
+    static constexpr RecordType type{RecordType::ArrayPush};
+    /// The ObjectID of the array
+    const ObjectID objID_;
+    /// The elements being pushed to the array
+    const std::vector<TraceValue> elements_;
+    /// The returned length from calling Array.push
+    size_t length_;
+
+    explicit ArrayPushRecord(
+        TimeSinceStart time,
+        ObjectID objID,
+        const std::vector<TraceValue> &elements,
+        size_t length)
+        : Record(time), objID_(objID), elements_(elements), length_(length) {}
+
+    RecordType getType() const override {
+      return type;
+    }
+
+    std::vector<ObjectID> uses() const override {
+      std::vector<ObjectID> uses{objID_};
+      for (const auto &val : elements_) {
+        pushIfTrackedValue(val, uses);
+      }
+      return uses;
+    }
+
     void toJSONInternal(::hermes::JSONEmitter &json) const override;
   };
 
@@ -1462,6 +1657,55 @@ class SynthTrace {
     void toJSONInternal(::hermes::JSONEmitter &json) const override;
   };
 
+  struct SerializeRecord final : public Record {
+    static constexpr RecordType type{RecordType::Serialize};
+    /// The jsi::Value being serialized
+    const TraceValue value_;
+
+    explicit SerializeRecord(TimeSinceStart time, TraceValue value)
+        : Record(time), value_(value) {}
+
+    RecordType getType() const override {
+      return type;
+    }
+
+    std::vector<ObjectID> uses() const override {
+      std::vector<ObjectID> uses;
+      pushIfTrackedValue(value_, uses);
+      return uses;
+    }
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+  };
+
+  struct DeserializeRecord final : public Record {
+    static constexpr RecordType type{RecordType::Deserialize};
+    /// This mirrors the structure of vm::SerializedValue
+    std::vector<uint32_t> offsets_;
+    std::vector<uint8_t> content_;
+    std::vector<uint8_t> strings_;
+
+    explicit DeserializeRecord(
+        TimeSinceStart time,
+        const std::vector<uint32_t> &offsets,
+        const std::vector<uint8_t> &content,
+        const std::vector<uint8_t> &strings)
+        : Record(time),
+          offsets_(offsets),
+          content_(content),
+          strings_(strings) {}
+
+    RecordType getType() const override {
+      return type;
+    }
+
+    std::vector<ObjectID> uses() const override {
+      return {};
+    }
+
+    void toJSONInternal(::hermes::JSONEmitter &json) const override;
+  };
+
   struct GlobalRecord final : public Record {
     static constexpr RecordType type{RecordType::Global};
     const ObjectID objID_; // global's ObjectID returned from Runtime::global().
@@ -1489,5 +1733,3 @@ class SynthTrace {
 } // namespace tracing
 } // namespace hermes
 } // namespace facebook
-
-#endif // HERMES_SYNTHTRACE_H

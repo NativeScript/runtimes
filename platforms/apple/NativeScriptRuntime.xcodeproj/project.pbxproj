@@ -1,0 +1,1219 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		221E26BE2EDCF1D90095699D /* libTestFixtures.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 221E266E2EDCF1B40095699D /* libTestFixtures.a */; };
+		228CA3712EB9365C00A4EC63 /* NativeScript.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 228CA3702EB9365C00A4EC63 /* NativeScript.xcframework */; };
+		228CA3722EB9365C00A4EC63 /* NativeScript.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 228CA3702EB9365C00A4EC63 /* NativeScript.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		228CA3752EB9377E00A4EC63 /* TKLiveSync.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 221E26C62EDCF22B0095699D /* TKLiveSync.framework */; };
+		228CA3762EB9377E00A4EC63 /* TKLiveSync.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 221E26C62EDCF22B0095699D /* TKLiveSync.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		228CA7A52EB9387900A4EC63 /* app in Resources */ = {isa = PBXBuildFile; fileRef = 228CA7A42EB9387900A4EC63 /* app */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		221E26BF2EDCF1D90095699D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22D44B4E2E23EBDA00E2B467 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 221E266D2EDCF1B40095699D;
+			remoteInfo = TestFixtures;
+		};
+		22F0A0022F00000300A4EC63 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22D44B4E2E23EBDA00E2B467 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 221E26C52EDCF22B0095699D;
+			remoteInfo = TKLiveSync;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		221E266C2EDCF1B40095699D /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "include/$(PRODUCT_NAME)";
+			dstSubfolderSpec = 16;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		228CA3732EB9365C00A4EC63 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				228CA3722EB9365C00A4EC63 /* NativeScript.xcframework in Embed Frameworks */,
+				228CA3762EB9377E00A4EC63 /* TKLiveSync.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		221E266E2EDCF1B40095699D /* libTestFixtures.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libTestFixtures.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		221E26C62EDCF22B0095699D /* TKLiveSync.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = TKLiveSync.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		228CA10D2EB9350000A4EC63 /* TestRunner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TestRunner.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		228CA3702EB9365C00A4EC63 /* NativeScript.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = NativeScript.xcframework; path = ../../dist/NativeScript.xcframework; sourceTree = "<group>"; };
+		228CA3742EB9377D00A4EC63 /* TKLiveSync.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = TKLiveSync.xcframework; path = ../../dist/TKLiveSync.xcframework; sourceTree = "<group>"; };
+		228CA7A42EB9387900A4EC63 /* app */ = {isa = PBXFileReference; lastKnownFileType = folder; name = app; path = test/runtime/runner/app; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		221E26CA2EDCF22B0095699D /* Exceptions for "TKLiveSync" folder in "TKLiveSync" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			publicHeaders = (
+				TKLiveSync.h,
+			);
+			target = 221E26C52EDCF22B0095699D /* TKLiveSync */;
+		};
+		228CA1392EB9350300A4EC63 /* Exceptions for "test/runtime/runner" folder in "TestRunner" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				app/index.js,
+				app/package.json,
+				app/tests/.gitignore,
+				app/tests/ApiTests.js,
+				app/tests/DeclarationConflicts.js,
+				app/tests/ExceptionHandlingTests.js,
+				app/tests/FunctionsTests.js,
+				app/tests/index.js,
+				"app/tests/Infrastructure/Jasmine/jasmine-2.0.1/boot.js",
+				"app/tests/Infrastructure/Jasmine/jasmine-2.0.1/jasmine.js",
+				"app/tests/Infrastructure/Jasmine/jasmine-reporters/junit_reporter.js",
+				"app/tests/Infrastructure/Jasmine/jasmine-reporters/terminal_reporter.js",
+				app/tests/Infrastructure/simulator.js,
+				app/tests/Infrastructure/timers.js,
+				app/tests/Infrastructure/utf8.js,
+				app/tests/Inheritance/InheritanceTests.js,
+				app/tests/Inheritance/ProtocolImplementationTests.js,
+				app/tests/Inheritance/TypeScriptTests.js,
+				app/tests/Marshalling/ConstantsTests.js,
+				app/tests/Marshalling/EnumTests.js,
+				app/tests/Marshalling/FunctionPointerTests.js,
+				app/tests/Marshalling/MatrixTests.js,
+				app/tests/Marshalling/NSStringTests.js,
+				app/tests/Marshalling/ObjCTypesTests.js,
+				app/tests/Marshalling/PointerTests.js,
+				app/tests/Marshalling/Primitives/Derived.js,
+				app/tests/Marshalling/Primitives/Function.js,
+				app/tests/Marshalling/Primitives/Instance.js,
+				app/tests/Marshalling/Primitives/Static.js,
+				app/tests/Marshalling/ProtocolTests.js,
+				app/tests/Marshalling/RecordTests.js,
+				app/tests/Marshalling/ReferenceTests.js,
+				app/tests/Marshalling/TypesTests.js,
+				app/tests/Marshalling/VectorTests.js,
+				app/tests/MetadataTests.js,
+				app/tests/MethodCallsTests.js,
+				"app/tests/Modules/empty-file.js",
+				app/tests/Modules/index.js,
+				"app/tests/Modules/strict-violation-default.js",
+				"app/tests/Modules/strict-violation-use-strict.js",
+				app/tests/Modules/WindowsEncoding.js,
+				app/tests/ObjCConstructors.js,
+				app/tests/package.json,
+				app/tests/Promises.js,
+				app/tests/RuntimeImplementedAPIs.js,
+				app/tests/sdks/MusicKit.js,
+				app/tests/shared/.gitattributes,
+				app/tests/shared/Import/ImportCommonJS/file.js,
+				app/tests/shared/Import/ImportCommonJS/index.js,
+				app/tests/shared/Import/ImportJSON/data.json,
+				app/tests/shared/Import/ImportJSON/index.js,
+				app/tests/shared/Import/index.js,
+				app/tests/shared/index.js,
+				app/tests/shared/package.json,
+				app/tests/shared/README.md,
+				app/tests/shared/Require/AbsolutePath/dependency.js,
+				app/tests/shared/Require/AbsolutePath/index.js,
+				app/tests/shared/Require/CaseSensitive/index.js,
+				app/tests/shared/Require/CaseSensitive/MyModule.js,
+				app/tests/shared/Require/CaseSensitive/mymodule/index.js,
+				app/tests/shared/Require/ChangingRequireObject/dependency.js,
+				app/tests/shared/Require/ChangingRequireObject/index.js,
+				app/tests/shared/Require/CircularIndexRequire/dependency1.js,
+				app/tests/shared/Require/CircularIndexRequire/dependency2.js,
+				app/tests/shared/Require/CircularIndexRequire/index.js,
+				app/tests/shared/Require/CircularRequire/dependency1.js,
+				app/tests/shared/Require/CircularRequire/dependency2.js,
+				app/tests/shared/Require/CircularRequire/dependency3.js,
+				app/tests/shared/Require/CircularRequire/index.js,
+				app/tests/shared/Require/CircularRequireWithExports/dependency1.js,
+				app/tests/shared/Require/CircularRequireWithExports/dependency2.js,
+				app/tests/shared/Require/CircularRequireWithExports/dependency3.js,
+				app/tests/shared/Require/CircularRequireWithExports/index.js,
+				app/tests/shared/Require/DirectoryWithIndexJson/index.js,
+				app/tests/shared/Require/DirectoryWithIndexJson/module/index.json,
+				app/tests/shared/Require/DirnameAndFilenameParameters/dep1/dependency1.js,
+				"app/tests/shared/Require/DirnameAndFilenameParameters/dep2/dep2-inner/index.js",
+				app/tests/shared/Require/DirnameAndFilenameParameters/index.js,
+				app/tests/shared/Require/ExportsBubbling/dependency1.js,
+				app/tests/shared/Require/ExportsBubbling/dependency2.js,
+				app/tests/shared/Require/ExportsBubbling/dependency3.js,
+				app/tests/shared/Require/ExportsBubbling/dependency4.js,
+				app/tests/shared/Require/ExportsBubbling/dependency5.js,
+				app/tests/shared/Require/ExportsBubbling/index.js,
+				app/tests/shared/Require/FileAndDirectoryWithSameName/index.js,
+				app/tests/shared/Require/FileAndDirectoryWithSameName/module.js,
+				app/tests/shared/Require/FileAndDirectoryWithSameName/module/submodule.js,
+				app/tests/shared/Require/FileEndingWithCommentedLine/index.js,
+				app/tests/shared/Require/FileWithDots/file.name.js,
+				app/tests/shared/Require/FileWithDots/index.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/dependency1.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/dependency2.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/dependency3.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/dependency4.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/dependency5.js,
+				app/tests/shared/Require/FiveLevelsOfRequire/index.js,
+				app/tests/shared/Require/GlobalIsDefined/module.js,
+				app/tests/shared/Require/GlobalRequire/index.js,
+				app/tests/shared/Require/index.js,
+				app/tests/shared/Require/ModuleErrorCache/index.js,
+				app/tests/shared/Require/ModuleErrorCache/maybeThrow.js,
+				app/tests/shared/Require/ModuleRequireFunction/module1.js,
+				app/tests/shared/Require/ModuleRequireFunction/module2.js,
+				app/tests/shared/Require/ModuleVariable/dependency1.js,
+				app/tests/shared/Require/ModuleVariable/dependency2.js,
+				app/tests/shared/Require/ModuleVariable/dependency3.js,
+				app/tests/shared/Require/ModuleVariable/dependency4.js,
+				app/tests/shared/Require/ModuleVariable/dependency5.js,
+				app/tests/shared/Require/ModuleVariable/index.js,
+				app/tests/shared/Require/ModuleWith.js/index.js,
+				app/tests/shared/Require/ModuleWithNullChar/index.js,
+				app/tests/shared/Require/MultipleRequireOfAFile/index.js,
+				app/tests/shared/Require/MultipleRequireOfAFile/module.js,
+				app/tests/shared/Require/NestedGlobalObject/dependency1.js,
+				app/tests/shared/Require/NestedGlobalObject/dependency2.js,
+				app/tests/shared/Require/NestedGlobalObject/dependency3.js,
+				app/tests/shared/Require/NestedGlobalObject/dependency4.js,
+				app/tests/shared/Require/NestedGlobalObject/dependency5.js,
+				app/tests/shared/Require/NestedGlobalObject/index.js,
+				app/tests/shared/Require/NotExistingFileRequire/index.js,
+				app/tests/shared/Require/PackageJsonApp/index.js,
+				app/tests/shared/Require/PackageJsonApp/io/io.js,
+				app/tests/shared/Require/PackageJsonApp/io/package.json,
+				app/tests/shared/Require/PackageJsonAppNoMain/index.js,
+				app/tests/shared/Require/PackageJsonAppNoMain/io/index.js,
+				app/tests/shared/Require/PackageJsonAppNoMain/io/package.json,
+				app/tests/shared/Require/PackageJsonAppWithoutExtension/index.js,
+				app/tests/shared/Require/PackageJsonAppWithoutExtension/io/io.js,
+				app/tests/shared/Require/PackageJsonAppWithoutExtension/io/package.json,
+				app/tests/shared/Require/PackageJsonMainPointsToDir/package.json,
+				app/tests/shared/Require/PackageJsonMainPointsToDir/subdirectory/index.js,
+				app/tests/shared/Require/PackageJsonSyntaxError/index.js,
+				app/tests/shared/Require/PackageJsonSyntaxError/io/index.js,
+				app/tests/shared/Require/PackageJsonSyntaxError/io/package.json,
+				app/tests/shared/Require/PackageJsonTns/index.js,
+				app/tests/shared/Require/RequireExtensions/dependency1.js,
+				app/tests/shared/Require/RequireExtensions/index.js,
+				app/tests/shared/Require/RequireJsonCorruptFile/index.js,
+				app/tests/shared/Require/RequireJsonCorruptFile/test.json,
+				app/tests/shared/Require/RequireJsonCorruptFile1/badJSON.json,
+				app/tests/shared/Require/RequireJsonCorruptFile1/index.js,
+				app/tests/shared/Require/RequireJsonFile/index.js,
+				app/tests/shared/Require/RequireJsonFile/test.json,
+				app/tests/shared/Require/RequireModuleFolder/index.js,
+				app/tests/shared/Require/RequireModuleFolderConflict/dependency.js,
+				app/tests/shared/Require/RequireModuleFolderConflict/index.js,
+				app/tests/shared/Require/RequirePriority/dependency1.js,
+				app/tests/shared/Require/RequirePriority/dependency2.js,
+				app/tests/shared/Require/RequirePriority/dependency3/index.js,
+				app/tests/shared/Require/RequirePriority/dependency4.js,
+				app/tests/shared/Require/RequirePriority/dependency5/index.js,
+				app/tests/shared/Require/RequirePriority/index.js,
+				app/tests/shared/Require/RequireWithTildeSyntax/module.js,
+				app/tests/shared/Require/ResolveCanonicalPath/index.js,
+				app/tests/shared/Require/ResolveCanonicalPath/package.json,
+				app/tests/shared/Require/ResolveCanonicalPath/second.js,
+				app/tests/shared/Require/RuntimeErrorInModule/dependency.js,
+				app/tests/shared/Require/RuntimeErrorInModule/index.js,
+				app/tests/shared/Require/SimpleGlobalObject/dependency.js,
+				app/tests/shared/Require/SimpleGlobalObject/index.js,
+				app/tests/shared/Require/SimpleRequire/dependency.js,
+				app/tests/shared/Require/SimpleRequire/index.js,
+				app/tests/shared/Require/SimpleRequireWithExports/dependency.js,
+				app/tests/shared/Require/SimpleRequireWithExports/index.js,
+				app/tests/shared/Require/SyntaxErrorInModule/dependency.js,
+				app/tests/shared/Require/SyntaxErrorInModule/index.js,
+				app/tests/shared/Require/TwoLevelsOfRequire/dependency1.js,
+				app/tests/shared/Require/TwoLevelsOfRequire/dependency2.js,
+				app/tests/shared/Require/TwoLevelsOfRequire/index.js,
+				app/tests/shared/Require/TwoLevelsOfRequireWithExports/dependency1.js,
+				app/tests/shared/Require/TwoLevelsOfRequireWithExports/dependency2.js,
+				app/tests/shared/Require/TwoLevelsOfRequireWithExports/index.js,
+				app/tests/shared/RuntimeTests.js,
+				app/tests/shared/WeakRef.js,
+				app/tests/shared/Workers/EvalWorker.js,
+				app/tests/shared/Workers/index.js,
+				app/tests/shared/Workers/WorkerInvalidSyntax.js,
+				app/tests/shared/Workers/WorkerStressJSTest.js,
+				app/tests/Timers.js,
+				app/tests/URL.js,
+				app/tests/URLPattern.js,
+				app/tests/URLSearchParams.js,
+				app/tests/VersionDiffTests.js,
+				"app/tns_modules/core-module-dir/index.js",
+				"app/tns_modules/core-module.js",
+				"app/tns_modules/dummy-package/index.js",
+				"app/tns_modules/dummy-package/package.json",
+				"app/tns_modules/tns-core-modules/shared/.gitattributes",
+				"app/tns_modules/tns-core-modules/shared/README.md",
+				"app/tns_modules/tns-core-modules/shared/Require/PackageJsonTns/io/io.js",
+				"app/tns_modules/tns-core-modules/shared/Require/PackageJsonTns/io/package.json",
+				"app/tns_modules/tns-core-modules/shared/Require/RequireModuleFolder/dependency.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequireModuleFolderConflict/dependency.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency1.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency2/index.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency3/index.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency4.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency5/module.js",
+				"app/tns_modules/tns-core-modules/shared/Require/RequirePriority/dependency5/package.json",
+				Info.plist,
+			);
+			target = 228CA10C2EB9350000A4EC63 /* TestRunner */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		221E266F2EDCF1B40095699D /* test/runtime/fixtures */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = test/runtime/fixtures;
+			sourceTree = "<group>";
+		};
+		221E26C72EDCF22B0095699D /* TKLiveSync */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				221E26CA2EDCF22B0095699D /* Exceptions for "TKLiveSync" folder in "TKLiveSync" target */,
+			);
+			path = TKLiveSync;
+			sourceTree = "<group>";
+		};
+		228CA10E2EB9350000A4EC63 /* test/runtime/runner */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				228CA1392EB9350300A4EC63 /* Exceptions for "test/runtime/runner" folder in "TestRunner" target */,
+			);
+			path = test/runtime/runner;
+			sourceTree = "<group>";
+		};
+		22D44BAC2E23EC5B00E2B467 /* metadata-generator */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = "../../metadata-generator";
+			sourceTree = "<group>";
+		};
+		22D453EB2E23F21F00E2B467 /* NativeScript */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = ../../NativeScript;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		221E266B2EDCF1B40095699D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		221E26C32EDCF22B0095699D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		228CA10A2EB9350000A4EC63 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				228CA3712EB9365C00A4EC63 /* NativeScript.xcframework in Frameworks */,
+				228CA3752EB9377E00A4EC63 /* TKLiveSync.framework in Frameworks */,
+				221E26BE2EDCF1D90095699D /* libTestFixtures.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		228CA36F2EB9365C00A4EC63 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				228CA3742EB9377D00A4EC63 /* TKLiveSync.xcframework */,
+				228CA3702EB9365C00A4EC63 /* NativeScript.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		22D44B4D2E23EBDA00E2B467 = {
+			isa = PBXGroup;
+			children = (
+				228CA7A42EB9387900A4EC63 /* app */,
+				22D44BAC2E23EC5B00E2B467 /* metadata-generator */,
+				22D453EB2E23F21F00E2B467 /* NativeScript */,
+				228CA10E2EB9350000A4EC63 /* test/runtime/runner */,
+				221E266F2EDCF1B40095699D /* test/runtime/fixtures */,
+				221E26C72EDCF22B0095699D /* TKLiveSync */,
+				228CA36F2EB9365C00A4EC63 /* Frameworks */,
+				22D44BAB2E23EC5B00E2B467 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		22D44BAB2E23EC5B00E2B467 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				228CA10D2EB9350000A4EC63 /* TestRunner.app */,
+				221E266E2EDCF1B40095699D /* libTestFixtures.a */,
+				221E26C62EDCF22B0095699D /* TKLiveSync.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		221E26C12EDCF22B0095699D /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		221E266D2EDCF1B40095699D /* TestFixtures */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 221E26752EDCF1B40095699D /* Build configuration list for PBXNativeTarget "TestFixtures" */;
+			buildPhases = (
+				221E266A2EDCF1B40095699D /* Sources */,
+				221E266B2EDCF1B40095699D /* Frameworks */,
+				221E266C2EDCF1B40095699D /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				221E266F2EDCF1B40095699D /* test/runtime/fixtures */,
+			);
+			name = TestFixtures;
+			productName = TestFixtures;
+			productReference = 221E266E2EDCF1B40095699D /* libTestFixtures.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		221E26C52EDCF22B0095699D /* TKLiveSync */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 221E26CB2EDCF22B0095699D /* Build configuration list for PBXNativeTarget "TKLiveSync" */;
+			buildPhases = (
+				221E26C12EDCF22B0095699D /* Headers */,
+				221E26C22EDCF22B0095699D /* Sources */,
+				221E26C32EDCF22B0095699D /* Frameworks */,
+				221E26C42EDCF22B0095699D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				221E26C72EDCF22B0095699D /* TKLiveSync */,
+			);
+			name = TKLiveSync;
+			productName = TKLiveSync;
+			productReference = 221E26C62EDCF22B0095699D /* TKLiveSync.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		228CA10C2EB9350000A4EC63 /* TestRunner */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 228CA13A2EB9350300A4EC63 /* Build configuration list for PBXNativeTarget "TestRunner" */;
+			buildPhases = (
+				228CA7A62EB93D4800A4EC63 /* Run Script */,
+				228CA1092EB9350000A4EC63 /* Sources */,
+				228CA10A2EB9350000A4EC63 /* Frameworks */,
+				228CA10B2EB9350000A4EC63 /* Resources */,
+				228CA3732EB9365C00A4EC63 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				221E26C02EDCF1D90095699D /* PBXTargetDependency */,
+				22F0A0032F00000300A4EC63 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				228CA10E2EB9350000A4EC63 /* test/runtime/runner */,
+			);
+			name = TestRunner;
+			productName = TestRunner;
+			productReference = 228CA10D2EB9350000A4EC63 /* TestRunner.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		22D44B4E2E23EBDA00E2B467 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					221E266D2EDCF1B40095699D = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					221E26C52EDCF22B0095699D = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					228CA10C2EB9350000A4EC63 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 22D44B512E23EBDA00E2B467 /* Build configuration list for PBXProject "NativeScriptRuntime" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 22D44B4D2E23EBDA00E2B467;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 22D44BAB2E23EC5B00E2B467 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				228CA10C2EB9350000A4EC63 /* TestRunner */,
+				221E266D2EDCF1B40095699D /* TestFixtures */,
+				221E26C52EDCF22B0095699D /* TKLiveSync */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		221E26C42EDCF22B0095699D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		228CA10B2EB9350000A4EC63 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				228CA7A52EB9387900A4EC63 /* app in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		228CA7A62EB93D4800A4EC63 /* Run Script */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Run Script";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(CONFIGURATION_BUILD_DIR)/metadata-arm64.bin",
+				"$(CONFIGURATION_BUILD_DIR)/metadata-x86_64.bin",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cd ${PROJECT_DIR}/../../metadata-generator/dist/arm64/bin\ncp ../../../build-step-metadata-generator.py .\n./build-step-metadata-generator.py\n\nplatformTag=\"ios\"\nif [ \"$PLATFORM_NAME\" = \"macosx\" ]; then\n    platformTag=\"macos\"\nelif [ \"$PLATFORM_NAME\" = \"iphonesimulator\" ]; then\n    platformTag=\"ios-sim\"\nfi\n\narchList=\"$VALID_ARCHS\"\nif [ -z \"$archList\" ]; then\n    archList=\"$ARCHS\"\nfi\n\nfor arch in $archList\ndo\n    outputPath=\"$CONFIGURATION_BUILD_DIR/metadata-$arch.bin\"\n    if [ -s \"$outputPath\" ]; then\n        echo \"keeping generated $outputPath\"\n        continue\n    fi\n\n    sourcePath=\"../../../metadata/metadata.$platformTag.$arch.nsmd\"\n    if [ -f \"$sourcePath\" ]; then\n        echo \"copying fallback $sourcePath -> $outputPath\"\n        cp \"$sourcePath\" \"$outputPath\"\n    else\n        echo \"creating empty $outputPath (missing $sourcePath)\"\n        : > \"$outputPath\"\n    fi\ndone\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		221E266A2EDCF1B40095699D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		221E26C22EDCF22B0095699D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		228CA1092EB9350000A4EC63 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		221E26C02EDCF1D90095699D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 221E266D2EDCF1B40095699D /* TestFixtures */;
+			targetProxy = 221E26BF2EDCF1D90095699D /* PBXContainerItemProxy */;
+		};
+		22F0A0032F00000300A4EC63 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 221E26C52EDCF22B0095699D /* TKLiveSync */;
+			targetProxy = 22F0A0022F00000300A4EC63 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		221E26762EDCF1B40095699D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = NO;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = B55DTZ6VSU;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "$(SRCROOT)/test/runtime/fixtures/TestFixtures-Prefix.h";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CFLAGS = "-Wno-invalid-version-availability";
+				OTHER_LDFLAGS = "-ObjC";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		221E26772EDCF1B40095699D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = NO;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = B55DTZ6VSU;
+				ENABLE_NS_ASSERTIONS = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "$(SRCROOT)/test/runtime/fixtures/TestFixtures-Prefix.h";
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				OTHER_CFLAGS = "-Wno-invalid-version-availability";
+				OTHER_LDFLAGS = "-ObjC";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		221E26CC2EDCF22B0095699D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_MODULE_VERIFIER = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					zip_algorithm_bzip2.c,
+					zip_crypto_gnutls.c,
+					zip_crypto_mbedtls.c,
+					zip_crypto_openssl.c,
+					zip_crypto_win.c,
+					zip_random_unix.c,
+					zip_random_uwp.c,
+					zip_random_win32.c,
+					zip_source_win32a.c,
+					zip_source_win32handle.c,
+					zip_source_win32utf8.c,
+					zip_source_win32w.c,
+				);
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"HAVE_CONFIG_H=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = org.nativescript.TKLiveSync;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = "";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				"TARGETED_DEVICE_FAMILY[sdk=xros*]" = 7;
+				"TARGETED_DEVICE_FAMILY[sdk=xrsimulator*]" = 7;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+				XROS_DEPLOYMENT_TARGET = 2.0;
+			};
+			name = Debug;
+		};
+		221E26CD2EDCF22B0095699D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					zip_algorithm_bzip2.c,
+					zip_crypto_gnutls.c,
+					zip_crypto_mbedtls.c,
+					zip_crypto_openssl.c,
+					zip_crypto_win.c,
+					zip_random_unix.c,
+					zip_random_uwp.c,
+					zip_random_win32.c,
+					zip_source_win32a.c,
+					zip_source_win32handle.c,
+					zip_source_win32utf8.c,
+					zip_source_win32w.c,
+				);
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"HAVE_CONFIG_H=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = org.nativescript.TKLiveSync;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = "";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				"TARGETED_DEVICE_FAMILY[sdk=xros*]" = 7;
+				"TARGETED_DEVICE_FAMILY[sdk=xrsimulator*]" = 7;
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+				XROS_DEPLOYMENT_TARGET = 2.0;
+			};
+			name = Release;
+		};
+		228CA13B2EB9350300A4EC63 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = B55DTZ6VSU;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXPORTED_SYMBOLS_FILE = "$(PROJECT_DIR)/test/runtime/fixtures/exported-symbols.txt";
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/test/runtime/fixtures",
+					"$(SRCROOT)/../../NativeScript",
+				);
+				INFOPLIST_FILE = test/runtime/runner/Info.plist;
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Listen Music";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIRequiredDeviceCapabilities = armv7;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-Wl,-search_paths_first",
+					"-ObjC",
+					"-framework",
+					NativeScript,
+					"-framework",
+					CoreGraphics,
+					"-force_load",
+					"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/libTestFixtures.a",
+					"-sectcreate",
+					__DATA,
+					__TNSMetadata,
+					"$(CONFIGURATION_BUILD_DIR)/metadata-$(CURRENT_ARCH).bin",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.descendra.TestRunner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				STRIPFLAGS = "-s $(PROJECT_DIR)/test/runtime/fixtures/exported-symbols.txt";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		228CA13C2EB9350300A4EC63 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = B55DTZ6VSU;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXPORTED_SYMBOLS_FILE = "$(PROJECT_DIR)/test/runtime/fixtures/exported-symbols.txt";
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/test/runtime/fixtures",
+					"$(SRCROOT)/../../NativeScript",
+				);
+				INFOPLIST_FILE = test/runtime/runner/Info.plist;
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Listen Music";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIRequiredDeviceCapabilities = armv7;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				OTHER_LDFLAGS = (
+					"-Wl,-search_paths_first",
+					"-ObjC",
+					"-framework",
+					NativeScript,
+					"-framework",
+					CoreGraphics,
+					"-force_load",
+					"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/libTestFixtures.a",
+					"-sectcreate",
+					__DATA,
+					__TNSMetadata,
+					"$(CONFIGURATION_BUILD_DIR)/metadata-$(CURRENT_ARCH).bin",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.descendra.TestRunner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				STRIPFLAGS = "-s $(PROJECT_DIR)/test/runtime/fixtures/exported-symbols.txt";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		22D44B522E23EBDA00E2B467 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		22D44B532E23EBDA00E2B467 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		221E26752EDCF1B40095699D /* Build configuration list for PBXNativeTarget "TestFixtures" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				221E26762EDCF1B40095699D /* Debug */,
+				221E26772EDCF1B40095699D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		221E26CB2EDCF22B0095699D /* Build configuration list for PBXNativeTarget "TKLiveSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				221E26CC2EDCF22B0095699D /* Debug */,
+				221E26CD2EDCF22B0095699D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		228CA13A2EB9350300A4EC63 /* Build configuration list for PBXNativeTarget "TestRunner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				228CA13B2EB9350300A4EC63 /* Debug */,
+				228CA13C2EB9350300A4EC63 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		22D44B512E23EBDA00E2B467 /* Build configuration list for PBXProject "NativeScriptRuntime" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				22D44B522E23EBDA00E2B467 /* Debug */,
+				22D44B532E23EBDA00E2B467 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 22D44B4E2E23EBDA00E2B467 /* Project object */;
+}

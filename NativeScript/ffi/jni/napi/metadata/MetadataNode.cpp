@@ -1,0 +1,2225 @@
+#include <string>
+#include <sstream>
+#include <cctype>
+#include <regex>
+#include <dirent.h>
+#include <set>
+#include <cerrno>
+#include <unistd.h>
+#include "NativeScriptException.h"
+#include "MetadataNode.h"
+#include "CallbackHandlers.h"
+#include "NativeScriptAssert.h"
+#include "File.h"
+#include "Runtime.h"
+#include "ArgConverter.h"
+#include "FieldCallbackData.h"
+#include "MetadataBuilder.h"
+#include "ArgsWrapper.h"
+#include "Util.h"
+#include "GlobalHelpers.h"
+#include "JSONObjectHelper.h"
+
+using namespace std;
+
+namespace {
+napi_value EnsureConstructorThis(napi_env env, napi_value jsThis, napi_value prototype) {
+    if (!napi_util::is_null_or_undefined(env, jsThis)) {
+        return jsThis;
+    }
+
+    auto runtime = Runtime::GetRuntime(env);
+    auto receiver = runtime->GetObjectManager()->GetEmptyObject();
+    if (!napi_util::is_null_or_undefined(env, receiver) &&
+        !napi_util::is_null_or_undefined(env, prototype)) {
+        napi_util::setPrototypeOf(env, receiver, prototype);
+    }
+
+    return receiver;
+}
+}
+
+void MetadataNode::Init(napi_env env) {
+    auto cache = GetMetadataNodeCache(env);
+}
+
+napi_value MetadataNode::CreateArrayObjectConstructor(napi_env env) {
+    auto it = s_arrayObjects.find(env);
+    if (it != s_arrayObjects.end()) {
+        auto value = napi_util::get_ref_value(env, it->second);
+        if (!napi_util::is_null_or_undefined(env, value)) return value;
+    }
+
+    auto node = GetOrCreate("java/lang/Object");
+    auto objectConstructor = node->GetConstructorFunction(env);
+
+    napi_value arrayConstructor;
+    const char *name = "ArrayObjectWrapper";
+    napi_define_class(env, name, strlen(name),
+                      [](napi_env env, napi_callback_info info) -> napi_value {
+                          NAPI_CALLBACK_BEGIN(0)
+                          napi_value newTarget;
+                          napi_get_new_target(env, info, &newTarget);
+                          napi_value receiverPrototype = !napi_util::is_null_or_undefined(env, newTarget)
+                                                         ? napi_util::get_prototype(env, newTarget)
+                                                         : nullptr;
+                          return EnsureConstructorThis(env, jsThis, receiverPrototype);
+                      }, nullptr, 0, nullptr, &arrayConstructor);
+    napi_value proto = napi_util::get_prototype(env, arrayConstructor);
+    ObjectManager::MarkObject(env, proto);
+
+    napi_util::napi_set_function(env, proto, "setValueAtIndex", ArraySetterCallback, nullptr);
+    napi_util::napi_set_function(env, proto, "getValueAtIndex", ArrayGetterCallback, nullptr);
+    napi_util::napi_set_function(env, proto, "getAllValues", ArrayGetAllValuesCallback, nullptr);
+    napi_util::define_property(env, proto, "length", nullptr, ArrayLengthCallback);
+
+    napi_util::napi_inherits(env, arrayConstructor, objectConstructor);
+
+    s_arrayObjects.emplace(env, napi_util::make_ref(env, arrayConstructor));
+
+    return arrayConstructor;
+}
+
+napi_value MetadataNode::CreateExtendedJSWrapper(napi_env env, ObjectManager *objectManager,
+                                                 const std::string &proxyClassName,
+                                                 int javaObjectID) {
+    napi_value extInstance = nullptr;
+
+    auto cacheData = GetCachedExtendedClassData(env, proxyClassName);
+
+    if (cacheData.node != nullptr) {
+        extInstance = objectManager->GetEmptyObject();
+        if (napi_util::is_null_or_undefined(env, extInstance)) {
+            return nullptr;
+        }
+        ObjectManager::MarkSuperCall(env, extInstance);
+        napi_value extendedCtorFunc = napi_util::get_ref_value(env,
+                                                               cacheData.extendedCtorFunction);
+        napi_value extendedPrototype = napi_util::get_prototype(env, extendedCtorFunc);
+        napi_util::setPrototypeOf(env, extInstance, extendedPrototype);
+
+        napi_set_named_property(env, extInstance, CONSTRUCTOR, extendedCtorFunc);
+
+        SetInstanceMetadata(env, extInstance, cacheData.node);
+    }
+
+    return extInstance;
+}
+
+string MetadataNode::GetTypeMetadataName(napi_env env, napi_value value) {
+    napi_value typeMetadataName;
+    napi_get_named_property(env, value, PRIVATE_TYPE_NAME, &typeMetadataName);
+
+    return napi_util::get_string_value(env, typeMetadataName);
+}
+
+
+bool MetadataNode::isArray() {
+    return m_isArray;
+}
+
+napi_value MetadataNode::CreateJSWrapper(napi_env env, ObjectManager *objectManager) {
+    napi_value obj;
+
+    if (m_isArray) {
+        obj = CreateArrayWrapper(env);
+    } else {
+        obj = objectManager->GetEmptyObject();
+        napi_value ctorFunc = GetConstructorFunction(env);
+        napi_set_named_property(env, obj, CONSTRUCTOR, ctorFunc);
+        napi_util::setPrototypeOf(env, obj, napi_util::get_prototype(env, ctorFunc));
+        SetInstanceMetadata(env, obj, this);
+    }
+
+    return obj;
+}
+
+napi_value MetadataNode::ArrayGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(1);
+
+    try {
+
+        napi_value index = argv[0];
+        int32_t indexValue;
+        napi_get_value_int32(env, index, &indexValue);
+        auto node = GetInstanceMetadata(env, jsThis);
+
+        return CallbackHandlers::GetArrayElement(env, jsThis, indexValue, node->m_name);
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::ArrayGetAllValuesCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0);
+    try {
+        auto node = GetInstanceMetadata(env, jsThis);
+        auto length = CallbackHandlers::GetArrayLength(env, jsThis);
+        napi_value arr;
+        napi_create_array(env, &arr);
+
+        for (int i = 0; i < length; i++) {
+            napi_value element = CallbackHandlers::GetArrayElement(env, jsThis, i, node->m_name);
+            napi_set_element(env, arr, i, element);
+        }
+
+        return arr;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::ArraySetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(2);
+
+    try {
+
+        napi_value index = argv[0];
+        napi_value value = argv[1];
+
+        int32_t indexValue;
+        napi_get_value_int32(env, index, &indexValue);
+        auto node = GetInstanceMetadata(env, jsThis);
+
+        CallbackHandlers::SetArrayElement(env, jsThis, indexValue, node->m_name, value);
+        return value;
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::ArrayLengthCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+
+    try {
+        int length = CallbackHandlers::GetArrayLength(env, jsThis);
+
+        napi_value len;
+        napi_create_int32(env, length, &len);
+        return len;
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::CreateArrayWrapper(napi_env env) {
+    napi_value constructor = CreateArrayObjectConstructor(env);
+    napi_value instance;
+    napi_new_instance(env, constructor, 0, nullptr, &instance);
+    SetInstanceMetadata(env, instance, this);
+    return instance;
+}
+
+napi_value MetadataNode::GetImplementationObject(napi_env env, napi_value object) {
+    auto target = object;
+    napi_value currentPrototype = target;
+
+    napi_value implementationObject;
+
+    napi_get_named_property(env, currentPrototype, CLASS_IMPLEMENTATION_OBJECT,
+                            &implementationObject);
+
+    if (implementationObject != nullptr && !napi_util::is_undefined(env, implementationObject)) {
+        return implementationObject;
+    }
+
+    bool hasProperty;
+
+    napi_value prototypeImplObjectKey;
+    napi_create_string_utf8(env, PROP_KEY_IS_PROTOTYPE_IMPLEMENTATION_OBJECT, NAPI_AUTO_LENGTH,
+                            &prototypeImplObjectKey);
+    napi_has_own_property(env, object, prototypeImplObjectKey, &hasProperty);
+
+    if (hasProperty) {
+        bool maybeHasOwnProperty;
+        napi_value prototypeKey;
+        napi_create_string_utf8(env, PROTOTYPE, NAPI_AUTO_LENGTH, &prototypeKey);
+        napi_has_own_property(env, object, prototypeKey, &maybeHasOwnProperty);
+
+        if (!maybeHasOwnProperty) {
+            return nullptr;
+        }
+
+        return napi_util::get_prototype(env, object);
+    }
+
+    napi_value activityImplementationObject;
+    napi_get_named_property(env, object, "t::ActivityImplementationObject",
+                            &activityImplementationObject);
+
+    if (activityImplementationObject != nullptr &&
+        !napi_util::is_undefined(env, activityImplementationObject)) {
+        return activityImplementationObject;
+    }
+
+    napi_value lastPrototype;
+
+    bool prototypeCycleDetected = false;
+
+    bool foundImplementationObject = false;
+
+    while (!foundImplementationObject) {
+        currentPrototype = napi_util::get_prototype(env, currentPrototype);
+
+        if (napi_util::is_null(env, currentPrototype)) {
+            break;
+        }
+
+        if (lastPrototype == currentPrototype) {
+            auto abovePrototype = napi_util::get_prototype(env, currentPrototype);
+            prototypeCycleDetected = abovePrototype == currentPrototype;
+            break;
+        }
+
+        if (currentPrototype == nullptr || napi_util::is_null(env, currentPrototype) ||
+            prototypeCycleDetected) {
+            return nullptr;
+        } else {
+            napi_value implObject;
+            napi_get_named_property(env, currentPrototype, CLASS_IMPLEMENTATION_OBJECT,
+                                    &implObject);
+
+            if (implObject != nullptr && !napi_util::is_undefined(env, implObject)) {
+                foundImplementationObject = true;
+                return currentPrototype;
+            }
+        }
+        lastPrototype = currentPrototype;
+    }
+
+    return implementationObject;
+}
+
+void MetadataNode::SetInstanceMetadata(napi_env env, napi_value object, MetadataNode *node) {
+    auto cache = GetMetadataNodeCache(env);
+    napi_value external;
+    napi_create_external(env, node, [](napi_env env, void *d1, void *d2) {}, node, &external);
+    napi_set_named_property(env, object, "#instance_metadata", external);
+//    napi_wrap(env, object, node, nullptr, nullptr, nullptr);
+}
+
+
+napi_value MetadataNode::ExtendedClassConstructorCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS()
+
+    try {
+        napi_value newTarget;
+        napi_get_new_target(env, info, &newTarget);
+        if (napi_util::is_null_or_undefined(env, newTarget)) return nullptr;
+        napi_value receiver = EnsureConstructorThis(env, jsThis, napi_util::get_prototype(env, newTarget));
+        if (napi_util::is_null_or_undefined(env, receiver)) return nullptr;
+
+        auto extData = reinterpret_cast<ExtendedClassCallbackData *>(data);
+        SetInstanceMetadata(env, receiver, extData->node);
+
+        napi_value implementationObject = napi_util::get_ref_value(env,
+                                                                   extData->implementationObject);
+        ObjectManager::MarkSuperCall(env, receiver);
+
+        string fullClassName = extData->fullClassName;
+
+        ArgsWrapper argWrapper(argv.data(), argc, ArgType::Class);
+        napi_value jsThisProxy;
+        bool success = CallbackHandlers::RegisterInstance(env, receiver, fullClassName, argWrapper,
+                                                          implementationObject, false,
+                                                          &jsThisProxy, extData->node->m_name);
+
+        return jsThisProxy;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::InterfaceConstructorCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS()
+
+    try {
+
+        napi_valuetype arg1Type;
+        napi_valuetype arg2Type;
+
+        napi_typeof(env, argv[0], &arg1Type);
+
+        if (argc == 2) {
+            napi_typeof(env, argv[1], &arg2Type);
+        }
+
+        napi_value implementationObject;
+        napi_value interfaceName;
+
+        if (argc == 1) {
+            if (arg1Type != napi_object) {
+                throw NativeScriptException(
+                        string("Invalid arguments provided, first argument must be an object if only one argument is provided"));
+                return nullptr;
+            }
+            implementationObject = argv[0];
+        } else if (argc == 2) {
+            if (arg1Type != napi_string) {
+                throw NativeScriptException(
+                        string("Invalid arguments provided, first argument must be a string if only two argument is provided"));
+                return nullptr;
+            }
+
+            if (arg2Type != napi_object) {
+                throw NativeScriptException(
+                        string("Invalid arguments provided, second argument must be an object if only one argument is provided"));
+                return nullptr;
+            }
+
+            interfaceName = argv[0];
+            implementationObject = argv[1];
+        } else {
+            throw NativeScriptException(
+                    string("Invalid arguments provided, first argument must be a string and second argument must be an object"));
+        }
+
+        auto node = reinterpret_cast<MetadataNode *>(data);
+
+        auto className = node->m_implType;
+        napi_value newTarget;
+        napi_get_new_target(env, info, &newTarget);
+        napi_value receiverPrototype = !napi_util::is_null_or_undefined(env, newTarget)
+                                       ? napi_util::get_prototype(env, newTarget)
+                                       : nullptr;
+        napi_value receiver = EnsureConstructorThis(env, jsThis, receiverPrototype);
+        if (napi_util::is_null_or_undefined(env, receiver)) return nullptr;
+
+        SetInstanceMetadata(env, receiver, node);
+
+        ObjectManager::MarkSuperCall(env, receiver);
+
+
+        napi_util::setPrototypeOf(env, implementationObject,
+                                  napi_util::getPrototypeOf(env, receiver));
+
+        napi_util::setPrototypeOf(env, receiver, implementationObject);
+
+        napi_set_named_property(env, receiver, CLASS_IMPLEMENTATION_OBJECT, implementationObject);
+
+        ArgsWrapper argsWrapper(argv.data(), argc, ArgType::Interface);
+
+        napi_value jsThisProxy;
+        auto success = CallbackHandlers::RegisterInstance(env, receiver, className, argsWrapper,
+                                                          implementationObject, true, &jsThisProxy);
+        return jsThisProxy;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::ClassConstructorCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS()
+
+    try {
+
+        auto node = reinterpret_cast<MetadataNode *>(data);
+        napi_value newTarget;
+        napi_get_new_target(env, info, &newTarget);
+        napi_value receiverPrototype = !napi_util::is_null_or_undefined(env, newTarget)
+                                       ? napi_util::get_prototype(env, newTarget)
+                                       : nullptr;
+        napi_value receiver = EnsureConstructorThis(env, jsThis, receiverPrototype);
+        if (napi_util::is_null_or_undefined(env, receiver)) return nullptr;
+
+        SetInstanceMetadata(env, receiver, node);
+
+        string extendName;
+        auto className = node->m_name;
+
+        string fullClassName = CreateFullClassName(className, extendName);
+
+        ArgsWrapper argsWrapper(argv.data(), argc, ArgType::Class);
+        napi_value jsThisProxy;
+        bool success = CallbackHandlers::RegisterInstance(env, receiver, fullClassName, argsWrapper,
+                                                          nullptr, false, &jsThisProxy, className);
+
+        return jsThisProxy;
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+string MetadataNode::CreateFullClassName(const std::string &className,
+                                         const std::string &extendNameAndLocation = "") {
+    string fullClassName = className;
+
+    // create a class name consisting only of the base class name + last file name part + line + column + variable identifier
+    if (!extendNameAndLocation.empty()) {
+        string tempClassName = className;
+        fullClassName = Util::ReplaceAll(tempClassName, "$", "_");
+        fullClassName += "_" + extendNameAndLocation;
+    }
+
+    return fullClassName;
+}
+
+bool MetadataNode::IsValidExtendName(napi_env env, napi_value name) {
+    string extendName = ArgConverter::ConvertToString(env, name);
+
+    for (char currentSymbol: extendName) {
+        bool isValidExtendNameSymbol = isalpha(currentSymbol) ||
+                                       isdigit(currentSymbol) ||
+                                       currentSymbol == '_';
+        if (!isValidExtendNameSymbol) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+bool
+MetadataNode::GetExtendLocation(napi_env env, string &extendLocation, bool isTypeScriptExtend) {
+    stringstream extendLocationStream;
+
+    auto frames = tns::BuildStacktraceFrames(env, nullptr, 4);
+    tns::JsStacktraceFrame *frame;
+    if (isTypeScriptExtend) {
+        if (Util::Contains(frames[2].text, "call_super")) {
+            frame = &frames[3];
+        } else {
+            frame = &frames[2]; // the _super.apply call to ts_helpers will always be the third call frame
+        }
+    } else {
+        frame = &frames[0];
+    }
+
+    if (frame == NULL) {
+        DEBUG_WRITE("%s", "FRAME IS NULL!");
+        return true;
+    }
+
+    string srcFileName = Util::ReplaceAll(frame->filename, "file://", "");
+
+    string fullPathToFile;
+    if (srcFileName == "<embedded>" || srcFileName == "<input>" || srcFileName == "JavaScript") {
+        fullPathToFile = "script";
+    } else {
+        string hardcodedPathToSkip = Constants::APP_ROOT_FOLDER_PATH;
+        int startIndex = hardcodedPathToSkip.length();
+        int strToTakeLen = srcFileName.length() - startIndex - 3;
+        fullPathToFile = srcFileName.substr(startIndex, strToTakeLen);
+        fullPathToFile = srcFileName;
+        replace(fullPathToFile.begin(), fullPathToFile.end(), '/', '_');
+        replace(fullPathToFile.begin(), fullPathToFile.end(), '.', '_');
+        replace(fullPathToFile.begin(), fullPathToFile.end(), '-', '_');
+        replace(fullPathToFile.begin(), fullPathToFile.end(), ' ', '_');
+
+        vector<string> pathParts;
+        Util::SplitString(fullPathToFile, "_", pathParts);
+        fullPathToFile =
+                pathParts.back() == "js" ? pathParts[pathParts.size() - 2] : pathParts.back();
+    }
+
+    if (frame->line < 0) {
+        extendLocationStream << fullPathToFile << " unknown line number";
+        extendLocation = extendLocationStream.str();
+        return false;
+    }
+
+    if (frame->col < 0) {
+        extendLocationStream << fullPathToFile << " line:" << frame->line
+                             << " unknown column number";
+        extendLocation = extendLocationStream.str();
+        return false;
+    }
+    int column = frame->col;
+    if (frame->line == 1) {
+        column -= ModuleInternal::MODULE_PROLOGUE_LENGTH;
+    }
+
+#ifdef __HERMES__
+    column = column - 6;
+#endif
+
+    extendLocationStream << fullPathToFile << "_" << frame->line << "_" << column << "_";
+    extendLocation = extendLocationStream.str();
+    return true;
+}
+
+
+bool MetadataNode::ValidateExtendArguments(napi_env env, size_t argc, napi_value *argv,
+                                           bool extendLocationFound, string &extendLocation,
+                                           napi_value *extendName, napi_value *implementationObject,
+                                           bool isTypeScriptExtend) {
+
+    if (argc == 1) {
+        if (!extendLocationFound) {
+            stringstream ss;
+            ss << "Invalid extend() call. No name specified for extend at location: "
+               << extendLocation.c_str();
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        }
+
+        if (!napi_util::is_object(env, argv[0])) {
+            stringstream ss;
+            ss << "Invalid extend() call. No implementation object specified at location: "
+               << extendLocation.c_str();
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        }
+
+        *implementationObject = argv[0];
+    } else if (argc == 2 || isTypeScriptExtend) {
+        if (!napi_util::is_of_type(env, argv[0], napi_string)) {
+            stringstream ss;
+            ss << "Invalid extend() call. No name for extend specified at location: "
+               << extendLocation.c_str();
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        }
+
+        if (!napi_util::is_object(env, argv[1])) {
+            stringstream ss;
+            ss
+                    << "Invalid extend() call. Named extend should be called with second object parameter containing overridden methods at location: "
+                    << extendLocation.c_str();
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        }
+
+        DEBUG_WRITE("ExtendsCallMethodHandler: getting extend name");
+
+        *extendName = argv[0];
+        bool isValidExtendName = IsValidExtendName(env, *extendName);
+        if (!isValidExtendName) {
+            stringstream ss;
+            ss << "The extend name \"" << ArgConverter::ConvertToString(env, *extendName)
+               << "\" you provided contains invalid symbols. Try using the symbols [a-z, A-Z, 0-9, _]."
+               << endl;
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        }
+        *implementationObject = argv[1];
+    } else {
+        stringstream ss;
+        ss << "Invalid extend() call at location: " << extendLocation.c_str();
+        string exceptionMessage = ss.str();
+        throw NativeScriptException(exceptionMessage);
+    }
+
+    return true;
+}
+
+MetadataNode::ExtendedClassCacheData
+MetadataNode::GetCachedExtendedClassData(napi_env env, const string &proxyClassName) {
+    auto cache = GetMetadataNodeCache(env);
+    ExtendedClassCacheData cacheData;
+    auto itFound = cache->ExtendedCtorFuncCache.find(proxyClassName);
+    if (itFound != cache->ExtendedCtorFuncCache.end()) {
+        cacheData = itFound->second;
+    }
+
+    return cacheData;
+}
+
+MetadataNode::MetadataNodeCache *MetadataNode::GetMetadataNodeCache(napi_env env) {
+    auto cache = s_metadata_node_cache.Get(env);
+    if (cache) return cache;
+    cache = new MetadataNodeCache;
+    s_metadata_node_cache.Insert(env, cache);
+    return cache;
+}
+
+MetadataNode::MetadataNode(MetadataTreeNode *treeNode) : m_treeNode(treeNode) {
+    uint8_t nodeType = s_metadataReader.GetNodeType(treeNode);
+
+    m_name = s_metadataReader.ReadTypeName(m_treeNode);
+
+    uint8_t parentNodeType = s_metadataReader.GetNodeType(treeNode->parent);
+
+    m_isArray = s_metadataReader.IsNodeTypeArray(parentNodeType);
+
+    bool isInterface = s_metadataReader.IsNodeTypeInterface(nodeType);
+
+    if (!m_isArray && isInterface) {
+        bool isPrefix;
+        auto impTypeName = s_metadataReader.ReadInterfaceImplementationTypeName(m_treeNode,
+                                                                                isPrefix);
+        m_implType = isPrefix
+                     ? (impTypeName + m_name)
+                     : impTypeName;
+    }
+}
+
+void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
+    napi_value global;
+
+    napi_get_global(env, &global);
+
+    auto root = s_metadataReader.GetRoot();
+
+    const auto &children = *root->children;
+
+    for (auto treeNode: children) {
+        uint8_t nodeType = s_metadataReader.GetNodeType(treeNode);
+
+        if (nodeType == MetadataTreeNode::PACKAGE) {
+            auto node = GetOrCreateInternal(treeNode);
+
+            napi_value packageObj = node->CreateWrapper(env);
+
+            string nameSpace = node->m_treeNode->name;
+            // if the namespaces matches a javascript keyword, prefix it with $ to avoid TypeScript and JavaScript errors
+            if (IsJavascriptKeyword(nameSpace)) {
+                nameSpace = "$" + nameSpace;
+            }
+            napi_set_named_property(env, global, nameSpace.c_str(), packageObj);
+        }
+    }
+}
+
+MetadataTreeNode *MetadataNode::GetOrCreateTreeNodeByName(const string &className) {
+    MetadataTreeNode *result = nullptr;
+
+    auto itFound = s_name2TreeNodeCache.find(className);
+
+    if (itFound != s_name2TreeNodeCache.end()) {
+        result = itFound->second;
+    } else {
+        result = s_metadataReader.GetOrCreateTreeNodeByName(className);
+
+        s_name2TreeNodeCache.emplace(className, result);
+    }
+
+    return result;
+}
+
+string MetadataNode::GetName() {
+    return m_name;
+}
+
+MetadataNode *MetadataNode::GetOrCreate(const string &className) {
+    MetadataNode *node = nullptr;
+    
+    auto it = s_name2NodeCache.find(className);
+
+    if (it == s_name2NodeCache.end()) {
+        MetadataTreeNode *treeNode = GetOrCreateTreeNodeByName(className);
+
+        node = GetOrCreateInternal(treeNode);
+
+        s_name2NodeCache.emplace(className, node);
+    } else {
+        node = it->second;
+    }
+
+    return node;
+}
+
+MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
+    MetadataNode *result = nullptr;
+
+    auto it = s_treeNode2NodeCache.find(treeNode);
+
+    if (it != s_treeNode2NodeCache.end()) {
+        result = it->second;
+    } else {
+            auto name = GetJniClassName(treeNode);
+            if (!name.empty()) {
+                auto it2 = s_name2NodeCache.find(name);
+                if ( it2 != s_name2NodeCache.end()) {
+                    result = it2->second;
+                }
+            }
+
+            if (!result) {
+                result = new MetadataNode(treeNode);
+                s_treeNode2NodeCache.emplace(treeNode, result);
+                if (!result->m_name.empty()) {
+                    s_name2NodeCache.emplace(result->m_name, result);
+                }
+            }
+    }
+
+    auto found = s_treeNode2NodeCache.find(treeNode);
+    if (found == s_treeNode2NodeCache.end()) {
+        s_treeNode2NodeCache.emplace(treeNode, result);
+    }
+
+    return result;
+}
+
+MetadataEntry MetadataNode::GetChildMetadataForPackage(MetadataNode *node, const char *propName) {
+    assert(node->m_treeNode->children != nullptr);
+
+    MetadataEntry child(nullptr, NodeType::Class);
+
+    const auto &children = *node->m_treeNode->children;
+
+    for (auto treeNodeChild: children) {
+        if (strcmp(treeNodeChild->name.c_str(), propName) == 0) {
+            child.name = propName;
+            child.treeNode = treeNodeChild;
+            child.type = static_cast<NodeType>(s_metadataReader.GetNodeType(treeNodeChild));
+
+            if (s_metadataReader.IsNodeTypeInterface((uint8_t) child.type)) {
+                bool isPrefix;
+                string declaringType = s_metadataReader.ReadInterfaceImplementationTypeName(
+                        treeNodeChild, isPrefix);
+                child.declaringType = isPrefix
+                                      ? (declaringType +
+                                         s_metadataReader.ReadTypeName(child.treeNode))
+                                      : declaringType;
+            }
+        }
+    }
+
+    return child;
+}
+
+bool MetadataNode::IsJavascriptKeyword(const std::string &word) {
+    static set<string> keywords;
+
+    if (keywords.empty()) {
+        string kw[]{"abstract", "arguments", "boolean", "break", "byte", "case", "catch", "char",
+                    "class", "const", "continue", "debugger", "default", "delete", "do",
+                    "double", "else", "enum", "eval", "export", "extends", "false", "final",
+                    "finally", "float", "for", "function", "goto", "if", "implements",
+                    "import", "in", "instanceof", "int", "interface", "let", "long", "native",
+                    "new", "null", "package", "private", "protected", "public", "return",
+                    "short", "static", "super", "switch", "synchronized", "this", "throw", "throws",
+                    "transient", "true", "try", "typeof", "var", "void", "volatile", "while",
+                    "with", "yield"};
+
+        keywords = set<string>(kw, kw + sizeof(kw) / sizeof(kw[0]));
+    }
+
+    return keywords.find(word) != keywords.end();
+}
+
+napi_value MetadataNode::CreateWrapper(napi_env env) {
+    napi_value result;
+    uint8_t nodeType = s_metadataReader.GetNodeType(m_treeNode);
+    bool isClass = s_metadataReader.IsNodeTypeClass(nodeType),
+            isInterface = s_metadataReader.IsNodeTypeInterface(nodeType);
+    napi_status status;
+
+    if (isClass || isInterface) {
+        result = GetConstructorFunction(env);
+    } else if (s_metadataReader.IsNodeTypePackage(nodeType)) {
+        result = CreatePackageObject(env);
+    } else {
+        std::stringstream ss;
+        ss << "(InternalError): Can't create proxy for this type=" << static_cast<int>(nodeType);
+        throw NativeScriptException(ss.str());
+    }
+
+    return result;
+}
+
+napi_value MetadataNode::PackageGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+    try {
+        auto childTreeNode = static_cast<MetadataTreeNode *>(data);
+        auto node = GetOrCreateInternal(childTreeNode->parent);
+        DEBUG_WRITE("Get package item: %s", childTreeNode->name.c_str());
+        auto hiddenPropName = "__" + childTreeNode->name;
+        napi_value hiddenValue;
+        napi_get_named_property(env, jsThis, hiddenPropName.c_str(), &hiddenValue);
+
+        if (!napi_util::is_null_or_undefined(env, hiddenValue)) {
+            DEBUG_WRITE("Get cached package item: %s", hiddenPropName.c_str());
+            return hiddenValue;
+        }
+
+        auto childNode = MetadataNode::GetOrCreateInternal(childTreeNode);
+        hiddenValue = childNode->CreateWrapper(env);
+
+        uint8_t childNodeType = s_metadataReader.GetNodeType(childTreeNode);
+        bool isInterface = s_metadataReader.IsNodeTypeInterface(childNodeType);
+        if (isInterface) {
+            // For all java interfaces we register the special Symbol.hasInstance property
+            // which is invoked by the instanceof operator (https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/hasInstance).
+            // For example:
+            //
+            // Object.defineProperty(android.view.animation.Interpolator, Symbol.hasInstance, {
+            //    value: function(obj) {
+            //        return true;
+            //    }
+            // });
+            RegisterSymbolHasInstanceCallback(env, childTreeNode, hiddenValue);
+        }
+        auto parentNode = GetOrCreateInternal(childTreeNode->parent);
+        if (parentNode->m_name == "org/json" && childTreeNode->name == "JSONObject") {
+            JSONObjectHelper::RegisterFromFunction(env, hiddenValue);
+        }
+
+        napi_set_named_property(env, jsThis, hiddenPropName.c_str(), hiddenValue);
+
+        return hiddenValue;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+    return nullptr;
+}
+
+void MetadataNode::RegisterSymbolHasInstanceCallback(napi_env env, const MetadataTreeNode *treeNode,
+                                                     napi_value interface) {
+    if (napi_util::is_undefined(env, interface) || napi_util::is_null(env, interface)) {
+        return;
+    }
+
+    JEnv jEnv;
+
+    auto className = GetJniClassName(treeNode);
+    auto clazz = jEnv.FindClass(className);
+    if (clazz == nullptr) {
+        return;
+    }
+
+    napi_value hasInstance;
+    napi_value symbol;
+    napi_value global;
+    napi_get_global(env, &global);
+    napi_get_named_property(env, global, "Symbol", &symbol);
+    napi_get_named_property(env, symbol, "hasInstance", &hasInstance);
+    napi_value method;
+    napi_create_function(env, "hasInstance", NAPI_AUTO_LENGTH, SymbolHasInstanceCallback, clazz,
+                         &method);
+   
+    napi_property_descriptor desc = {
+            nullptr, // utf8name
+            hasInstance,      // name
+            nullptr,      // method
+            nullptr,       // getter
+            nullptr,       // setter
+            method,        // value
+            napi_default, // attributes
+            nullptr          // data
+    };
+    napi_define_properties(env, interface, 1, &desc);
+}
+
+napi_value MetadataNode::SymbolHasInstanceCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS();
+    if (argc != 1) {
+        throw NativeScriptException(string("Symbol.hasInstance must take exactly 1 argument"));
+        return nullptr;
+    }
+
+    napi_value object = argv[0];
+
+    if (!napi_util::is_object(env, object)) {
+        return napi_util::get_false(env);
+    }
+
+    auto clazz = reinterpret_cast<jclass>(data);
+    auto runtime = Runtime::GetRuntime(env);
+
+    auto objectManager = runtime->GetObjectManager();
+    auto obj = objectManager->GetJavaObjectByJsObject(object);
+
+    if (obj.IsNull()) {
+        // Couldn't find a corresponding java instance counterpart. This could happen
+        // if the "instanceof" operator is invoked on a pure javascript instance
+        return napi_util::get_false(env);
+    }
+
+    JEnv jEnv;
+    auto isInstanceOf = jEnv.IsInstanceOf(obj, clazz);
+
+    napi_value result;
+    napi_get_boolean(env, isInstanceOf, &result);
+
+    return result;
+
+}
+
+
+std::string MetadataNode::GetJniClassName(const MetadataTreeNode *node) {
+    std::stack<string> s;
+
+    while (node != nullptr && !node->name.empty()) {
+        s.push(node->name);
+        node = node->parent;
+    }
+
+    string fullClassName;
+    while (!s.empty()) {
+        auto top = s.top();
+        fullClassName = (fullClassName.empty()) ? top : fullClassName + "/" + top;
+        s.pop();
+    }
+
+    return fullClassName;
+}
+
+napi_value MetadataNode::CreatePackageObject(napi_env env) {
+    napi_value packageObj;
+    napi_create_object(env, &packageObj);
+
+    auto ptrChildren = this->m_treeNode->children;
+
+    if (ptrChildren != nullptr) {
+        const auto &children = *ptrChildren;
+        auto lastChildName = "";
+        for (auto childNode: children) {
+            if (strcmp(childNode->name.c_str(), lastChildName) == 0) {
+                continue;
+            }
+            lastChildName = childNode->name.c_str();
+            napi_property_descriptor descriptor{
+                    childNode->name.c_str(),
+                    nullptr,
+                    nullptr,
+                    PackageGetterCallback,
+                    nullptr,
+                    nullptr,
+                    napi_default_jsproperty,
+                    childNode};
+            napi_define_properties(env, packageObj, 1, &descriptor);
+        }
+    }
+
+    return packageObj;
+}
+
+std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembers(
+        napi_env env, napi_value constructor,
+        std::vector<MethodCallbackData *> &instanceMethodsCallbackData,
+        const std::vector<MethodCallbackData *> &baseInstanceMethodsCallbackData,
+        MetadataTreeNode *treeNode) {
+
+    if (treeNode->metadata != nullptr) {
+        return SetInstanceMembersFromRuntimeMetadata(
+                env, constructor, instanceMethodsCallbackData,
+                baseInstanceMethodsCallbackData, treeNode);
+    }
+
+    return SetClassMembersFromStaticMetadata(
+            env, constructor, instanceMethodsCallbackData,
+            baseInstanceMethodsCallbackData, treeNode);
+}
+
+std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFromStaticMetadata(
+        napi_env env, napi_value constructor,
+        std::vector<MethodCallbackData *> &instanceMethodsCallbackData,
+        const std::vector<MethodCallbackData *> &baseInstanceMethodsCallbackData,
+        MetadataTreeNode *treeNode) {
+
+    std::vector<MethodCallbackData *> instanceMethodData;
+
+    uint8_t *curPtr = s_metadataReader.GetValueData() + treeNode->offsetValue + 1;
+
+    auto nodeType = s_metadataReader.GetNodeType(treeNode);
+    auto curType = s_metadataReader.ReadTypeName(treeNode);
+    curPtr += sizeof(uint16_t /* baseClassId */);
+
+    if (s_metadataReader.IsNodeTypeInterface(nodeType)) {
+        curPtr += sizeof(uint8_t) + sizeof(uint32_t);
+    }
+
+    std::string lastMethodName;
+    MethodCallbackData *callbackData = nullptr;
+
+    robin_hood::unordered_map<std::string, MethodCallbackData *> collectedExtensionMethods;
+
+    napi_value prototype = napi_util::get_prototype(env, constructor);
+
+    auto extensionFunctionsCount = *reinterpret_cast<uint16_t *>(curPtr);
+    curPtr += sizeof(uint16_t);
+    collectedExtensionMethods.reserve(extensionFunctionsCount);
+
+    for (auto i = 0; i < extensionFunctionsCount; i++) {
+        auto entry = MetadataReader::ReadExtensionFunctionEntry(&curPtr);
+
+        auto &methodName = entry.getName();
+        if (methodName != lastMethodName) {
+            callbackData = tryGetExtensionMethodCallbackData(collectedExtensionMethods,
+                                                             methodName);
+
+            if (callbackData == nullptr) {
+                callbackData = new MethodCallbackData(this);
+                MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
+
+                napi_value method;
+                napi_create_function(env, methodName.c_str(), methodName.size(), MethodCallback,
+                                     callbackData, &method);
+
+                napi_util::define_property_value(env, prototype, methodName.c_str(), method, napi_default_method);
+                lastMethodName = methodName;
+                collectedExtensionMethods.emplace(methodName, callbackData);
+
+            }
+        }
+
+        callbackData->candidates.push_back(std::move(entry));
+    }
+
+    auto instanceMethodCount = *reinterpret_cast<uint16_t *>(curPtr);
+    collectedExtensionMethods.reserve(instanceMethodCount);
+    curPtr += sizeof(uint16_t);
+
+    for (auto i = 0; i < instanceMethodCount; i++) {
+        auto entry = MetadataReader::ReadInstanceMethodEntry(&curPtr);
+        auto &methodName = entry.getName();
+        if (methodName != lastMethodName) {
+            callbackData = tryGetExtensionMethodCallbackData(collectedExtensionMethods,
+                                                             methodName);
+
+
+            if (callbackData == nullptr) {
+                callbackData = new MethodCallbackData(this);
+                MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
+                napi_value method;
+                napi_create_function(env, methodName.c_str(), methodName.size(), MethodCallback,
+                                     callbackData, &method);
+                napi_util::define_property_value(env, prototype, methodName.c_str(), method, napi_default_method);
+                collectedExtensionMethods.emplace(methodName, callbackData);
+            }
+
+            instanceMethodData.push_back(callbackData);
+            instanceMethodsCallbackData.push_back(callbackData);
+
+            auto itFound = std::find_if(baseInstanceMethodsCallbackData.begin(),
+                                        baseInstanceMethodsCallbackData.end(),
+                                        [&methodName](MethodCallbackData *x) {
+                                            return x->candidates.front().name == methodName;
+                                        });
+            if (itFound != baseInstanceMethodsCallbackData.end()) {
+                callbackData->parent = *itFound;
+            }
+
+            lastMethodName = methodName;
+        }
+
+        callbackData->candidates.push_back(std::move(entry));
+    }
+
+    auto instanceFieldCount = *reinterpret_cast<uint16_t *>(curPtr);
+    curPtr += sizeof(uint16_t);
+    for (auto i = 0; i < instanceFieldCount; i++) {
+        auto entry = MetadataReader::ReadInstanceFieldEntry(&curPtr);
+        auto &fieldName = entry.getName();
+        auto fieldInfo = new FieldCallbackData(entry);
+        fieldInfo->metadata.declaringType = curType;
+        napi_util::define_property(env, prototype, fieldName.c_str(), nullptr,
+                                   FieldAccessorGetterCallback, FieldAccessorSetterCallback,
+                                   fieldInfo);
+
+        MetadataNode::GetMetadataNodeCache(env)->fieldCallbackData.push_back(fieldInfo);
+
+    }
+
+    auto kotlinPropertiesCount = *reinterpret_cast<uint16_t *>(curPtr);
+    curPtr += sizeof(uint16_t);
+    for (int i = 0; i < kotlinPropertiesCount; ++i) {
+        uint32_t nameOffset = *reinterpret_cast<uint32_t *>(curPtr);
+        auto propertyName = s_metadataReader.ReadName(nameOffset);
+        curPtr += sizeof(uint32_t);
+
+        auto hasGetter = *reinterpret_cast<uint16_t *>(curPtr);
+        curPtr += sizeof(uint16_t);
+
+        std::string getterMethodName;
+        if (hasGetter >= 1) {
+            auto entry = MetadataReader::ReadInstanceMethodEntry(&curPtr);
+            getterMethodName = entry.getName();
+        }
+
+        auto hasSetter = *reinterpret_cast<uint16_t *>(curPtr);
+        curPtr += sizeof(uint16_t);
+
+        std::string setterMethodName;
+        if (hasSetter >= 1) {
+            auto entry = MetadataReader::ReadInstanceMethodEntry(&curPtr);
+            setterMethodName = entry.getName();
+        }
+
+        auto propertyInfo = new PropertyCallbackData(propertyName, getterMethodName,
+                                                     setterMethodName);
+        MetadataNode::GetMetadataNodeCache(env)->propertyCallbackData.push_back(propertyInfo);
+        napi_util::define_property(env, prototype, propertyName.c_str(), nullptr,
+                                   PropertyAccessorGetterCallback, PropertyAccessorSetterCallback,
+                                   propertyInfo);
+    }
+
+    // Set static class members on constructor
+    lastMethodName.clear();
+    callbackData = nullptr;
+
+    auto origin = Constants::APP_ROOT_FOLDER_PATH + this->m_name;
+
+    // get candidates from static methods metadata
+    auto staticMethodCout = *reinterpret_cast<uint16_t *>(curPtr);
+    curPtr += sizeof(uint16_t);
+    for (auto i = 0; i < staticMethodCout; i++) {
+        auto entry = MetadataReader::ReadStaticMethodEntry(&curPtr);
+        // In java there can be multiple methods of same name with different parameters.
+        auto &methodName = entry.getName();
+        if (methodName != lastMethodName) {
+            callbackData = new MethodCallbackData(this);
+            MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
+            napi_value method;
+            napi_create_function(env, methodName.c_str(), methodName.size(), MethodCallback,
+                                 callbackData, &method);
+
+            napi_util::define_property_value(env, constructor, methodName.c_str(), method, napi_default_method);
+            lastMethodName = methodName;
+        }
+        callbackData->candidates.push_back(std::move(entry));
+    }
+
+    napi_value extendMethod;
+    napi_create_function(env, PROP_KEY_EXTEND, sizeof(PROP_KEY_EXTEND), ExtendMethodCallback, this,
+                         &extendMethod);
+    napi_set_named_property(env, constructor, PROP_KEY_EXTEND, extendMethod);
+
+    // get candidates from static fields metadata
+    auto staticFieldCout = *reinterpret_cast<uint16_t *>(curPtr);
+    curPtr += sizeof(uint16_t);
+    for (auto i = 0; i < staticFieldCout; i++) {
+        auto entry = MetadataReader::ReadStaticFieldEntry(&curPtr);
+        auto &fieldName = entry.getName();
+        auto fieldInfo = new FieldCallbackData(entry);
+        napi_value method;
+        napi_util::define_property(env, constructor, fieldName.c_str(), nullptr,
+                                   FieldAccessorGetterCallback, FieldAccessorSetterCallback,
+                                   fieldInfo);
+        MetadataNode::GetMetadataNodeCache(env)->fieldCallbackData.push_back(fieldInfo);
+    }
+
+
+    napi_util::define_property(env, constructor, PROP_KEY_NULLOBJECT, nullptr,
+                               NullObjectAccessorGetterCallback, nullptr, this);
+
+
+    std::string tname = s_metadataReader.ReadTypeName(treeNode);
+    napi_set_named_property(env, constructor, PRIVATE_TYPE_NAME,
+                            ArgConverter::convertToJsString(env, tname));
+
+    SetClassAccessor(env, constructor);
+
+    return instanceMethodData;
+}
+
+MetadataNode::MethodCallbackData *MetadataNode::tryGetExtensionMethodCallbackData(
+        const robin_hood::unordered_map<std::string, MethodCallbackData *> &collectedMethodCallbackData,
+        const std::string &lookupName) {
+
+    if (collectedMethodCallbackData.empty()) {
+        return nullptr;
+    }
+
+    auto itFound = collectedMethodCallbackData.find(lookupName);
+    if (itFound != collectedMethodCallbackData.end()) {
+        return itFound->second;
+    }
+
+    return nullptr;
+}
+
+bool MetadataNode::IsNodeTypeInterface() {
+    uint8_t nodeType = s_metadataReader.GetNodeType(m_treeNode);
+    return s_metadataReader.IsNodeTypeInterface(nodeType);
+}
+
+std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetInstanceMembersFromRuntimeMetadata(
+        napi_env env, napi_value constructor,
+        std::vector<MethodCallbackData *> &instanceMethodsCallbackData,
+        const std::vector<MethodCallbackData *> &baseInstanceMethodsCallbackData,
+        MetadataTreeNode *treeNode) {
+    assert(treeNode->metadata != nullptr);
+
+    std::vector<MethodCallbackData *> instanceMethodData;
+
+    std::string line;
+    const std::string &metadata = *treeNode->metadata;
+    std::stringstream s(metadata);
+
+    std::string kind;
+    std::string name;
+    std::string signature;
+    int paramCount;
+
+    std::getline(s, line); // type line
+    std::getline(s, line); // base class line
+
+    std::string lastMethodName;
+    MethodCallbackData *callbackData = nullptr;
+
+    napi_value proto = napi_util::get_prototype(env, constructor);
+    while (std::getline(s, line)) {
+        std::stringstream tmp(line);
+        tmp >> kind >> name >> signature >> paramCount;
+
+        char chKind = kind[0];
+
+        assert((chKind == 'M') || (chKind == 'F'));
+
+        MetadataEntry entry(nullptr, NodeType::Field);
+
+        entry.name = name;
+        entry.sig = signature;
+        entry.paramCount = paramCount;
+        entry.isStatic = false;
+        if (chKind == 'M') {
+            if (entry.name != lastMethodName) {
+                entry.type = NodeType::Method;
+                callbackData = new MethodCallbackData(this);
+                MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
+                instanceMethodData.push_back(callbackData);
+                instanceMethodsCallbackData.push_back(callbackData);
+
+                auto itFound = std::find_if(baseInstanceMethodsCallbackData.begin(),
+                                            baseInstanceMethodsCallbackData.end(),
+                                            [&entry](MethodCallbackData *x) {
+                                                return x->candidates.front().name == entry.name;
+                                            });
+                if (itFound != baseInstanceMethodsCallbackData.end()) {
+                    callbackData->parent = *itFound;
+                }
+
+                napi_value method;
+                napi_create_function(env, entry.name.c_str(), NAPI_AUTO_LENGTH, MethodCallback,
+                                     callbackData, &method);
+                napi_set_named_property(env, proto, entry.name.c_str(), method);
+
+                lastMethodName = entry.name;
+            }
+            callbackData->candidates.push_back(std::move(entry));
+        } else if (chKind == 'F') {
+            entry.type = NodeType::Field;
+            auto *fieldInfo = new FieldCallbackData(entry);
+            napi_util::define_property(env, proto, entry.name.c_str(), nullptr,
+                                       FieldAccessorGetterCallback, FieldAccessorSetterCallback,
+                                       fieldInfo);
+
+            MetadataNode::GetMetadataNodeCache(env)->fieldCallbackData.push_back(fieldInfo);
+        }
+    }
+
+    return instanceMethodData;
+}
+
+void MetadataNode::SetClassAccessor(napi_env env, napi_value constructor) {
+    napi_util::define_property(env, constructor, PROP_KEY_CLASS, nullptr,
+                               ClassAccessorGetterCallback, nullptr, nullptr);
+}
+
+napi_value MetadataNode::ClassAccessorGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0);
+    try {
+        napi_value name;
+        napi_get_named_property(env, jsThis, PRIVATE_TYPE_NAME, &name);
+        const char *nameValue = napi_util::get_string_value(env, name);
+        return CallbackHandlers::FindClass(env, nameValue);
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::GetConstructorFunction(napi_env env) {
+    std::vector<MethodCallbackData *> instanceMethodsCallbackData;
+    return GetConstructorFunctionInternal(env, m_treeNode, instanceMethodsCallbackData);
+}
+
+napi_value MetadataNode::GetConstructorFunctionInternal(napi_env env, MetadataTreeNode *treeNode,
+                                                        std::vector<MethodCallbackData *> instanceMethodsCallbackData) {
+
+    auto cache = GetMetadataNodeCache(env);
+    auto itFound = cache->CtorFuncCache.find(treeNode);
+    if (itFound != cache->CtorFuncCache.end()) {
+        if (itFound->second.constructorFunction != nullptr) {
+            auto value = napi_util::get_ref_value(env, itFound->second.constructorFunction);
+            if (!napi_util::is_null_or_undefined(env, value)) {
+                instanceMethodsCallbackData = itFound->second.instanceMethodCallbacks;
+                return value;
+            }
+        }
+    }
+
+    if (itFound != cache->CtorFuncCache.end()) {
+        itFound->second.instanceMethodCallbacks.clear();
+        if (itFound->second.constructorFunction != nullptr) {
+            napi_delete_reference(env, itFound->second.constructorFunction);
+        }
+        cache->CtorFuncCache.erase(itFound);
+    }
+
+    auto node = GetOrCreateInternal(treeNode);
+
+    JEnv jEnv;
+    // if we already have an exception (which will be rethrown later)
+    // then we don't want to ignore the next exception
+    bool ignoreFindClassException = jEnv.ExceptionCheck() == JNI_FALSE;
+    auto currentClass = jEnv.FindClass(node->m_name);
+    if (ignoreFindClassException && jEnv.ExceptionCheck()) {
+        jEnv.ExceptionClear();
+        // JNI found an exception looking up this class
+        // but we don't care, because this means this class doesn't exist
+        // like when you try to get a class that only exists in a higher API level
+        CtorCacheData ctorCacheItem(nullptr, instanceMethodsCallbackData);
+        cache->CtorFuncCache.emplace(treeNode, ctorCacheItem);
+        return nullptr;
+    };
+
+    auto currentNode = treeNode;
+    std::string finalName(currentNode->name);
+    while (currentNode->parent) {
+        if (!currentNode->parent->name.empty()) {
+            finalName = currentNode->parent->name + "." + finalName;
+        }
+        currentNode = currentNode->parent;
+    }
+
+    // 1. Create the class and get the constructor
+
+    napi_value constructor;
+    auto isInterface = s_metadataReader.IsNodeTypeInterface(treeNode->type);
+    napi_define_class(env, finalName.c_str(), NAPI_AUTO_LENGTH,
+                      isInterface ? InterfaceConstructorCallback : ClassConstructorCallback,
+                      node, 0, nullptr, &constructor);
+
+    // Mark this constructor's prototype as a runtime object.
+    ObjectManager::MarkObject(env, napi_util::get_prototype(env, constructor));
+
+    // 2. Create the base constructor if it doesn't exist and inherit from it.
+    napi_value baseConstructor;
+    std::vector<MethodCallbackData *> baseInstanceMethodsCallbackData;
+    auto tmpTreeNode = treeNode;
+    std::vector<MetadataTreeNode *> skippedBaseTypes;
+
+    while (true) {
+        auto baseTreeNode = s_metadataReader.GetBaseClassNode(tmpTreeNode);
+        if (CheckClassHierarchy(jEnv, currentClass, treeNode, baseTreeNode, skippedBaseTypes)) {
+            tmpTreeNode = baseTreeNode;
+            continue;
+        }
+
+        if ((baseTreeNode != treeNode) && (baseTreeNode != nullptr) &&
+            (baseTreeNode->offsetValue > 0)) {
+            baseConstructor = GetConstructorFunctionInternal(env, baseTreeNode,
+                                                             baseInstanceMethodsCallbackData);
+
+
+            if (baseConstructor != nullptr) {
+                napi_util::napi_inherits(env, constructor, baseConstructor);
+            }
+        } else {
+            baseConstructor = nullptr;
+        }
+        break;
+    }
+
+    // 3. Define the class members now.
+    auto instanceMethodData = node->SetClassMembers(env, constructor,
+                                                    instanceMethodsCallbackData,
+                                                    baseInstanceMethodsCallbackData, treeNode);
+
+    if (!skippedBaseTypes.empty()) {
+        // If there is a mismatch between base type of this class in metadata compared to the class
+        // at runtime, we will add methods of base class to this class's prototype.
+        node->SetMissingBaseMethods(env, skippedBaseTypes, instanceMethodData, constructor);
+    }
+
+
+    SetInnerTypes(env, constructor, treeNode);
+
+    napi_ref constructorRef = napi_util::make_ref(env, constructor);
+
+    if (baseConstructor != nullptr && !napi_util::is_undefined(env, baseConstructor)) {
+        napi_util::setPrototypeOf(env, constructor, baseConstructor);
+    }
+
+    CtorCacheData ctorCacheItem(constructorRef, instanceMethodsCallbackData);
+    cache->CtorFuncCache.emplace(treeNode, ctorCacheItem);
+
+    return constructor;
+}
+
+void MetadataNode::SetInnerTypes(napi_env env, napi_value constructor, MetadataTreeNode *treeNode) {
+    if (treeNode->children != nullptr) {
+        const auto &children = *treeNode->children;
+        std::vector<std::string> childNames(children.size());
+
+        for (auto curChild: children) {
+            bool hasOwnProperty = false;
+            napi_value childName;
+            napi_create_string_utf8(env, curChild->name.c_str(), curChild->name.size(), &childName);
+            napi_has_own_property(env, constructor, childName, &hasOwnProperty);
+            if (!hasOwnProperty) {
+                napi_util::define_property(env, constructor, curChild->name.c_str(), nullptr,
+                                           InnerTypeGetterCallback, nullptr, curChild);
+            }
+        }
+    }
+}
+
+napi_value MetadataNode::InnerTypeGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+    try {
+        auto curChild = reinterpret_cast<MetadataTreeNode *>(data);
+        auto childNode = GetOrCreateInternal(curChild);
+        auto cache = GetMetadataNodeCache(env);
+        auto itFound = cache->CtorFuncCache.find(childNode->m_treeNode);
+        if (itFound != cache->CtorFuncCache.end()) {
+            auto value = napi_util::get_ref_value(env, itFound->second.constructorFunction);
+            if (!napi_util::is_null_or_undefined(env, value)) return value;
+        }
+        napi_value constructor = childNode->GetConstructorFunction(env);
+        return constructor;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+MetadataReader *MetadataNode::getMetadataReader() {
+    return &MetadataNode::s_metadataReader;
+}
+
+napi_value MetadataNode::NullObjectAccessorGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+    try {
+
+        bool value;
+        napi_value nullNodeKey;
+        napi_create_string_utf8(env, PROP_KEY_NULL_NODE_NAME, NAPI_AUTO_LENGTH, &nullNodeKey);
+        napi_has_own_property(env, jsThis, nullNodeKey, &value);
+
+        if (!value) {
+            auto node = reinterpret_cast<MetadataNode *>(data);
+            napi_value external;
+            napi_create_external(env, node, [](napi_env env, void *d1, void *d2) {}, node,
+                                 &external);
+            napi_set_named_property(env, jsThis, PROP_KEY_NULL_NODE_NAME, external);
+
+            napi_util::napi_set_function(env,
+                                         jsThis,
+                                         "valueOf", MetadataNode::NullValueOfCallback);
+        }
+
+        return jsThis;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::NullValueOfCallback(napi_env env, napi_callback_info info) {
+    napi_value nullValue;
+    napi_get_null(env, &nullValue);
+    return nullValue;
+}
+
+napi_value MetadataNode::FieldAccessorGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0);
+    try {
+        auto fieldData = reinterpret_cast<FieldCallbackData *>(data);
+        auto &fieldMetadata = fieldData->metadata;
+
+        if (fieldMetadata.getDeclaringType().empty()) {
+            return UNDEFINED;
+        }
+
+        if (!fieldMetadata.isStatic) {
+            bool is__this__ = false;
+            napi_has_named_property(env, jsThis, "__napi::this", &is__this__);
+            if (!is__this__) {
+                napi_value constructor;
+                napi_value prototype;
+                napi_get_named_property(env, jsThis, "constructor", &constructor);
+                if (!napi_util::is_null_or_undefined(env, constructor)) {
+                    napi_get_named_property(env, constructor, "prototype", &prototype);
+                    bool isHolder;
+                    napi_strict_equals(env, prototype, jsThis, &isHolder);
+                    if (isHolder) {
+                        return UNDEFINED;
+                    } else {
+                        napi_set_named_property(env, jsThis, "__napi::this",
+                                                napi_util::get_true(env));
+                    }
+                }
+            }
+        }
+
+        return CallbackHandlers::GetJavaField(env, jsThis, fieldData);
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return UNDEFINED;
+}
+napi_ref propRef = nullptr;
+napi_value MetadataNode::FieldAccessorSetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(1);
+
+    try {
+        auto fieldData = reinterpret_cast<FieldCallbackData *>(data);
+        auto &fieldMetadata = fieldData->metadata;
+
+        if (!fieldMetadata.isStatic) {
+            bool is__this__ = false;
+            napi_has_named_property(env, jsThis, "__napi::this", &is__this__);
+            if (!is__this__) {
+                napi_value constructor;
+                napi_value prototype;
+                napi_get_named_property(env, jsThis, "constructor", &constructor);
+                if (!napi_util::is_null_or_undefined(env, constructor)) {
+                    napi_get_named_property(env, constructor, "prototype", &prototype);
+                    bool isHolder;
+                    napi_strict_equals(env, prototype, jsThis, &isHolder);
+                    if (isHolder) {
+                        return UNDEFINED;
+                    } else {
+                        napi_set_named_property(env, jsThis, "__napi::this",
+                                                napi_util::get_true(env));
+                    }
+                }
+            }
+        }
+
+        if (fieldMetadata.getIsFinal()) {
+            stringstream ss;
+            ss << "You are trying to set \"" << fieldMetadata.getName()
+               << "\" which is a final field! Final fields can only be read.";
+            string exceptionMessage = ss.str();
+
+            throw NativeScriptException(exceptionMessage);
+        } else {
+            CallbackHandlers::SetJavaField(env, jsThis, argv[0], fieldData);
+            return argv[0];
+        }
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return UNDEFINED;
+}
+
+napi_value MetadataNode::PropertyAccessorGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+
+    try {
+        auto propertyCallbackData = reinterpret_cast<PropertyCallbackData *>(data);
+
+        if (propertyCallbackData->getterMethodName.empty()) {
+            return nullptr;
+        }
+
+        napi_value getter;
+        napi_get_named_property(env, jsThis, propertyCallbackData->getterMethodName.c_str(),
+                                &getter);
+
+        napi_value result;
+        napi_call_function(env, jsThis, getter, 0, nullptr, &result);
+        return result;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::PropertyAccessorSetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(1)
+
+    try {
+        auto propertyCallbackData = reinterpret_cast<PropertyCallbackData *>(data);
+
+        if (propertyCallbackData->setterMethodName.empty()) {
+            return nullptr;
+        }
+
+        napi_value setter;
+        napi_get_named_property(env, jsThis, propertyCallbackData->setterMethodName.c_str(),
+                                &setter);
+
+        napi_value result;
+        napi_call_function(env, jsThis, setter, 1, &argv[0], &result);
+
+        return result;
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS()
+
+    try {
+        napi_value extendName;
+        napi_value implementationObject;
+        string extendLocation;
+
+        auto hasDot = false;
+        auto isTypeScriptExtend = false;
+
+        if (argc == 2) {
+            if (!napi_util::is_of_type(env, argv[0], napi_string)) {
+                stringstream ss;
+                ss << "Invalid extend() call. No name for extend specified at location: "
+                   << extendLocation.c_str();
+                string exceptionMessage = ss.str();
+
+                throw NativeScriptException(exceptionMessage);
+            }
+
+            if (!napi_util::is_of_type(env, argv[1], napi_object)) {
+                stringstream ss;
+                ss << "Invalid extend() call. No implementation object specified at location: "
+                   << extendLocation.c_str();
+                string exceptionMessage = ss.str();
+
+                throw NativeScriptException(exceptionMessage);
+            }
+
+            string strName = napi_util::get_string_value(env, argv[0]);
+            hasDot = strName.find('.') != string::npos;
+        } else if (argc == 3) {
+            if (napi_util::is_of_type(env, argv[2], napi_boolean)) {
+                napi_get_value_bool(env, argv[2], &isTypeScriptExtend);
+            };
+        }
+
+        auto node = reinterpret_cast<MetadataNode *>(data);
+
+        if (hasDot) {
+            extendName = argv[0];
+            implementationObject = argv[1];
+        } else {
+            bool validExtend = GetExtendLocation(env, extendLocation, isTypeScriptExtend);
+            napi_create_string_utf8(env, "", 0, &extendName);
+            auto validArgs = ValidateExtendArguments(env, argc, argv.data(), validExtend,
+                                                     extendLocation,
+                                                     &extendName, &implementationObject,
+                                                     isTypeScriptExtend);
+            if (!validArgs) {
+                return nullptr;
+            }
+        }
+
+
+        string extendNameAndLocation =
+                extendLocation + ArgConverter::ConvertToString(env, extendName);
+        string fullClassName;
+        string baseClassName = node->m_name;
+        if (!hasDot) {
+            fullClassName = TNS_PREFIX + CreateFullClassName(baseClassName, extendNameAndLocation);
+        } else {
+            fullClassName = ArgConverter::ConvertToString(env, argv[0]);
+        }
+
+        uint8_t nodeType = s_metadataReader.GetNodeType(node->m_treeNode);
+        bool isInterface = s_metadataReader.IsNodeTypeInterface(nodeType);
+        auto clazz = CallbackHandlers::ResolveClass(env, baseClassName, fullClassName,
+                                                    implementationObject, isInterface);
+        auto fullExtendedName = CallbackHandlers::ResolveClassName(env, clazz);
+
+        auto cachedData = GetCachedExtendedClassData(env, fullExtendedName);
+        if (cachedData.extendedCtorFunction != nullptr) {
+            auto value = napi_util::get_ref_value(env, cachedData.extendedCtorFunction);
+            if (!napi_util::is_null_or_undefined(env, value)) return value;
+        }
+
+        napi_value implementationObjectName;
+        napi_get_named_property(env, implementationObject, CLASS_IMPLEMENTATION_OBJECT,
+                                &implementationObjectName);
+
+        if (napi_util::is_null_or_undefined(env, implementationObjectName)) {
+            napi_set_named_property(env, implementationObject, CLASS_IMPLEMENTATION_OBJECT,
+                                    ArgConverter::convertToJsString(env, fullExtendedName));
+        } else {
+            string usedClassName = ArgConverter::ConvertToString(env, implementationObjectName);
+            stringstream s;
+            s << "This object is used to extend another class '" << usedClassName << "'";
+            throw NativeScriptException(s.str());
+        }
+
+        auto baseClassCtorFunction = node->GetConstructorFunction(env);
+
+        auto extendedClassCallbackData = new ExtendedClassCallbackData(
+                node, extendNameAndLocation, napi_util::make_ref(env, implementationObject),
+                fullClassName);
+        GetMetadataNodeCache(env)->extendedClassCallbackData.push_back(extendedClassCallbackData);
+
+        napi_value extendFuncCtor;
+        napi_define_class(env, fullExtendedName.c_str(), NAPI_AUTO_LENGTH,
+                          MetadataNode::ExtendedClassConstructorCallback,
+                          extendedClassCallbackData, 0, nullptr,
+                          &extendFuncCtor);
+        napi_value extendFuncPrototype = napi_util::get_prototype(env, extendFuncCtor);
+        ObjectManager::MarkObject(env, extendFuncPrototype);
+
+        napi_util::setPrototypeOf(env, implementationObject,
+                                  napi_util::get_prototype(env, baseClassCtorFunction));
+
+        napi_util::define_property(
+                env, implementationObject, PROP_KEY_SUPER, nullptr, SuperAccessorGetterCallback,
+                nullptr, nullptr);
+
+        napi_util::setPrototypeOf(env, extendFuncPrototype, implementationObject);
+
+        napi_util::setPrototypeOf(env, extendFuncCtor, baseClassCtorFunction);
+
+        SetClassAccessor(env, extendFuncCtor);
+
+        napi_set_named_property(env, extendFuncCtor, PRIVATE_TYPE_NAME,
+                                ArgConverter::convertToJsString(env, fullExtendedName));
+
+        s_name2NodeCache.emplace(fullExtendedName, node);
+
+        ExtendedClassCacheData cacheData(napi_util::make_ref(env, extendFuncCtor), fullExtendedName,
+                                         node);
+        auto cache = GetMetadataNodeCache(env);
+        cache->ExtendedCtorFuncCache.emplace(fullExtendedName, cacheData);
+
+        return extendFuncCtor;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+
+napi_value MetadataNode::SuperAccessorGetterCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN(0)
+
+    try {
+
+        napi_value superValue;
+        napi_get_named_property(env, jsThis, PROP_KEY_SUPERVALUE, &superValue);
+
+        if (napi_util::is_null_or_undefined(env, superValue)) {
+            auto objectManager = Runtime::GetRuntime(env)->GetObjectManager();
+            superValue = objectManager->GetEmptyObject();
+
+            napi_delete_property(env, superValue,
+                                 ArgConverter::convertToJsString(env, PROP_KEY_TOSTRING), nullptr);
+            napi_delete_property(env, superValue,
+                                 ArgConverter::convertToJsString(env, PROP_KEY_VALUEOF), nullptr);
+            ObjectManager::MarkSuperCall(env, superValue);
+
+            napi_value superProto = napi_util::getPrototypeOf(env, napi_util::getPrototypeOf(env,
+                                                                                             napi_util::getPrototypeOf(
+                                                                                                     env,
+                                                                                                     jsThis)));
+
+            napi_util::setPrototypeOf(env, superValue, superProto);
+            objectManager->CloneLink(jsThis, superValue);
+            auto node = GetInstanceMetadata(env, jsThis);
+            SetInstanceMetadata(env, superValue, node);
+
+            int javaObjectID = -1;
+            objectManager->GetJavaObjectByJsObject(jsThis, &javaObjectID);
+            if (javaObjectID != -1) {
+                superValue = objectManager->GetOrCreateProxyWeak(javaObjectID, superValue);
+            }
+            napi_set_named_property(env, jsThis, PROP_KEY_SUPERVALUE, superValue);
+        }
+
+        return superValue;
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
+    NAPI_CALLBACK_BEGIN_VARGS()
+
+    try {
+        MetadataEntry *entry = nullptr;
+
+        auto callbackData = reinterpret_cast<MethodCallbackData *>(data);
+        auto initialCallbackData = reinterpret_cast<MethodCallbackData *>(data);
+
+        string *className;
+        auto &first = callbackData->candidates.front();
+        auto &methodName = first.getName();
+
+        while ((callbackData != nullptr) && (entry == nullptr)) {
+            auto &candidates = callbackData->candidates;
+
+            className = &callbackData->node->m_name;
+
+            // Iterates through all methods and finds the best match based on the number of arguments
+            auto found = false;
+            for (auto &c: candidates) {
+                found = (!c.isExtensionFunction && c.getParamCount() == argc) ||
+                        (c.isExtensionFunction && c.getParamCount() == argc + 1);
+                if (found) {
+                    if (c.isExtensionFunction) {
+                        className = &c.getDeclaringType();
+                    }
+                    entry = &c;
+                    DEBUG_WRITE("MetaDataEntry Method %s's signature is: %s",
+                                entry->getName().c_str(),
+                                entry->getSig().c_str());
+                    break;
+                }
+            }
+
+            // Iterates through the parent class's methods to find a good match
+            if (!found) {
+                callbackData = callbackData->parent;
+            }
+        }
+
+
+        if (argc == 0 && methodName == PROP_KEY_VALUEOF) {
+            return jsThis; 
+        } else {
+//            Runtime::GetRuntime(env)->clearPendingError();
+            bool isFromInterface = initialCallbackData->node->IsNodeTypeInterface();
+            napi_value result = CallbackHandlers::CallJavaMethod(env, jsThis, *className, methodName, entry,
+                                                    isFromInterface, first.isStatic, info,
+                                                    argc, argv.data());
+//            napi_value error;
+//            error = Runtime::GetRuntime(env)->getPendingError();
+//            if (error) {
+//                throw NativeScriptException(env, error);
+//            }
+            return result;
+        }
+
+    } catch (NativeScriptException &e) {
+        e.ReThrowToNapi(env);
+    } catch (std::exception e) {
+        stringstream ss;
+        ss << "Error: c++ exception: " << e.what() << endl;
+        NativeScriptException nsEx(ss.str());
+        nsEx.ReThrowToNapi(env);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToNapi(env);
+    }
+
+    return nullptr;
+}
+
+/**
+ * Compare class hierarchy in metadata with that at runtime. If a base class is missing
+ * at runtime, we must add all it's methods to the current class.
+ */
+bool
+MetadataNode::CheckClassHierarchy(JEnv &env, jclass currentClass, MetadataTreeNode *currentTreeNode,
+                                  MetadataTreeNode *baseTreeNode,
+                                  std::vector<MetadataTreeNode *> &skippedBaseTypes) {
+    auto shouldSkipBaseClass = false;
+    if ((currentClass != nullptr) && (baseTreeNode != currentTreeNode) &&
+        (baseTreeNode != nullptr) &&
+        (baseTreeNode->offsetValue > 0)) {
+        auto baseNode = GetOrCreateInternal(baseTreeNode);
+        auto baseClass = env.FindClass(baseNode->m_name);
+        if (baseClass != nullptr) {
+            auto isBaseClass = env.IsAssignableFrom(currentClass, baseClass) == JNI_TRUE;
+            if (!isBaseClass) {
+                skippedBaseTypes.push_back(baseTreeNode);
+                shouldSkipBaseClass = true;
+            }
+        }
+    }
+    return shouldSkipBaseClass;
+}
+
+void MetadataNode::SetMissingBaseMethods(
+        napi_env env, const std::vector<MetadataTreeNode *> &skippedBaseTypes,
+        const std::vector<MethodCallbackData *> &instanceMethodData,
+        napi_value constructor) {
+    for (auto treeNode: skippedBaseTypes) {
+        uint8_t *curPtr = s_metadataReader.GetValueData() + treeNode->offsetValue + 1;
+
+        auto nodeType = s_metadataReader.GetNodeType(treeNode);
+        auto curType = s_metadataReader.ReadTypeName(treeNode);
+        curPtr += sizeof(uint16_t /* baseClassId */);
+
+        if (s_metadataReader.IsNodeTypeInterface(nodeType)) {
+            curPtr += sizeof(uint8_t) + sizeof(uint32_t);
+        }
+
+        // Get candidates from instance methods metadata
+        auto instanceMethodCount = *reinterpret_cast<uint16_t *>(curPtr);
+        curPtr += sizeof(uint16_t);
+        MethodCallbackData *callbackData = nullptr;
+
+        for (auto i = 0; i < instanceMethodCount; i++) {
+            auto entry = MetadataReader::ReadInstanceMethodEntry(&curPtr);
+            auto &methodName = entry.getName();
+            auto isConstructor = methodName == "<init>";
+            if (isConstructor) {
+                continue;
+            }
+
+            callbackData = nullptr;
+            for (auto data: instanceMethodData) {
+                if (data->candidates.front().name == methodName) {
+                    callbackData = data;
+                    break;
+                }
+            }
+
+            if (callbackData == nullptr) {
+                callbackData = new MethodCallbackData(this);
+                MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
+                napi_value proto = napi_util::get_prototype(env, constructor);
+                napi_value method;
+                napi_create_function(env, methodName.c_str(), NAPI_AUTO_LENGTH, MethodCallback,
+                                     callbackData, &method);
+                napi_set_named_property(env, proto, methodName.c_str(), method);
+            }
+
+            bool foundSameSig = false;
+            for (auto &m: callbackData->candidates) {
+                foundSameSig = m.getSig() == entry.getSig();
+                if (foundSameSig) {
+                    break;
+                }
+            }
+
+            if (!foundSameSig) {
+                callbackData->candidates.push_back(std::move(entry));
+            }
+        }
+    }
+}
+
+void MetadataNode::BuildMetadata(const std::string &filesPath) {
+    s_metadataReader = MetadataBuilder::BuildMetadata(filesPath);
+}
+
+void MetadataNode::onDisposeEnv(napi_env env) {
+    {
+        auto it = s_metadata_node_cache.Get(env);
+        if (it != nullptr) {
+            for (const auto &entry: it->CtorFuncCache) {
+                if (entry.second.constructorFunction != nullptr) {
+                    napi_delete_reference(env, entry.second.constructorFunction);
+                }
+            }
+            it->CtorFuncCache.clear();
+
+            for (const auto &entry: it->ExtendedCtorFuncCache) {
+                if (entry.second.extendedCtorFunction != nullptr) {
+                    napi_delete_reference(env, entry.second.extendedCtorFunction);
+                }
+            }
+            it->ExtendedCtorFuncCache.clear();
+
+            for (const auto data: it->methodCallbackData) {
+                delete data;
+            }
+            it->methodCallbackData.clear();
+
+            for (const auto &entry: it->fieldCallbackData) {
+                delete entry;
+            }
+            it->fieldCallbackData.clear();
+
+            for (const auto data: it->propertyCallbackData) {
+                delete data;
+            }
+            it->propertyCallbackData.clear();
+
+            for (const auto data: it->extendedClassCallbackData) {
+                if (data->implementationObject != nullptr) {
+                    napi_delete_reference(env, data->implementationObject);
+                }
+                delete data;
+            }
+            it->extendedClassCallbackData.clear();
+        }
+        s_metadata_node_cache.Remove(env);
+        delete it;
+    }
+    {
+        auto it = s_arrayObjects.find(env);
+        if (it != s_arrayObjects.end()) {
+            if (it->second != nullptr) {
+                napi_delete_reference(env, it->second);
+            }
+            s_arrayObjects.erase(it);
+        }
+    }
+}
+
+
+string MetadataNode::TNS_PREFIX = "com/tns/gen/";
+MetadataReader MetadataNode::s_metadataReader;
+robin_hood::unordered_map<std::string, MetadataNode *> MetadataNode::s_name2NodeCache;
+robin_hood::unordered_map<std::string, MetadataTreeNode *> MetadataNode::s_name2TreeNodeCache;
+robin_hood::unordered_map<MetadataTreeNode *, MetadataNode *> MetadataNode::s_treeNode2NodeCache;
+tns::ConcurrentMap<napi_env, MetadataNode::MetadataNodeCache *> MetadataNode::s_metadata_node_cache;
+robin_hood::unordered_map<napi_env, napi_ref> MetadataNode::s_arrayObjects;
+
+bool MetadataNode::s_profilerEnabled = false;

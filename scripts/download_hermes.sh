@@ -2,7 +2,7 @@
 set -e
 source "$(dirname "$0")/build_utils.sh"
 
-HERMES_VERSION="build-f65ba225cfff"
+HERMES_VERSION="build-d4ee40ef0ede"
 HERMES_FRAMEWORK_ASSET="hermes-xcframework.zip"
 HERMES_HEADERS_ASSET="hermes-headers.tar.gz"
 HERMES_FRAMEWORK_URL="https://github.com/DjDeveloperr/build-hermes/releases/download/$HERMES_VERSION/$HERMES_FRAMEWORK_ASSET"

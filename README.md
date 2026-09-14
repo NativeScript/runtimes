@@ -14,9 +14,8 @@ The core backbone that powers [NativeScript](https://nativescript.org/) apps and
 - `NativeScript/`: The core C++ runtime source code handling FFI (Foreign Function Interface) operations and JS engine bindings.
 - `metadata-generator/`: Clang-based utility that parses C/Obj-C to generate the metadata consumed by the FFI
 - `packages/`: The NPM packages published from this repo (e.g., `@nativescript/ios`, `@nativescript/macos`, `@nativescript/visionos`, and specific engine combinations).
-- `examples/`: Sample JS/TS test beds demonstrating platform APIs (AppKit, Metal, SpriteKit, etc.) driven purely over the runtime FFI.
+- `platforms/apple/`: Apple platform project files, templates, tests, examples, and TKLiveSync sources.
 - `scripts/`: Shell and Node utilities for building frameworks, packaging runtimes, and driving CI/CD.
-- `TKLiveSync/`: Provides fast LiveSync capability and Hot Module Replacement (HMR) implementation.
 
 ## Development & Building
 

@@ -1,7 +1,7 @@
 #include "Utils.h"
 
 #include "JsV8InspectorClient.h"
-#include "ffi/napi/Util.h"
+#include "ffi/objc/napi/Util.h"
 
 using namespace v8;
 using namespace std;

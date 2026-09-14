@@ -45,12 +45,14 @@ void MDSignatureSerde::serialize(MDSignature *value, void *data) {
   auto returnTypeSize = typeInfoSerde.size(value->returnType);
   typeInfoSerde.serialize(value->returnType, data);
   MDTypeKind *data_kind = (MDTypeKind *)data;
+  uint8_t returnKind = static_cast<uint8_t>(value->returnType->kind);
   if (value->arguments.size() > 0) {
-    data_kind[0] = (MDTypeKind)(value->returnType->kind | mdTypeFlagNext);
+    returnKind |= static_cast<uint8_t>(mdTypeFlagNext);
   }
   if (value->isVariadic) {
-    data_kind[0] = (MDTypeKind)(value->returnType->kind | mdTypeFlagVariadic);
+    returnKind |= static_cast<uint8_t>(mdTypeFlagVariadic);
   }
+  data_kind[0] = static_cast<MDTypeKind>(returnKind);
   ptr_add(&data, returnTypeSize);
   // Arguments
   size_t argumentsSize = value->arguments.size();
@@ -61,7 +63,9 @@ void MDSignatureSerde::serialize(MDSignature *value, void *data) {
     if (i != argumentsSize - 1) {
       // If this is not the last argument, we'll write the next flag.
       MDTypeKind *data_kind = (MDTypeKind *)data;
-      data_kind[0] = (MDTypeKind)(arg->kind | mdTypeFlagNext);
+      data_kind[0] = static_cast<MDTypeKind>(
+          static_cast<uint8_t>(arg->kind) |
+          static_cast<uint8_t>(mdTypeFlagNext));
     }
     ptr_add(&data, argTypeSize);
   }

@@ -14,8 +14,8 @@
 #include <sstream>
 
 #include "JsV8InspectorClient.h"
-#include "runtime/NativeScriptException.h"
-#include "Runtime.h"
+#include "runtime/apple/NativeScriptException.h"
+#include "runtime/apple/Runtime.h"
 
 namespace tns {
 namespace inspector {

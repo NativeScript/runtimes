@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "runtime/RuntimeConfig.h"
+#include "runtime/apple/RuntimeConfig.h"
 
 typedef napi_value (*napi_module_init)(napi_env env, napi_value exports);
 
@@ -23,7 +23,12 @@ namespace v8impl {
 namespace {
 
 // Cache for package.json "type" field lookups
-std::unordered_map<std::string, bool> g_packageTypeCache;
+thread_local std::unordered_map<std::string, bool> g_packageTypeCache;
+
+using ModuleRegistry =
+    std::unordered_map<std::string, v8::Global<v8::Module>>;
+thread_local std::unordered_map<v8::Isolate*, ModuleRegistry>
+    g_moduleRegistries;
 
 // Strip shebang line from source code (e.g., #!/usr/bin/env node)
 std::string StripShebang(const std::string& source) {
@@ -111,8 +116,12 @@ bool ShouldTreatAsESModule(const std::string& path) {
 
 }  // namespace
 
-// Global registry for ES modules
-std::unordered_map<std::string, v8::Global<v8::Module>> g_moduleRegistry;
+void RegisterESModule(v8::Isolate* isolate, const std::string& moduleId,
+                      v8::Local<v8::Module> module) {
+  auto& registered = g_moduleRegistries[isolate][moduleId];
+  registered.Reset();
+  registered.Reset(isolate, module);
+}
 
 std::string NormalizeModulePath(const std::filesystem::path& path) {
   std::error_code ec;
@@ -133,7 +142,11 @@ std::string NormalizeModulePath(const std::filesystem::path& path) {
 
 std::string GetModulePathFromRegistry(v8::Isolate* isolate,
                                       v8::Local<v8::Module> module) {
-  for (auto& kv : g_moduleRegistry) {
+  auto registry = g_moduleRegistries.find(isolate);
+  if (registry == g_moduleRegistries.end()) {
+    return "";
+  }
+  for (auto& kv : registry->second) {
     v8::Local<v8::Module> registered = kv.second.Get(isolate);
     if (registered == module) {
       return kv.first;
@@ -558,10 +571,11 @@ std::string ResolveESModulePath(v8::Isolate* isolate,
 v8::MaybeLocal<v8::Module> CompileESModule(v8::Isolate* isolate,
                                            const std::string& path) {
   const std::string absPath = NormalizeModulePath(path);
+  auto& moduleRegistry = g_moduleRegistries[isolate];
 
   // Check if already compiled
-  auto it = g_moduleRegistry.find(absPath);
-  if (it != g_moduleRegistry.end()) {
+  auto it = moduleRegistry.find(absPath);
+  if (it != moduleRegistry.end()) {
     v8::Local<v8::Module> existing = it->second.Get(isolate);
     return v8::MaybeLocal<v8::Module>(existing);
   }
@@ -598,7 +612,7 @@ v8::MaybeLocal<v8::Module> CompileESModule(v8::Isolate* isolate,
   }
 
   // Register in global registry with absolute path
-  g_moduleRegistry[absPath].Reset(isolate, module);
+  RegisterESModule(isolate, absPath, module);
 
   return v8::MaybeLocal<v8::Module>(module);
 }
@@ -606,8 +620,9 @@ v8::MaybeLocal<v8::Module> CompileESModule(v8::Isolate* isolate,
 v8::MaybeLocal<v8::Module> CompileVirtualESModule(v8::Isolate* isolate,
                                                   const std::string& moduleId,
                                                   const std::string& source) {
-  auto it = g_moduleRegistry.find(moduleId);
-  if (it != g_moduleRegistry.end()) {
+  auto& moduleRegistry = g_moduleRegistries[isolate];
+  auto it = moduleRegistry.find(moduleId);
+  if (it != moduleRegistry.end()) {
     v8::Local<v8::Module> existing = it->second.Get(isolate);
     return v8::MaybeLocal<v8::Module>(existing);
   }
@@ -634,7 +649,7 @@ v8::MaybeLocal<v8::Module> CompileVirtualESModule(v8::Isolate* isolate,
     return v8::MaybeLocal<v8::Module>();
   }
 
-  g_moduleRegistry[moduleId].Reset(isolate, module);
+  RegisterESModule(isolate, moduleId, module);
   return v8::MaybeLocal<v8::Module>(module);
 }
 
@@ -901,13 +916,13 @@ void InitializeESModuleSystem(v8::Isolate* isolate) {
 }
 
 void CleanupESModuleSystem(v8::Isolate* isolate) {
-  // Reset all Global handles before V8 isolate cleanup
-  for (auto& kv : g_moduleRegistry) {
-    kv.second.Reset();
+  auto registry = g_moduleRegistries.find(isolate);
+  if (registry != g_moduleRegistries.end()) {
+    for (auto& kv : registry->second) {
+      kv.second.Reset();
+    }
+    g_moduleRegistries.erase(registry);
   }
-
-  // Clear the registry
-  g_moduleRegistry.clear();
 
   // Clear the package.json type cache
   g_packageTypeCache.clear();

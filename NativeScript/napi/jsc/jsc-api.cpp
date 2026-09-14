@@ -1,4 +1,5 @@
 #include "jsc-api.h"
+#include "../common/jsc_type_tag.h"
 
 #include <objc/runtime.h>
 
@@ -730,7 +731,7 @@ class BaseInfoT : public NativeInfo {
  public:
   static const NativeType StaticType = TType;
 
-  ~BaseInfoT() { JSClassRelease(_class); }
+  ~BaseInfoT() = default;
 
   napi_env Env() const { return _env; }
 
@@ -743,12 +744,7 @@ class BaseInfoT : public NativeInfo {
 
  protected:
   BaseInfoT(napi_env env, const char* className)
-      : NativeInfo{TType}, _env{env} {
-    JSClassDefinition definition{kJSClassDefinitionEmpty};
-    definition.className = className;
-    definition.finalize = Finalize;
-    _class = JSClassCreate(&definition);
-  }
+      : NativeInfo{TType}, _env{env}, _class{SharedClass(className)} {}
 
   // JSObjectFinalizeCallback
   static void Finalize(JSObjectRef object) {
@@ -758,6 +754,22 @@ class BaseInfoT : public NativeInfo {
       finalizer(info);
     }
     delete info;
+  }
+
+  static JSClassRef SharedClass(const char* className) {
+    struct SharedClassHolder {
+      explicit SharedClassHolder(const char* name) {
+        JSClassDefinition definition{kJSClassDefinitionEmpty};
+        definition.className = name;
+        definition.finalize = BaseInfoT::Finalize;
+        value = JSClassCreate(&definition);
+      }
+      ~SharedClassHolder() { JSClassRelease(value); }
+
+      JSClassRef value = nullptr;
+    };
+    static SharedClassHolder sharedClass(className);
+    return sharedClass.value;
   }
 
   napi_env _env;
@@ -2163,6 +2175,21 @@ napi_status napi_wrap(napi_env env, napi_value js_object, void* native_object,
   }
 
   return napi_ok;
+}
+
+napi_status napi_type_tag_object(napi_env env, napi_value object,
+                                 const napi_type_tag* type_tag) {
+  napi_status status =
+      nativescript::napi::jsc::TypeTagObject(env, object, type_tag);
+  return env == nullptr ? status : napi_set_last_error(env, status);
+}
+
+napi_status napi_check_object_type_tag(napi_env env, napi_value object,
+                                       const napi_type_tag* type_tag,
+                                       bool* result) {
+  napi_status status = nativescript::napi::jsc::CheckObjectTypeTag(
+      env, object, type_tag, result);
+  return env == nullptr ? status : napi_set_last_error(env, status);
 }
 
 napi_status napi_unwrap(napi_env env, napi_value js_object, void** result) {

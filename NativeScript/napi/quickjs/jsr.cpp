@@ -2,7 +2,7 @@
 #include "quicks-runtime.h"
 
 JSR::JSR() = default;
-tns::SimpleMap<napi_env, JSR *> JSR::env_to_jsr_cache;
+tns::ConcurrentMap<napi_env, JSR *> JSR::env_to_jsr_cache;
 
 napi_status js_create_runtime(napi_runtime *runtime) {
     return qjs_create_runtime(runtime);
@@ -32,9 +32,9 @@ napi_status js_unlock_env(napi_env env) {
 
 napi_status js_free_napi_env(napi_env env) {
     JSR* jsr = JSR::env_to_jsr_cache.Get(env);
-    delete jsr;
-    JSR::env_to_jsr_cache.Remove(env);
     js_run_env_cleanup_hooks(env);
+    JSR::env_to_jsr_cache.Remove(env);
+    delete jsr;
     return qjs_free_napi_env(env);
 }
 

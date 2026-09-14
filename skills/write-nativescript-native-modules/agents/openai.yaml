@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write NativeScript Native Modules"
+  short_description: "Port UIKit native modules to pure TypeScript with NativeScript."
+  default_prompt: "Port this React Native iOS native module to a drop-in pure TypeScript NativeScript implementation, documenting any generic runtime gaps."

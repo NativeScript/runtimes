@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Metadata.h"
+#include "MetadataFilter.h"
 #include "Util.h"
 #include "clang-c/Index.h"
 
@@ -377,6 +378,7 @@ class MetadataFactory {
   void processProtocolRefs();
 
   std::unordered_set<std::string> includePaths;
+  MetadataFilter metadataFilter;
 
   std::unordered_map<std::string, VariableDecl> variables;
   std::unordered_map<std::string, EnumDecl> enums;

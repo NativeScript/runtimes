@@ -11,7 +11,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/napi-ios",
+    "url": "https://github.com/NativeScript/runtimes",
     "directory": "packages/react-native"
   },
   "author": {
@@ -29,6 +29,7 @@
   "files": [
     "app.plugin.js",
     "babel-plugin.js",
+    "metro-config.js",
     "cli",
     "examples",
     "plugin",
@@ -36,7 +37,7 @@
     "types",
     "ios",
     "metadata",
-    "native-api-jsi",
+    "native-api",
     "NativeScriptNativeApi.podspec",
     "README.md",
     "LICENSE"
@@ -44,12 +45,19 @@
   "peerDependencies": {
     "expo": "*",
     "react": "*",
-    "react-native": ">=0.79"
+    "react-native": ">=0.79",
+    "react-native-worklets": ">=0.8.0"
   },
   "peerDependenciesMeta": {
     "expo": {
       "optional": true
+    },
+    "react-native-worklets": {
+      "optional": true
     }
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.0"
   },
   "codegenConfig": {
     "name": "NativeScriptNativeApiSpec",
@@ -59,9 +67,6 @@
       "javaPackageName": "org.nativescript.nativeapi"
     },
     "ios": {
-      "componentProvider": {
-        "NativeScriptUIView": "NativeScriptUIViewComponentView"
-      },
       "modulesProvider": {
         "NativeScriptNativeApi": "NativeScriptNativeApiModuleProvider"
       }

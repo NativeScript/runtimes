@@ -19,13 +19,19 @@ class JSR {
  public:
   JSR();
   v8::Isolate* isolate;
-  static bool s_mainThreadInitialized;
   static v8::Platform* platform;
 
   std::recursive_mutex js_mutex;
   void lock() { js_mutex.lock(); }
   void unlock() { js_mutex.unlock(); }
 
+  static JSR* ForEnv(napi_env env);
+  static void RegisterEnv(napi_env env, JSR* runtime);
+  static void UnregisterEnv(napi_env env);
+
+ private:
+  static std::once_flag initialization_once;
+  static std::mutex env_cache_mutex;
   static std::unordered_map<napi_env, JSR*> env_to_jsr_cache;
 };
 

@@ -33,7 +33,7 @@ if [ -n "$PACKAGE_NAME_OVERRIDE" ] || [ -n "$PACKAGE_VERSION_OVERRIDE" ]; then
     mv "$TMP_FILE" "$STAGING_DIR/package.json"
 fi
 
-cp -R "./templates/ios/." "$STAGING_DIR/framework"
+cp -R "./platforms/apple/templates/ios/." "$STAGING_DIR/framework"
 
 cp -R "dist/NativeScript.xcframework" "$STAGING_DIR/framework/internal"
 cp -R "dist/TKLiveSync.xcframework" "$STAGING_DIR/framework/internal"

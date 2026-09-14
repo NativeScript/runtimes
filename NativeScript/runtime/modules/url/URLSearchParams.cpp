@@ -49,7 +49,7 @@ bool EnsureConstructorThis(napi_env env, const char* constructorName,
 }
 
 URLSearchParams* GetInstance(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   napi_value jsThis;
   void* data;
   NAPI_GUARD(napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, &data)) {
@@ -78,7 +78,7 @@ void URLSearchParams::Reset(url_search_params params, url_aggregator* parent) {
 
 napi_value URLSearchParams::Create(napi_env env, ada::url_search_params params,
                                    ada::url_aggregator* parent) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
 
   napi_value global;
   NAPI_GUARD(napi_get_global(env, &global)) { return nullptr; }
@@ -364,7 +364,7 @@ napi_value URLSearchParams::Set(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::GetSize(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -379,7 +379,7 @@ napi_value URLSearchParams::GetSize(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::Sort(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -389,7 +389,7 @@ napi_value URLSearchParams::Sort(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::ToString(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -405,7 +405,7 @@ napi_value URLSearchParams::ToString(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::Keys(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -436,7 +436,7 @@ napi_value URLSearchParams::Keys(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::Values(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -469,7 +469,7 @@ napi_value URLSearchParams::Values(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::Entries(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -555,7 +555,7 @@ napi_value URLSearchParams::ForEach(napi_env env, napi_callback_info info) {
 }
 
 void URLSearchParams::Init(napi_env env, napi_value global) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   napi_value ctor;
   static const int prop_count = 13;
   napi_property_descriptor properties[prop_count] = {

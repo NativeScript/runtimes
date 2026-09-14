@@ -1,0 +1,9 @@
+# Android engine and test binaries are required build inputs, but must never
+# become ordinary Git blobs. Keep the repository history source-only while
+# allowing a full checkout to materialize the existing test environment.
+platforms/android/**/*.a filter=lfs diff=lfs merge=lfs -text
+platforms/android/**/*.aar filter=lfs diff=lfs merge=lfs -text
+platforms/android/**/*.exe filter=lfs diff=lfs merge=lfs -text
+platforms/android/**/*.jar filter=lfs diff=lfs merge=lfs -text
+platforms/android/**/*.so filter=lfs diff=lfs merge=lfs -text
+platforms/android/tools/astyle filter=lfs diff=lfs merge=lfs -text

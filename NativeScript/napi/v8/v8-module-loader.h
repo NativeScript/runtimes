@@ -2,14 +2,13 @@
 #define V8_MODULE_LOADER_H_
 
 #include <string>
-#include <unordered_map>
 #include "js_native_api.h"
 #include "v8.h"
 
 namespace v8impl {
 
-// Global registry for ES modules
-extern std::unordered_map<std::string, v8::Global<v8::Module>> g_moduleRegistry;
+void RegisterESModule(v8::Isolate* isolate, const std::string& moduleId,
+                      v8::Local<v8::Module> module);
 
 // ES Module callbacks for V8
 v8::MaybeLocal<v8::Module> ResolveModuleCallback(

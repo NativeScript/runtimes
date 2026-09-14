@@ -23,6 +23,9 @@ jobs:
       - name: Check FFI backend boundaries
         run: npm run check:ffi-boundaries
 
+      - name: Test React Native package
+        run: npm run test:react-native
+
       - name: Download V8
         run: ./scripts/download_v8.sh
 
@@ -33,7 +36,7 @@ jobs:
         run: npm run build-libffi
 
       - name: Build metadata generator
-        run: npm run build-metagen
+        run: METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen
 
       - name: Generate macOS metadata
         run: npm run metagen macos
@@ -52,6 +55,126 @@ jobs:
           IOS_BUILD_TIMEOUT_MS: "600000"
           IOS_TEST_TIMEOUT_MS: "600000"
           IOS_TEST_INACTIVITY_TIMEOUT_MS: "180000"
+          IOS_LOG_JUNIT: "1"
           IOS_TEST_VERBOSE_SPECS: "1"
           IOS_SIMCTL_QUERY_TIMEOUT_MS: "10000"
         run: npm run test:ios
+
+  engine-tests:
+    name: macOS tests (${{ matrix.engine }})
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [hermes, quickjs, jsc]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install libffi build tools
+        run: brew install autoconf automake libtool texinfo
+
+      - name: Build libffi
+        run: npm run build-libffi
+
+      - name: Build metadata generator
+        run: METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen
+
+      - name: Generate macOS metadata
+        run: npm run metagen macos
+
+      - name: Run macOS test suite
+        env:
+          MACOS_COMMAND_TIMEOUT_MS: "1200000"
+          MACOS_LOG_JUNIT: "1"
+          MACOS_TEST_ENGINE: ${{ matrix.engine }}
+          MACOS_TEST_INACTIVITY_TIMEOUT_MS: "180000"
+          MACOS_TEST_TIMEOUT_MS: "600000"
+          MACOS_TEST_VERBOSE_SPECS: "1"
+        run: npm run test:macos -- ./build/test-results/macos-${{ matrix.engine }}-junit.xml
+
+      - name: Run iOS test suite
+        env:
+          IOS_BUILD_TIMEOUT_MS: "1200000"
+          IOS_LOG_JUNIT: "1"
+          IOS_SIMCTL_QUERY_TIMEOUT_MS: "10000"
+          IOS_TEST_ENGINE: ${{ matrix.engine }}
+          IOS_TEST_INACTIVITY_TIMEOUT_MS: "180000"
+          IOS_TEST_TIMEOUT_MS: "600000"
+          IOS_TEST_VERBOSE_SPECS: "1"
+        run: npm run test:ios -- ./build/test-results/ios-${{ matrix.engine }}-junit.xml
+
+  performance:
+    name: Performance (${{ matrix.engine }})
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [v8, hermes, quickjs, jsc]
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+      ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: 'recursive'
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install libffi build tools
+        run: brew install autoconf automake libtool texinfo
+
+      - name: Build shared dependencies
+        run: |
+          npm run build-libffi
+          METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen
+          npm run metagen macos
+
+      - name: Build candidate CLI
+        run: |
+          ./scripts/build_nativescript.sh --no-iphone --no-simulator --no-macos --macos-cli --${ENGINE}
+          cp ./dist/nsr "${RUNNER_TEMP}/nsr-candidate-${ENGINE}"
+          cp "./metadata-generator/metadata/metadata.macos.$(uname -m).nsmd" "${RUNNER_TEMP}/metadata-candidate-${ENGINE}.nsmd"
+
+      - name: Build base CLI
+        run: |
+          git checkout --detach "${BASE_SHA}"
+          git submodule update --init --recursive
+          npm install
+          npm run build-libffi
+          METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen
+          npm run metagen macos
+          ./scripts/build_nativescript.sh --no-iphone --no-simulator --no-macos --macos-cli --${ENGINE}
+          cp ./dist/nsr "${RUNNER_TEMP}/nsr-baseline-${ENGINE}"
+          cp "./metadata-generator/metadata/metadata.macos.$(uname -m).nsmd" "${RUNNER_TEMP}/metadata-baseline-${ENGINE}.nsmd"
+          git checkout --detach "${CANDIDATE_SHA}"
+          git submodule update --init --recursive
+
+      - name: Compare Objective-C dispatch performance
+        run: |
+          npm run benchmark:objc-dispatch:cli:compare -- \
+            --engine "${ENGINE}" \
+            --baseline-binary "${RUNNER_TEMP}/nsr-baseline-${ENGINE}" \
+            --baseline-metadata "${RUNNER_TEMP}/metadata-baseline-${ENGINE}.nsmd" \
+            --candidate-binary "${RUNNER_TEMP}/nsr-candidate-${ENGINE}" \
+            --candidate-metadata "${RUNNER_TEMP}/metadata-candidate-${ENGINE}.nsmd" \
+            --output "./build/benchmarks/objc-dispatch-${ENGINE}.json"

@@ -25,11 +25,6 @@ struct SignatureUse {
   uint8_t flags;
 };
 
-enum class HermesDirectReturnCallSite {
-  FastCallback,
-  Frame,
-};
-
 using SignatureMap = std::unordered_map<MDSectionOffset, MDSignature*>;
 
 uint64_t composeDispatchId(uint64_t signatureHash, DispatchKind kind,
@@ -40,8 +35,8 @@ uint64_t signatureHash(const MDSignature* signature,
                        std::string* canonicalKeyOut);
 bool mapTypeToCpp(const MDTypeInfo* type, std::string* out, bool allowVoid);
 bool isSignatureSupported(const MDSignature* signature);
-bool isFastDirectNapiKind(MDTypeKind kind);
-bool isFastManagedNapiKind(MDTypeKind kind);
+bool isFastPrimitiveDispatchKind(MDTypeKind kind);
+bool isFastReferenceDispatchKind(MDTypeKind kind);
 bool argKindMayNeedCleanup(MDTypeKind kind);
 std::string toHexLiteral(uint64_t value);
 std::string toBase36(size_t value);
@@ -56,41 +51,16 @@ void collectMethodUses(const std::vector<MDMember*>& members,
 
 std::string makeNapiWrapperName(DispatchKind kind, size_t index);
 std::string makePreparedWrapperName(DispatchKind kind, size_t index);
+std::string makeGsdWrapperName(size_t index);
 void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
                       const std::string& wrapperName,
                       const MDSignature* signature);
 void writePreparedWrapper(std::ostringstream& out, DispatchKind kind,
                           const std::string& wrapperName,
                           const MDSignature* signature);
-
-std::string makeEngineDirectWrapperName(DispatchKind kind, size_t index);
-void writeEngineDirectArgConversion(std::ostringstream& out,
-                                    const MDTypeInfo* type, size_t index,
-                                    const std::string& valueExpr);
-void writeEngineDirectConverterMacros(std::ostringstream& out);
-void writeHermesEngineDirectConverterMacros(std::ostringstream& out);
-void writeEngineDirectConverterUndefs(std::ostringstream& out);
-void writeEngineDirectWrapper(std::ostringstream& out, DispatchKind kind,
-                              const std::string& wrapperName,
-                              const MDSignature* signature);
-
-std::string makeHermesDirectReturnWrapperName(DispatchKind kind, size_t index);
-std::string makeHermesFrameDirectReturnWrapperName(DispatchKind kind,
-                                                   size_t index);
-bool canUseHermesDirectReturnWrapper(DispatchKind kind,
-                                     const MDSignature* signature,
-                                     HermesDirectReturnCallSite callSite);
-void writeHermesDirectReturnWrapper(std::ostringstream& out, DispatchKind kind,
-                                    const std::string& wrapperName,
-                                    const MDSignature* signature);
-void writeHermesFrameDirectReturnWrapper(std::ostringstream& out,
-                                         DispatchKind kind,
-                                         const std::string& wrapperName,
-                                         const MDSignature* signature);
-
-std::string makeV8WrapperName(DispatchKind kind, size_t index);
-void writeV8Wrapper(std::ostringstream& out, DispatchKind kind,
-                    const std::string& wrapperName,
-                    const MDSignature* signature);
+void writeGsdWrapper(std::ostringstream& out, const std::string& wrapperName,
+                     const MDSignature* signature);
+bool isGsdSignatureSupported(const MDSignature* signature);
+std::string makeGsdWrapperShapeKey(const MDSignature* signature);
 
 }  // namespace metagen::signature_dispatch

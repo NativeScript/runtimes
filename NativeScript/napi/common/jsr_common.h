@@ -30,6 +30,11 @@ napi_status js_get_runtime_version(napi_env env, napi_value* version);
 
 // Invoked by engine-specific env teardown to execute registered node-api
 // cleanup hooks for the environment before it is released.
+using js_env_cleanup_hook = void (*)(void*);
+napi_status js_add_env_cleanup_hook(napi_env env, js_env_cleanup_hook hook,
+                                    void* data);
+napi_status js_remove_env_cleanup_hook(napi_env env, js_env_cleanup_hook hook,
+                                       void* data);
 void js_run_env_cleanup_hooks(napi_env env);
 
 #endif //TEST_APP_JSR_COMMON_H

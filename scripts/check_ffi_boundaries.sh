@@ -2,29 +2,57 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NAPI_ENGINE_DIR="$ROOT_DIR/NativeScript/ffi/napi/engine"
-DIRECT_DIRS=(
-  "$ROOT_DIR/NativeScript/ffi/hermes"
-  "$ROOT_DIR/NativeScript/ffi/v8"
-  "$ROOT_DIR/NativeScript/ffi/jsc"
-  "$ROOT_DIR/NativeScript/ffi/quickjs"
-  "$ROOT_DIR/NativeScript/ffi/shared"
-  "$ROOT_DIR/packages/react-native/native-api-jsi"
-)
+NAPI_ENGINE_DIR="$ROOT_DIR/NativeScript/ffi/objc/napi/engine"
+FFI_DIR="$ROOT_DIR/NativeScript/ffi"
+OBJC_FFI_DIR="$FFI_DIR/objc"
+JNI_FFI_DIR="$FFI_DIR/jni"
+JNI_NAPI_DIR="$JNI_FFI_DIR/napi"
+SHARED_DIR="$OBJC_FFI_DIR/shared"
+NAPI_DIR="$OBJC_FFI_DIR/napi"
+HERMES_DIR="$OBJC_FFI_DIR/hermes"
+V8_DIR="$OBJC_FFI_DIR/v8"
+JSC_DIR="$OBJC_FFI_DIR/jsc"
+QUICKJS_DIR="$OBJC_FFI_DIR/quickjs"
 
 if [ -d "$NAPI_ENGINE_DIR" ] && find "$NAPI_ENGINE_DIR" -type f | grep -q .; then
-  echo "ffi/napi must remain a pure Node-API backend; do not add ffi/napi/engine." >&2
+  echo "ffi/objc/napi must remain a pure Node-API backend; do not add ffi/objc/napi/engine." >&2
   exit 1
 fi
 
-EXISTING_DIRECT_DIRS=()
-for dir in "${DIRECT_DIRS[@]}"; do
-  if [ -d "$dir" ]; then
-    EXISTING_DIRECT_DIRS+=("$dir")
+FORBIDDEN_DIRS=(
+  "$FFI_DIR/direct"
+  "$FFI_DIR/engine"
+  "$OBJC_FFI_DIR/direct"
+  "$OBJC_FFI_DIR/engine"
+  "$JNI_FFI_DIR/direct"
+  "$JNI_FFI_DIR/engine"
+  "$JNI_NAPI_DIR/engine"
+  "$SHARED_DIR/jsi"
+)
+
+for dir in "${FORBIDDEN_DIRS[@]}"; do
+  if [ -e "$dir" ]; then
+    echo "${dir#$ROOT_DIR/} is not an allowed FFI layer." >&2
+    exit 1
   fi
 done
 
-if [ "${#EXISTING_DIRECT_DIRS[@]}" -eq 0 ]; then
+ENGINE_AND_SHARED_DIRS=(
+  "$SHARED_DIR"
+  "$HERMES_DIR"
+  "$V8_DIR"
+  "$JSC_DIR"
+  "$QUICKJS_DIR"
+)
+
+EXISTING_ENGINE_AND_SHARED_DIRS=()
+for dir in "${ENGINE_AND_SHARED_DIRS[@]}"; do
+  if [ -d "$dir" ]; then
+    EXISTING_ENGINE_AND_SHARED_DIRS+=("$dir")
+  fi
+done
+
+if [ "${#EXISTING_ENGINE_AND_SHARED_DIRS[@]}" -eq 0 ]; then
   exit 0
 fi
 
@@ -33,7 +61,9 @@ search_sources() {
   shift
 
   if command -v rg >/dev/null 2>&1; then
-    rg -n "$pattern" "$@" -g '*.{h,hh,hpp,c,cc,cpp,m,mm,inc}'
+    rg -n "$pattern" "$@" -g '*.{h,hh,hpp,c,cc,cpp,m,mm,inc}' \
+      -g '!GeneratedSignatureDispatch.inc' \
+      -g '!GeneratedGsdSignatureDispatch.inc'
     return
   fi
 
@@ -48,17 +78,95 @@ search_sources() {
       -name '*.m' -o \
       -name '*.mm' -o \
       -name '*.inc' \
-    \) -print0 | xargs -0 grep -nE "$pattern"
+    \) ! -name 'GeneratedSignatureDispatch.inc' \
+       ! -name 'GeneratedGsdSignatureDispatch.inc' -print0 | xargs -0 grep -nE "$pattern"
 }
 
 if search_sources '(^|[^[:alnum:]_])(napi_|napi_env|napi_value|js_native_api|node_api)($|[^[:alnum:]_])' \
-  "${EXISTING_DIRECT_DIRS[@]}"; then
-  echo "Node-API symbols are not allowed in shared or direct engine FFI folders." >&2
+  "${EXISTING_ENGINE_AND_SHARED_DIRS[@]}"; then
+  echo "Node-API symbols are not allowed in shared or engine FFI folders." >&2
   exit 1
 fi
 
-if search_sources '(^|[^[:alnum:]_])(EngineDirect|FastNative|HermesFast|V8Fast|JSCFast|QuickJSFast)($|[^[:alnum:]_])' \
-  "$ROOT_DIR/NativeScript/ffi/napi" | grep -v 'GeneratedSignatureDispatch.inc'; then
-  echo "Direct-engine FFI code is not allowed in ffi/napi." >&2
+ENGINE_NEUTRAL_DIRS=()
+for dir in "$SHARED_DIR"; do
+  if [ -d "$dir" ]; then
+    ENGINE_NEUTRAL_DIRS+=("$dir")
+  fi
+done
+
+if [ "${#ENGINE_NEUTRAL_DIRS[@]}" -gt 0 ] &&
+  search_sources '(^|[^[:alnum:]_])(napi_|napi_env|napi_value|js_native_api|node_api|facebook::jsi|v8::|JSContextRef|JSValueRef|JSContext|JSValue|JSRuntime|quickjs)($|[^[:alnum:]_])|(<jsi/|<v8|JavaScriptCore|quickjs\.h)' \
+    "${ENGINE_NEUTRAL_DIRS[@]}"; then
+  echo "ffi/objc/shared must remain engine-neutral; JS engine APIs are not allowed there." >&2
   exit 1
+fi
+
+check_no_backend_dependency() {
+  local owner_name="$1"
+  local owner_dir="$2"
+  shift 2
+
+  if [ ! -d "$owner_dir" ]; then
+    return
+  fi
+
+  local pattern=""
+  local backend
+  for backend in "$@"; do
+    if [ -n "$pattern" ]; then
+      pattern="$pattern|"
+    fi
+    pattern="${pattern}(ffi/objc/${backend}/|\"${backend}/)"
+  done
+
+  if [ -n "$pattern" ] && search_sources "$pattern" "$owner_dir"; then
+    echo "ffi/objc/$owner_name must not include another FFI backend's private files." >&2
+    exit 1
+  fi
+}
+
+check_no_backend_dependency "napi" "$NAPI_DIR" hermes v8 jsc quickjs
+check_no_backend_dependency "hermes" "$HERMES_DIR" napi v8 jsc quickjs
+check_no_backend_dependency "v8" "$V8_DIR" napi hermes jsc quickjs
+check_no_backend_dependency "jsc" "$JSC_DIR" napi hermes v8 quickjs
+check_no_backend_dependency "quickjs" "$QUICKJS_DIR" napi hermes v8 jsc
+
+NON_HERMES_JSI_DIRS=()
+for dir in "$SHARED_DIR" "$NAPI_DIR" "$V8_DIR" "$JSC_DIR" "$QUICKJS_DIR"; do
+  if [ -d "$dir" ]; then
+    NON_HERMES_JSI_DIRS+=("$dir")
+  fi
+done
+
+if [ "${#NON_HERMES_JSI_DIRS[@]}" -gt 0 ] &&
+  search_sources '(NativeApiJsi|facebook::jsi|<jsi/|#include[[:space:]]+"jsi/)' \
+    "${NON_HERMES_JSI_DIRS[@]}"; then
+  echo "JSI is Hermes-only; shared, V8, JSC, and QuickJS FFI code must not reference NativeApiJsi or JSI APIs." >&2
+  exit 1
+fi
+
+if search_sources '(^|[^[:alnum:]_])(EngineDispatch|FastNative|HermesFast|V8Fast|JSCFast|QuickJSFast)($|[^[:alnum:]_])' \
+  "$ROOT_DIR/NativeScript/ffi/objc/napi"; then
+  echo "Engine FFI code is not allowed in ffi/objc/napi." >&2
+  exit 1
+fi
+
+if [ -d "$JNI_NAPI_DIR" ] &&
+  search_sources '(^|[^[:alnum:]_])(facebook::jsi|v8::|JSContextRef|JSValueRef|JSContext|JSValue|JSRuntime|quickjs)($|[^[:alnum:]_])|(<jsi/|#include[[:space:]]+"jsi/|<v8|JavaScriptCore|quickjs\.h|hermes/)' \
+    "$JNI_NAPI_DIR"; then
+  echo "ffi/jni/napi must remain a pure Node-API backend until a JNI engine backend is added." >&2
+  exit 1
+fi
+
+if command -v rg >/dev/null 2>&1; then
+  STALE_FFI_PATTERN='NS_FFI_BACKEND=''engine|--ffi-''engine|native-api-''jsi|ffi/(direct|engine)|ffi/objc/(direct|engine|shared/jsi)'
+  if rg -n "$STALE_FFI_PATTERN" \
+    "$ROOT_DIR/NativeScript" "$ROOT_DIR/scripts" "$ROOT_DIR/packages" \
+    "$ROOT_DIR/metadata-generator" "$ROOT_DIR/platforms/apple/benchmarks" \
+    -g '!GeneratedSignatureDispatch.inc' \
+    -g '!GeneratedGsdSignatureDispatch.inc'; then
+    echo "Stale FFI layer names are not allowed." >&2
+    exit 1
+  fi
 fi

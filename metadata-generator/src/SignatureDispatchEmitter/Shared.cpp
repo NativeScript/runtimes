@@ -364,7 +364,7 @@ std::string toBase36(size_t value) {
   return stream.str();
 }
 
-bool isFastDirectNapiKind(MDTypeKind kind) {
+bool isFastPrimitiveDispatchKind(MDTypeKind kind) {
   switch (kind) {
     case mdTypeBool:
     case mdTypeChar:
@@ -386,7 +386,7 @@ bool isFastDirectNapiKind(MDTypeKind kind) {
   }
 }
 
-bool isFastManagedNapiKind(MDTypeKind kind) {
+bool isFastReferenceDispatchKind(MDTypeKind kind) {
   switch (kind) {
     case mdTypeAnyObject:
     case mdTypeProtocolObject:
@@ -413,7 +413,7 @@ bool argKindMayNeedCleanup(MDTypeKind kind) {
     case mdTypeSelector:
       return false;
     default:
-      return !isFastDirectNapiKind(kind);
+      return !isFastPrimitiveDispatchKind(kind);
   }
 }
 
@@ -436,9 +436,9 @@ std::string makeWrapperShapeKey(DispatchKind kind,
       return {};
     }
 
-    if (isFastDirectNapiKind(arg->kind)) {
+    if (isFastPrimitiveDispatchKind(arg->kind)) {
       key << "F" << static_cast<int>(arg->kind);
-    } else if (isFastManagedNapiKind(arg->kind)) {
+    } else if (isFastReferenceDispatchKind(arg->kind)) {
       key << "H" << static_cast<int>(arg->kind);
     } else {
       key << "M" << argType;

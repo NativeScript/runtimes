@@ -5,12 +5,12 @@
 #include <iostream>
 #include <string>
 
-#include "runtime/NativeScriptException.h"
-#include "runtime/Bundle.h"
-#include "runtime/Runtime.h"
-#include "runtime/RuntimeConfig.h"
+#include "runtime/apple/NativeScriptException.h"
+#include "runtime/apple/Bundle.h"
+#include "runtime/apple/Runtime.h"
+#include "runtime/apple/RuntimeConfig.h"
 #include "segappend.h"
-#include "ffi/shared/Tasks.h"
+#include "ffi/objc/shared/Tasks.h"
 #include "BundleLoader.h"
 
 using namespace nativescript;

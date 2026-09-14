@@ -44,6 +44,8 @@ package-lock.json
 v8_build
 .npmrc
 /Frameworks/
+/.kiro/
+/opencode.json
 
 /llvm/
 
@@ -52,10 +54,10 @@ v8_build
 .cipd/
 
 # project template
-/templates/ios/.build_env_vars.sh
-/templates/ios/__PROJECT_NAME__.xcodeproj/project.xcworkspace/xcshareddata/
-/templates/visionos/.build_env_vars.sh
-/templates/visionos/__PROJECT_NAME__.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+/platforms/apple/templates/ios/.build_env_vars.sh
+/platforms/apple/templates/ios/__PROJECT_NAME__.xcodeproj/project.xcworkspace/xcshareddata/
+/platforms/apple/templates/visionos/.build_env_vars.sh
+/platforms/apple/templates/visionos/__PROJECT_NAME__.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
 
 .cache/
 
@@ -66,11 +68,19 @@ packages/*/metadata-json
 SwiftBindgen
 
 # Generated Objective-C/C dispatch wrappers
-NativeScript/ffi/napi/GeneratedSignatureDispatch.inc
-NativeScript/ffi/napi/GeneratedSignatureDispatch.inc.stamp
+NativeScript/ffi/**/GeneratedSignatureDispatch.inc
+NativeScript/ffi/**/GeneratedSignatureDispatch.inc.stamp
+NativeScript/ffi/**/GeneratedGsdSignatureDispatch.inc
+NativeScript/ffi/**/GeneratedGsdSignatureDispatch.inc.stamp
+
+# Packaged native framework artifacts
+packages/*/NativeScript.xcframework/
 
 # React Native TurboModule package staging
 packages/react-native/dist/
 packages/react-native/ios/vendor/
 packages/react-native/metadata/
-packages/react-native/native-api-jsi/
+packages/react-native/native-api/
+
+# Rust metadata bundle analyzer build output
+metadata-generator/symbol-analyzer/target/

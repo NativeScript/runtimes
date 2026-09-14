@@ -14,6 +14,7 @@
 
 #include "libplatform/libplatform.h"
 #include "v8-fast-api-calls.h"
+#include "v8-module-loader.h"
 
 using namespace v8;
 using namespace tns;
@@ -82,18 +83,34 @@ JSR::JSR() : isolate(nullptr) {
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = &g_allocator;
 
-  if (!JSR::s_mainThreadInitialized) {
+  std::call_once(JSR::initialization_once, [] {
     JSR::platform = v8::platform::NewDefaultPlatform().release();
     v8::V8::SetFlagsFromString("--expose_gc");
     v8::V8::InitializePlatform(JSR::platform);
     v8::V8::Initialize();
-    JSR::s_mainThreadInitialized = true;
-  }
+  });
   isolate = v8::Isolate::New(create_params);
 }
 v8::Platform* JSR::platform = nullptr;
-bool JSR::s_mainThreadInitialized = false;
+std::once_flag JSR::initialization_once;
+std::mutex JSR::env_cache_mutex;
 std::unordered_map<napi_env, JSR*> JSR::env_to_jsr_cache;
+
+JSR* JSR::ForEnv(napi_env env) {
+  std::lock_guard<std::mutex> lock(env_cache_mutex);
+  auto it = env_to_jsr_cache.find(env);
+  return it == env_to_jsr_cache.end() ? nullptr : it->second;
+}
+
+void JSR::RegisterEnv(napi_env env, JSR* runtime) {
+  std::lock_guard<std::mutex> lock(env_cache_mutex);
+  env_to_jsr_cache[env] = runtime;
+}
+
+void JSR::UnregisterEnv(napi_env env) {
+  std::lock_guard<std::mutex> lock(env_cache_mutex);
+  env_to_jsr_cache.erase(env);
+}
 
 napi_status js_create_runtime(napi_runtime* runtime) {
   if (!runtime) return napi_invalid_arg;
@@ -108,23 +125,23 @@ napi_status js_set_runtime_flags(const char* flags) {
 }
 
 napi_status js_lock_env(napi_env env) {
-  auto itFound = JSR::env_to_jsr_cache.find(env);
-  if (itFound == JSR::env_to_jsr_cache.end()) {
+  JSR* runtime = JSR::ForEnv(env);
+  if (runtime == nullptr) {
     return napi_invalid_arg;
   }
 
-  itFound->second->lock();
+  runtime->lock();
 
   return napi_ok;
 }
 
 napi_status js_unlock_env(napi_env env) {
-  auto itFound = JSR::env_to_jsr_cache.find(env);
-  if (itFound == JSR::env_to_jsr_cache.end()) {
+  JSR* runtime = JSR::ForEnv(env);
+  if (runtime == nullptr) {
     return napi_invalid_arg;
   }
 
-  itFound->second->unlock();
+  runtime->unlock();
 
   return napi_ok;
 }
@@ -138,7 +155,7 @@ napi_status js_create_napi_env(napi_env* env, napi_runtime runtime) {
   v8::Local<v8::Context> context = v8::Context::New(jsr->isolate);
   v8::Context::Scope context_scope(context);
   *env = new napi_env__(jsr->isolate, context, NAPI_VERSION_EXPERIMENTAL);
-  JSR::env_to_jsr_cache.insert(std::make_pair(*env, jsr));
+  JSR::RegisterEnv(*env, jsr);
 
   v8::Local<v8::FunctionTemplate> func_template = v8::FunctionTemplate::New(
       jsr->isolate, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -175,8 +192,8 @@ napi_status js_create_napi_env(napi_env* env, napi_runtime runtime) {
 
 napi_status js_free_napi_env(napi_env env) {
   if (env == nullptr) return napi_invalid_arg;
-  JSR::env_to_jsr_cache.erase(env);
   js_run_env_cleanup_hooks(env);
+  JSR::UnregisterEnv(env);
   env->DeleteMe();
   return napi_ok;
 }
@@ -191,11 +208,16 @@ napi_status js_free_runtime(napi_runtime runtime) {
   // the locker has been destroyed.
   {
     v8::Locker locker(jsr->isolate);
+    // Global handles belong to this isolate's handle table. Reset them while
+    // the isolate is locked so worker teardown cannot race another isolate's
+    // concurrent garbage collection.
+    v8impl::CleanupESModuleSystem(jsr->isolate);
     while (v8::Isolate::GetCurrent() == jsr->isolate) {
       jsr->isolate->Exit();
     }
   }
 
+  v8::platform::NotifyIsolateShutdown(JSR::platform, jsr->isolate);
   jsr->isolate->Dispose();
   jsr->isolate = nullptr;
   delete jsr;

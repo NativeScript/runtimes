@@ -26,6 +26,43 @@ fi
 rn_create_app_if_missing "$APP_DIR" "$APP_ROOT" "$APP_NAME" "$RN_VERSION" "$RN_CLI_VERSION" "React Native smoke app"
 rn_install_turbo_tarball "$APP_DIR" "$TARBALL" "smoke app"
 
+checkpoint "Installing react-native-worklets for the smoke app..."
+(cd "$APP_DIR" && npm install --silent react-native-worklets@0.9.1)
+
+checkpoint "Enabling the Worklets Babel plugin for the smoke app..."
+node - "$APP_DIR/babel.config.js" <<'NODE'
+const fs = require('fs');
+const target = process.argv[2];
+let source = fs.existsSync(target)
+  ? fs.readFileSync(target, 'utf8')
+  : [
+      'module.exports = {',
+      "  presets: ['module:@react-native/babel-preset'],",
+      '};',
+      '',
+    ].join('\n');
+
+const plugin = 'react-native-worklets/plugin';
+if (!source.includes(plugin)) {
+  if (/plugins\s*:\s*\[/.test(source)) {
+    source = source.replace(/plugins\s*:\s*\[/, (match) => `${match}'${plugin}', `);
+  } else if (/return\s*\{/.test(source)) {
+    source = source.replace(
+      /return\s*\{/,
+      (match) => `${match}\n    plugins: ['${plugin}'],`,
+    );
+  } else if (/module\.exports\s*=\s*\{/.test(source)) {
+    source = source.replace(
+      /module\.exports\s*=\s*\{/,
+      (match) => `${match}\n  plugins: ['${plugin}'],`,
+    );
+  } else {
+    source += `\n// NativeScript smoke: add '${plugin}' to Babel plugins.\n`;
+  }
+  fs.writeFileSync(target, source);
+}
+NODE
+
 checkpoint "Writing smoke app entrypoint..."
 node - "$APP_DIR/App.tsx" <<'NODE'
 const fs = require('fs');
@@ -35,6 +72,7 @@ fs.writeFileSync(target, `import React from 'react';
 import {useEffect, useState} from 'react';
 import {SafeAreaView, Text} from 'react-native';
 import NativeScript from '@nativescript/react-native';
+import NativeScriptNativeApi from '@nativescript/react-native/src/NativeScriptNativeApi';
 
 const marker = 'NATIVESCRIPT_RN_TURBO_SMOKE_PASS';
 
@@ -59,29 +97,62 @@ async function runSmoke(): Promise<string> {
       throw new Error('enum global install failed');
     }
 
-    let nativeCallsRanOnMainThread = false;
-    await NativeScript.runOnUI(() => {
-      nativeCallsRanOnMainThread = NSThread?.isMainThread === true;
-      if (!nativeCallsRanOnMainThread) {
-        throw new Error('runOnUI did not dispatch native calls to the main thread');
+    const uiSummary = await NativeScript.scheduleOnUI(() => {
+      'worklet';
+      const uiGlobal = globalThis as any;
+      const uiApi = uiGlobal.__nativeScriptNativeApi;
+      if (!uiApi) {
+        throw new Error('NativeScript Native API was not installed in the Worklets UI runtime');
       }
+
+      const uiNSObject = uiGlobal.NSObject;
+      if (!uiNSObject || typeof uiNSObject.alloc !== 'function') {
+        throw new Error('NSObject global install failed in the Worklets UI runtime');
+      }
+
+      const uiConstant = uiGlobal.NSURLErrorTimedOut;
+      const uiStyle = uiGlobal.UIUserInterfaceStyle;
+      if (uiConstant !== -1001 || uiStyle.Dark !== 2) {
+        throw new Error('metadata globals failed in the Worklets UI runtime');
+      }
+
+      const uiApplication = uiGlobal.UIApplication;
+      const uiColor = uiGlobal.UIColor;
+      const window = uiApplication.sharedApplication.keyWindow;
+      if (window && uiColor.systemTealColor) {
+        window.tintColor = uiColor.systemTealColor;
+      }
+
+      return {
+        workletsInstalled: true,
+        nativeCallsRanOnMainThread: uiGlobal.NSThread?.isMainThread === true,
+        runtime: uiApi.runtime,
+        backend: uiApi.backend,
+        constant: uiConstant,
+        enumValue: uiStyle.Dark,
+      };
     });
 
     const summary = {
       installed,
-      nativeCallsRanOnMainThread,
+      workletsInstalled: uiSummary.workletsInstalled,
+      nativeCallsRanOnMainThread: uiSummary.nativeCallsRanOnMainThread,
       runtime: api.runtime,
       backend: api.backend,
+      uiRuntime: uiSummary.runtime,
+      uiBackend: uiSummary.backend,
       classes: api.metadata?.classes ?? 0,
       constants: api.metadata?.constants ?? 0,
       enums: api.metadata?.enums ?? 0,
-      constant: NSURLErrorTimedOut,
-      enumValue: UIUserInterfaceStyle.Dark,
+      constant: uiSummary.constant,
+      enumValue: uiSummary.enumValue,
       metadataPath: NativeScript.defaultMetadataPath(),
       turboBackend: NativeScript.getRuntimeBackend(),
     };
 
-    console.log(marker + ' ' + JSON.stringify(summary));
+    const payload = marker + ' ' + JSON.stringify(summary);
+    console.log(payload);
+    NativeScriptNativeApi.__writeTestMarker(payload);
     return JSON.stringify(summary, null, 2);
   } catch (error) {
     console.error('NATIVESCRIPT_RN_TURBO_SMOKE_FAIL', error);
