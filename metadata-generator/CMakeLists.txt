@@ -100,10 +100,21 @@ target_link_libraries(
   clang
 )
 
-# Set runtime path for libclang
+# dyld tries these in order for @rpath/libclang.dylib. The toolchain that
+# linked the binary comes first; the stock Xcode and Command Line Tools
+# locations keep the binary loadable on machines whose Xcode lives elsewhere
+# (a renamed or beta Xcode bundle). build-step-metadata-generator.py covers the
+# remaining cases through DYLD_FALLBACK_LIBRARY_PATH.
+set(LIBCLANG_RPATHS
+  "${LIBCLANG_DIR}"
+  "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+  "/Library/Developer/CommandLineTools/usr/lib"
+)
+list(REMOVE_DUPLICATES LIBCLANG_RPATHS)
+
 set_target_properties(${NAME} PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
-  INSTALL_RPATH "${LIBCLANG_DIR}"
+  INSTALL_RPATH "${LIBCLANG_RPATHS}"
 )
 
 install(TARGETS ${NAME}

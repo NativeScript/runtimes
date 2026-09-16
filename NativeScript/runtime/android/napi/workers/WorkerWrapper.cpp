@@ -1,3 +1,4 @@
+#include "jsr_common.h"
 #include "WorkerWrapper.h"
 
 #include <android/looper.h>
@@ -180,6 +181,9 @@ void WorkerWrapper::DrainPendingTasks() {
         napi_value args[1] = {event};
         napi_value result;
         status = napi_call_function(env, globalObject, callback, 1, args, &result);
+        if (status == napi_ok) {
+            status = js_execute_pending_jobs(env);
+        }
         if (status == napi_pending_exception && !isTerminating_) {
             napi_value error;
             NAPI_GUARD(napi_get_and_clear_last_exception(env, &error)) {}
@@ -229,6 +233,9 @@ void WorkerWrapper::FireMessageOnParentWorkerObject(int workerId,
     napi_value args[1] = {event};
     napi_value result;
     status = napi_call_function(env, worker, callback, 1, args, &result);
+    if (status == napi_ok) {
+        status = js_execute_pending_jobs(env);
+    }
     if (status == napi_pending_exception) {
         napi_value error;
         NAPI_GUARD(napi_get_and_clear_last_exception(env, &error)) {}
@@ -313,6 +320,9 @@ void WorkerWrapper::FireErrorOnParentWorkerObject(int workerId, const std::strin
         napi_value args[1] = {errEvent};
         napi_value result;
         status = napi_call_function(env, worker, callback, 1, args, &result);
+        if (status == napi_ok) {
+            status = js_execute_pending_jobs(env);
+        }
 
         if (status == napi_pending_exception) {
             napi_value exception;
