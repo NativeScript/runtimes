@@ -102,7 +102,8 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
                                  const string &methodName, MetadataEntry *entry,
                                  bool isFromInterface, bool isStatic, bool isConstructorCall,
                                  const JsValue *argv, size_t argc,
-                                 ObjectManager *objectManager) {
+                                 ObjectManager *objectManager,
+                                 bool metadataSignatureIsUnambiguous) {
 
     JEnv jEnv;
     jclass clazz;
@@ -113,7 +114,29 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     MethodCache::CacheMethodInfo mi;
     bool isSuper = false;
 
-    if ((entry != nullptr) && entry->getIsResolved()) {
+    if (metadataSignatureIsUnambiguous && entry != nullptr && entry->memberId == nullptr) {
+        JEnv metadataEnv;
+        auto metadataClass = metadataEnv.FindClass(className);
+        if (metadataClass != nullptr) {
+            auto metadataMethod = isStatic
+                                  ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
+                                                                   entry->getSig())
+                                  : metadataEnv.GetMethodID(metadataClass, methodName,
+                                                            entry->getSig());
+            if (metadataMethod != nullptr) {
+                entry->memberId = reinterpret_cast<void *>(metadataMethod);
+                entry->clazz = metadataClass;
+            } else {
+                metadataEnv.ExceptionClear();
+                metadataSignatureIsUnambiguous = false;
+            }
+        } else {
+            metadataEnv.ExceptionClear();
+            metadataSignatureIsUnambiguous = false;
+        }
+    }
+
+    if ((entry != nullptr) && (entry->getIsResolved() || metadataSignatureIsUnambiguous)) {
         auto &entrySignature = entry->getSig();
         isStatic = entry->isStatic;
 

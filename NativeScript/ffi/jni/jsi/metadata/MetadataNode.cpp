@@ -2284,9 +2284,95 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
             initialCallbackData->objectManager =
                     Runtime::GetRuntime(rt)->GetObjectManager();
         }
+
+        size_t metadataMatches = 0;
+        MetadataEntry *metadataMatch = nullptr;
+        bool metadataSignatureIsUnambiguous = false;
+        auto metadataTypesMatch = [&](MetadataEntry &candidate) {
+            const auto signature = candidate.getSig();
+            if (signature.empty() || signature[0] != '(') {
+                return false;
+            }
+
+            std::vector<std::string> parameterTypes;
+            size_t index = 1;
+            while (index < signature.size() && signature[index] != ')') {
+                const size_t start = index;
+                if (signature[index] == 'L') {
+                    const auto end = signature.find(';', index);
+                    if (end == std::string::npos) return false;
+                    index = end + 1;
+                } else if (signature[index] == '[') {
+                    do {
+                        index++;
+                    } while (index < signature.size() && signature[index] == '[');
+                    if (index < signature.size() && signature[index] == 'L') {
+                        const auto end = signature.find(';', index);
+                        if (end == std::string::npos) return false;
+                        index = end + 1;
+                    } else if (index >= signature.size()) {
+                        return false;
+                    } else {
+                        index++;
+                    }
+                } else {
+                    index++;
+                }
+                parameterTypes.emplace_back(signature.substr(start, index - start));
+            }
+
+            if (index >= signature.size() || parameterTypes.size() != argc) return false;
+
+            JEnv metadataEnv;
+            for (size_t i = 0; i < argc; i++) {
+                const auto &parameterType = parameterTypes[i];
+                if (parameterType[0] == 'L' || parameterType[0] == '[') {
+                    if (!args[i].isObject()) return false;
+                    auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(args[i]);
+                    if (actualObject.IsNull()) return false;
+                    auto expectedName = parameterType;
+                    if (expectedName[0] == 'L') {
+                        expectedName = expectedName.substr(1, expectedName.size() - 2);
+                    }
+                    auto expectedClass = metadataEnv.FindClass(expectedName);
+                    if (expectedClass == nullptr) {
+                        metadataEnv.ExceptionClear();
+                        return false;
+                    }
+                    if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                } else if (parameterType[0] == 'Z') {
+                    if (!args[i].isBool()) return false;
+                } else if (!args[i].isNumber()) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!first.isStatic && !metadataSignatureIsUnambiguous) {
+            for (auto *candidateData = initialCallbackData;
+                 candidateData != nullptr;
+                 candidateData = candidateData->parent) {
+                for (auto &candidate : candidateData->candidates) {
+                    if (!candidate.isExtensionFunction &&
+                        candidate.isStatic == first.isStatic &&
+                        candidate.getIsResolved() &&
+                        candidate.getParamCount() == argc &&
+                        metadataTypesMatch(candidate)) {
+                        metadataMatches++;
+                        metadataMatch = &candidate;
+                    }
+                }
+            }
+            metadataSignatureIsUnambiguous = metadataMatches == 1 &&
+                                             metadataMatch != nullptr;
+        }
+        if (metadataSignatureIsUnambiguous) {
+            entry = metadataMatch;
+        }
         return CallbackHandlers::CallJavaMethod(rt, thisVal, *className, methodName, entry,
                                                 isFromInterface, first.isStatic, false,
-                                                args, argc, initialCallbackData->objectManager);
+                                                args, argc, initialCallbackData->objectManager,
+                                                metadataSignatureIsUnambiguous);
     });
 }
 
