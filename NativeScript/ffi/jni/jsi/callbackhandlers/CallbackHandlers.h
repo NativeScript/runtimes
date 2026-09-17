@@ -63,7 +63,8 @@ namespace tns {
         CallJavaMethod(JsRuntime &rt, const JsValue &caller, const std::string &className,
                        const std::string &methodName, MetadataEntry *entry, bool isFromInterface,
                        bool isStatic, bool isConstructorCall, const JsValue *argv, size_t argc,
-                       ObjectManager *objectManager = nullptr);
+                       ObjectManager *objectManager = nullptr,
+                       bool metadataSignatureIsUnambiguous = false);
 
         static JsValue
         CallJSMethod(JsRuntime &rt, JNIEnv *jEnv, const JsValue &jsObject, jclass claz,
