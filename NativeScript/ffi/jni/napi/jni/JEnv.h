@@ -454,6 +454,13 @@ namespace tns {
 
         static JavaVM *s_jvm;
 
+    public:
+        static JavaVM *GetJavaVM() { return s_jvm; }
+        // Call right before DetachCurrentThread so a re-attached thread does not reuse a stale env.
+        static void ClearCachedEnv();
+
+    private:
+
         static jclass RUNTIME_CLASS;
 
         static jmethodID GET_CACHED_CLASS_METHOD_ID;

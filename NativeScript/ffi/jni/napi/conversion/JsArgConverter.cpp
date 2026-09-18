@@ -1,4 +1,5 @@
 #include "JsArgConverter.h"
+#include "jsr_common.h"
 #include "ObjectManager.h"
 #include "JniSignatureParser.h"
 #include "JsArgToArrayConverter.h"
@@ -549,9 +550,7 @@ bool JsArgConverter::ConvertJavaScriptArray(napi_env env, napi_value jsArr, int 
 
     const auto &arraySignature = (*m_tokens)[index];
 
-    std::string elementType = arraySignature.substr(1);
-
-    const char elementTypePrefix = elementType[0];
+    const char elementTypePrefix = arraySignature.size() > 1 ? arraySignature[1] : ' ';
 
     jclass elementClass;
     std::string strippedClassName;
@@ -615,13 +614,22 @@ bool JsArgConverter::ConvertJavaScriptArray(napi_env env, napi_value jsArr, int 
         }
         case 'I': {
             arr = jenv.NewIntArray(arrLength);
+            double stackDoubles[64];
+            std::vector<double> heapDoubles;
+            double *doubles = stackDoubles;
+            if (arrLength > 64) { heapDoubles.resize(arrLength); doubles = heapDoubles.data(); }
+            uint32_t got = 0;
             std::vector<jint> ints(arrLength);
-            for (uint32_t i = 0; i < arrLength; i++) {
-                napi_value element;
-                NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
-                int32_t intValue;
-                NAPI_GUARD(napi_get_value_int32(env, element, &intValue)) {}
-                ints[i] = (jint) intValue;
+            if (js_get_array_doubles(env, jsArr, doubles, arrLength, &got) == napi_ok && got == (uint32_t) arrLength) {
+                for (uint32_t i = 0; i < arrLength; i++) ints[i] = (jint) (int32_t) doubles[i];
+            } else {
+                for (uint32_t i = 0; i < arrLength; i++) {
+                    napi_value element;
+                    NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
+                    int32_t intValue;
+                    NAPI_GUARD(napi_get_value_int32(env, element, &intValue)) {}
+                    ints[i] = (jint) intValue;
+                }
             }
             jenv.SetIntArrayRegion((jintArray) arr, 0, arrLength, ints.data());
             break;
@@ -654,19 +662,25 @@ bool JsArgConverter::ConvertJavaScriptArray(napi_env env, napi_value jsArr, int 
         }
         case 'D': {
             arr = jenv.NewDoubleArray(arrLength);
-            std::vector<jdouble> doubles(arrLength);
-            for (uint32_t i = 0; i < arrLength; i++) {
-                napi_value element;
-                NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
-                double doubleValue;
-                NAPI_GUARD(napi_get_value_double(env, element, &doubleValue)) {}
-                doubles[i] = (jdouble) doubleValue;
+            jdouble stackDoubles[64];
+            std::vector<jdouble> heapDoubles;
+            jdouble *doubles = stackDoubles;
+            if (arrLength > 64) { heapDoubles.resize(arrLength); doubles = heapDoubles.data(); }
+            uint32_t got = 0;
+            if (js_get_array_doubles(env, jsArr, doubles, arrLength, &got) != napi_ok || got != (uint32_t) arrLength) {
+                for (uint32_t i = 0; i < arrLength; i++) {
+                    napi_value element;
+                    NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
+                    double doubleValue;
+                    NAPI_GUARD(napi_get_value_double(env, element, &doubleValue)) {}
+                    doubles[i] = (jdouble) doubleValue;
+                }
             }
-            jenv.SetDoubleArrayRegion((jdoubleArray) arr, 0, arrLength, doubles.data());
+            jenv.SetDoubleArrayRegion((jdoubleArray) arr, 0, arrLength, doubles);
             break;
         }
         case 'L':
-            strippedClassName = elementType.substr(1, elementType.length() - 2);
+            strippedClassName = arraySignature.substr(2, arraySignature.length() - 3);
             elementClass = jenv.FindClass(strippedClassName);
             arr = jenv.NewObjectArray(arrLength, elementClass, nullptr);
             for (uint32_t i = 0; i < arrLength; i++) {
@@ -912,7 +926,7 @@ JniLocalRef JsArgConverter::GetByteBuffer(napi_env env, napi_value object, bool 
 
     ObjectManager::MarkObject(env, object);
 
-    objectManager->Link(object, id, clazz);
+    objectManager->Link(object, id, clazz, nullptr, buffer);
 
     return objectManager->GetJavaObjectByJsObject(object);
 }

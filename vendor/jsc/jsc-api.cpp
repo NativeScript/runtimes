@@ -96,7 +96,7 @@ class JSString {
     size_t length{JSStringGetLength(_string)};
     const JSChar* chars{JSStringGetCharactersPtr(_string)};
     size_t size{std::min(length, bufsize - 1)};
-    std::memcpy(buf, chars, size);
+    std::memcpy(buf, chars, size * sizeof(JSChar));
     buf[size] = 0;
     if (result != nullptr) {
       *result = size;

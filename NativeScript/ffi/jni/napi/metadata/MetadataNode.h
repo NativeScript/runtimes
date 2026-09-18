@@ -266,6 +266,7 @@ private:
 
         napi_ref constructorFunction;
         std::vector<MethodCallbackData *> instanceMethodCallbacks;
+        napi_ref wrapperPrototype = nullptr;
     };
 
     struct MethodCallbackData {

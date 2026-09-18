@@ -6,6 +6,7 @@
 #include "NativeScriptException.h"
 #include "Runtime.h"
 #include "CallbackHandlers.h"
+#include "jsr_common.h"
 #include <algorithm>
 #include <sstream>
 
@@ -20,7 +21,7 @@ jmethodID ObjectManager::GET_NAME_METHOD_ID = nullptr;
 
 ObjectManager::ObjectManager(jobject javaRuntimeObject) :
         m_javaRuntimeObject(javaRuntimeObject),
-        m_cache(NewWeakGlobalRefCallback, DeleteWeakGlobalRefCallback, ValidateWeakGlobalRefCallback, 1000, this),
+        m_cache(NewWeakGlobalRefCallback, DeleteWeakGlobalRefCallback, nullptr, 1000, this),
         m_currentObjectId(0),
         m_jsObjectProxyCreator(nullptr),
         m_jsObjectCtor(nullptr),
@@ -211,6 +212,19 @@ napi_value ObjectManager::GetOrCreateProxy(jint javaObjectID, napi_value instanc
 }
 
 JniLocalRef ObjectManager::GetJavaObjectByJsObject(napi_value object, int *objectId, bool *isSuper) {
+    int32_t javaObjectId = ResolveJavaObjectId(object, objectId, isSuper);
+    if (javaObjectId != -1) {
+        try {
+            return {GetJavaObjectByID(javaObjectId), true};
+        } catch (NativeScriptException &e) {
+            throw NativeScriptException("Failed to get Java object by ID. id=" +
+                                        std::to_string(javaObjectId) + ". " + e.what());
+        }
+    }
+    return {};
+}
+
+int ObjectManager::ResolveJavaObjectId(napi_value object, int *objectId, bool *isSuper) {
     napi_status status;
     int32_t javaObjectId = (objectId) ? *objectId : -1;
     // Cache slot for the super-call flag on whichever per-object info we resolve;
@@ -218,7 +232,7 @@ JniLocalRef ObjectManager::GetJavaObjectByJsObject(napi_value object, int *objec
     int8_t *superSlot = nullptr;
 
 #ifdef USE_HOST_OBJECT
-    // Non-host object → miss (an error status on some engines); expected, ignore.
+    // Non-host object -> miss (an error status on some engines); expected, ignore.
     void* data = nullptr;
     napi_get_host_object_data(m_env, object, &data);
     if (data) {
@@ -258,19 +272,7 @@ JniLocalRef ObjectManager::GetJavaObjectByJsObject(napi_value object, int *objec
     if (objectId) {
         *objectId = javaObjectId;
     }
-
-    if (javaObjectId != -1) {
-        try {
-            return {GetJavaObjectByID(javaObjectId), true};
-        } catch (NativeScriptException &e) {
-            // Surface which object failed instead of a bare error — this usually
-            // means the id belongs to a different runtime/thread.
-            throw NativeScriptException("Failed to get Java object by ID. id=" +
-                                        std::to_string(javaObjectId) + ". " + e.what());
-        }
-    }
-
-    return {};
+    return javaObjectId;
 }
 
 JniLocalRef ObjectManager::GetJavaObjectByJsObjectFast(napi_value object) {
@@ -302,7 +304,9 @@ JniLocalRef ObjectManager::GetJavaObjectByJsObjectFast(napi_value object) {
 
 ObjectManager::JSInstanceInfo *ObjectManager::GetJSInstanceInfo(napi_value object) {
     #ifdef USE_HOST_OBJECT
-    // Non-host object → miss (an error status on some engines); expected, ignore.
+    // Host objects must be probed first: the V8 shim's napi_unwrap reads internal field 0 as the
+    // wrap Reference on any object with internal fields, and a host proxy keeps its own pointer
+    // there. A non-host object is a miss (an error status on some engines); expected, ignore.
     void *hostData = nullptr;
     napi_get_host_object_data(m_env, object, &hostData);
     if (hostData) {
@@ -312,11 +316,20 @@ ObjectManager::JSInstanceInfo *ObjectManager::GetJSInstanceInfo(napi_value objec
         }
     }
     #endif
-    
+
+#ifdef __V8__
+    // V8 only: its napi_unwrap is safe on arbitrary objects (private symbol lookup), so plain
+    // wrappers resolve with one read and skip the "#napi" prototype-chain probe. The QuickJS and
+    // JSC shims treat any object opaque as the wrap payload, so there the marker check must stay
+    // in front of napi_unwrap (see GetJSInstanceInfoFromRuntimeObject).
+    void *wrapped = nullptr;
+    napi_unwrap(m_env, object, &wrapped);
+    if (wrapped != nullptr) return reinterpret_cast<JSInstanceInfo *>(wrapped);
+#endif
+
     if (!IsRuntimeJsObject(object)) return nullptr;
     return GetJSInstanceInfoFromRuntimeObject(object);
 }
-
 MetadataNode *ObjectManager::GetInstanceNode(napi_value object) {
     JSInstanceInfo *info = GetJSInstanceInfo(object);
     return info != nullptr ? info->node : nullptr;
@@ -542,8 +555,7 @@ napi_value ObjectManager::HostObjectIndexedGet(napi_env env, napi_value host,
         // The proxy already knows the java object id + ObjectManager, so resolve
         // the backing array directly (no locked env->runtime lookup, no host probe).
         jobject arr = proxy->instanceInfo
-                      ? (jobject) proxy->objectManager->GetJavaObjectByID(
-                              proxy->instanceInfo->JavaObjectID)
+                      ? (jobject) proxy->objectManager->GetJavaObjectByID(proxy->instanceInfo->JavaObjectID)
                       : nullptr;
         return CallbackHandlers::GetArrayElement(env, host, index, proxy->arraySignature,
                                                  proxy->objectManager, arr);
@@ -565,8 +577,7 @@ void ObjectManager::HostObjectIndexedSet(napi_env env, napi_value host,
     auto *proxy = reinterpret_cast<HostObjectProxy *>(data);
     try {
         jobject arr = proxy->instanceInfo
-                      ? (jobject) proxy->objectManager->GetJavaObjectByID(
-                              proxy->instanceInfo->JavaObjectID)
+                      ? (jobject) proxy->objectManager->GetJavaObjectByID(proxy->instanceInfo->JavaObjectID)
                       : nullptr;
         CallbackHandlers::SetArrayElement(env, host, index, proxy->arraySignature,
                                           value, proxy->objectManager, arr);
@@ -636,6 +647,18 @@ void ObjectManager::HostObjectProxyPostFinalizer(napi_env env, void *data,
 
     if (proxy->target != nullptr && !destroying) {
         NAPI_GUARD(napi_delete_reference(env, proxy->target)) {}
+    }
+
+    if (proxy->isPrimary && proxy->instanceInfo && !destroying) {
+        auto objManager = rt->GetObjectManager();
+        auto it = objManager->m_idToProxy.find(proxy->instanceInfo->JavaObjectID);
+        if (it != objManager->m_idToProxy.end() && it->second != nullptr) {
+            napi_value current = napi_util::get_ref_value(env, it->second);
+            if (napi_util::is_null_or_undefined(env, current)) {
+                NAPI_GUARD(napi_delete_reference(env, it->second)) {}
+                objManager->m_idToProxy.erase(it);
+            }
+        }
     }
 
     // Primary (cached) proxies own their JSInstanceInfo and mark the java
@@ -715,25 +738,16 @@ napi_value ObjectManager::CreateHostObjectProxy(napi_value instance,
 
 ObjectManager::JSInstanceInfo *
 ObjectManager::GetJSInstanceInfoFromRuntimeObject(napi_value object) {
-    napi_status status;
-    napi_value jsInfo;
-    NAPI_GUARD(napi_get_named_property(m_env, object, PRIVATE_JSINFO, &jsInfo)) {}
+    // The info lives in the napi_wrap slot. A miss is expected for plain objects; ignore status.
+    void *data = nullptr;
+    napi_unwrap(m_env, object, &data);
+    if (data != nullptr) return reinterpret_cast<JSInstanceInfo *>(data);
 
-    if (napi_util::is_null_or_undefined(m_env, jsInfo)) {
-        napi_value proto = napi_util::get__proto__(m_env, object);
-        //Typescript object layout has an object instance as child of the actual registered instance. checking for that
-        if (!napi_util::is_null_or_undefined(m_env, proto)) {
-            if (IsRuntimeJsObject(proto)) {
-                NAPI_GUARD(napi_get_named_property(m_env, proto, PRIVATE_JSINFO, &jsInfo)) {}
-            }
-        }
-    }
-
-    if (!napi_util::is_null_or_undefined(m_env, jsInfo)) {
-        void *data = nullptr;
-        NAPI_GUARD(napi_get_value_external(m_env, jsInfo, &data)) {}
-        auto info = reinterpret_cast<JSInstanceInfo *>(data);
-        return info;
+    // TypeScript object layout has an object instance as child of the actual registered instance.
+    napi_value proto = napi_util::get__proto__(m_env, object);
+    if (!napi_util::is_null_or_undefined(m_env, proto) && IsRuntimeJsObject(proto)) {
+        napi_unwrap(m_env, proto, &data);
+        if (data != nullptr) return reinterpret_cast<JSInstanceInfo *>(data);
     }
     return nullptr;
 }
@@ -750,8 +764,11 @@ bool ObjectManager::IsRuntimeJsObject(napi_value object) {
 }
 
 jweak ObjectManager::GetJavaObjectByID(uint32_t javaObjectID) {
+    // The weak global is handed out unowned: Java holds every linked instance strongly until its
+    // wrapper finalizes, and release paths evict the entry, so no IsSameObject probe per hit.
     return m_cache(javaObjectID);
 }
+
 
 jobject ObjectManager::GetJavaObjectByIDImpl(uint32_t javaObjectID) {
     JEnv env;
@@ -791,6 +808,17 @@ napi_value ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
 
     napi_value instance = napi_util::get_ref_value(m_env, it->second);
     if (napi_util::is_null_or_undefined(m_env, instance)) return nullptr;
+    // Identity: if JS already holds a proxy for this id (instances constructed from JS are
+    // handed out as proxies by RegisterInstance), that proxy is the object JS knows.
+    auto proxyIt = m_idToProxy.find(javaObjectID);
+    if (proxyIt != m_idToProxy.end() && proxyIt->second != nullptr) {
+        napi_value proxy = napi_util::get_ref_value(m_env, proxyIt->second);
+        if (!napi_util::is_null_or_undefined(m_env, proxy)) return proxy;
+    }
+    // Otherwise plain instances are handed out directly: the wrapper is weakly tracked and
+    // finalizes itself, so the host-object proxy only earns its keep for arrays (indexed access).
+    MetadataNode *node = GetInstanceNode(instance);
+    if (node != nullptr && !node->isArray()) return instance;
     return GetOrCreateProxy(javaObjectID, instance);
 }
 
@@ -805,15 +833,28 @@ ObjectManager::CreateJSWrapper(jint javaObjectID, const std::string &typeName, j
     JEnv jenv;
     JniLocalRef clazz(jenv.GetObjectClass(instance));
 
-    return CreateJSWrapperHelper(javaObjectID, typeName, clazz);
+    return CreateJSWrapperHelper(javaObjectID, typeName, clazz, instance);
 }
 
 napi_value
-ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz) {
-    napi_status status;
-    auto className = (clazz != nullptr) ? GetClassName(clazz) : typeName;
+ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
+    return CreateJSWrapperForNode(javaObjectID, node, clazz, instance);
+}
 
+napi_value
+ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz, jobject instance) {
+    auto className = (clazz != nullptr) ? GetClassName(clazz) : typeName;
     auto node = MetadataNode::GetOrCreate(className);
+    if (clazz == nullptr) {
+        JEnv jenv;
+        clazz = jenv.FindClass(className);
+    }
+    return CreateJSWrapperForNode(javaObjectID, node, clazz, instance);
+}
+
+napi_value
+ObjectManager::CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
+    napi_status status;
     napi_value proxy = nullptr;
     napi_value jsWrapper = node->CreateJSWrapper(m_env, this);
     if (jsWrapper != nullptr) {
@@ -822,25 +863,28 @@ ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeN
         // stored on JSInstanceInfo::ObjectClazz, which nothing on this path reads,
         // so a fresh FindClass is pure overhead; only fall back to it for the
         // typeName-only overload where no instance class was available.
-        jclass linkClazz = clazz;
-        if (linkClazz == nullptr) {
-            JEnv jenv;
-            linkClazz = jenv.FindClass(className);
-        }
-        Link(jsWrapper, javaObjectID, linkClazz, node);
+        Link(jsWrapper, javaObjectID, clazz, node, instance, /*strongRef*/ false, /*verified*/ true);
         if (node->isArray()) {
             NAPI_GUARD(napi_set_named_property(m_env, jsWrapper, "__is__javaArray",
                                     napi_util::get_true(m_env))) {}
         }
-        proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
+        proxy = node->isArray() ? GetOrCreateProxy(javaObjectID, jsWrapper) : jsWrapper;
     }
 
     return proxy;
 }
 
 void ObjectManager::Link(napi_value object, uint32_t javaObjectID, jclass clazz,
-                         MetadataNode *node) {
-    if (!IsRuntimeJsObject(object)) {
+                         MetadataNode *node, jobject instance, bool strongRef, bool verified) {
+    if (instance != nullptr) {
+        // Seed the id->object cache so the first method/field access on this wrapper does not
+        // round-trip into Java (getJavaObjectByID) to fetch an object we are holding right now.
+        JEnv jenv;
+        m_cache.seed(javaObjectID, jenv.NewWeakGlobalRef(instance));
+    }
+    // Callers that just built the wrapper themselves pass verified=true and skip the
+    // prototype-chain marker probe.
+    if (!verified && !IsRuntimeJsObject(object)) {
         std::string errMsg("Trying to link invalid 'this' to a Java object");
         throw NativeScriptException(errMsg);
     }
@@ -851,17 +895,20 @@ void ObjectManager::Link(napi_value object, uint32_t javaObjectID, jclass clazz,
     auto jsInstanceInfo = new JSInstanceInfo(javaObjectID, clazz);
     jsInstanceInfo->node = node;
 
-    napi_ref objectHandle = napi_util::make_ref(m_env, object, 1);
+    napi_ref objectHandle = napi_util::make_ref(m_env, object, strongRef ? 1 : 0);
 
-    napi_value jsInfo;
-    NAPI_GUARD(napi_create_external(m_env, jsInstanceInfo, JSObjectFinalizerCallback, jsInstanceInfo, &jsInfo)) {}
-    NAPI_GUARD(napi_set_named_property(m_env, object, PRIVATE_JSINFO, jsInfo)) {}
+    int64_t externalMemory = 0;
+    js_adjust_external_memory(m_env, kWrapperExternalCost, &externalMemory);
 
-    // Wrapped but does not handle data lifecycle. only used for fast access.
-    NAPI_GUARD(napi_wrap(m_env, object, jsInstanceInfo, [](napi_env env, void *data, void *hint) {}, jsInstanceInfo,
-              nullptr)) {}
+    NAPI_GUARD(napi_wrap(m_env, object, jsInstanceInfo, JSObjectFinalizerCallback, jsInstanceInfo, nullptr)) {}
 
-    m_idToObject.emplace(javaObjectID, objectHandle);
+    auto existing = m_idToObject.find(javaObjectID);
+    if (existing != m_idToObject.end()) {
+        NAPI_GUARD(napi_delete_reference(m_env, existing->second)) {}
+        existing->second = objectHandle;
+    } else {
+        m_idToObject.emplace(javaObjectID, objectHandle);
+    }
 }
 
 bool ObjectManager::CloneLink(napi_value src, napi_value dest) {
@@ -871,9 +918,6 @@ bool ObjectManager::CloneLink(napi_value src, napi_value dest) {
     auto success = jsInfo != nullptr;
 
     if (success) {
-        napi_value external;
-        NAPI_GUARD(napi_create_external(m_env, jsInfo, [](napi_env env, void* d1, void*d2) {}, jsInfo, &external)) {}
-        NAPI_GUARD(napi_set_named_property(m_env, dest, PRIVATE_JSINFO, external)) {}
         NAPI_GUARD(napi_wrap(m_env, dest, jsInfo, [](napi_env env, void *data, void *hint) {}, jsInfo,
                   nullptr)) {}
     }
@@ -910,6 +954,39 @@ ObjectManager::JSObjectFinalizerCallback(napi_env env, void *finalizeData, void 
     #endif
 
     DEBUG_WRITE("JS Object finalizer called for object id: %d", data->JavaObjectID);
+
+    auto rt = Runtime::GetRuntimeUnchecked(env);
+    if (rt && !rt->is_destroying) {
+        auto objManager = rt->GetObjectManager();
+        if (objManager->m_weakObjectIds.find(data->JavaObjectID) == objManager->m_weakObjectIds.end()) {
+            objManager->m_weakObjectIds.emplace(data->JavaObjectID);
+            JEnv jEnv;
+            jEnv.CallVoidMethod(objManager->m_javaRuntimeObject, objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
+                                data->JavaObjectID);
+        }
+    }
+    Runtime::PostFinalizer(env, JSObjectPostFinalizerCallback, data, nullptr);
+}
+
+void ObjectManager::JSObjectPostFinalizerCallback(napi_env env, void *finalizeData, void *) {
+    napi_status status;
+    auto data = reinterpret_cast<JSInstanceInfo *>(finalizeData);
+    if (data == nullptr) return;
+    auto rt = Runtime::GetRuntimeUnchecked(env);
+    if (rt && !rt->is_destroying) {
+        int64_t externalMemory = 0;
+        js_adjust_external_memory(env, -kWrapperExternalCost, &externalMemory);
+
+        auto objManager = rt->GetObjectManager();
+        auto it = objManager->m_idToObject.find(data->JavaObjectID);
+        if (it != objManager->m_idToObject.end()) {
+            napi_value current = napi_util::get_ref_value(env, it->second);
+            if (napi_util::is_null_or_undefined(env, current)) {
+                NAPI_GUARD(napi_delete_reference(env, it->second)) {}
+                objManager->m_idToObject.erase(it);
+            }
+        }
+    }
     delete data;
 }
 
@@ -1013,6 +1090,8 @@ void ObjectManager::ReleaseObjectNow(napi_env env, int javaObjectId) {
     if (!rt || rt->is_destroying) return;
     ObjectManager *objMgr = rt->GetObjectManager();
 
+    objMgr->m_cache.evictKey(javaObjectId);
+
     auto itFound = objMgr->m_weakObjectIds.find(javaObjectId);
     if (itFound == objMgr->m_weakObjectIds.end()) {
         JEnv jEnv;
@@ -1075,6 +1154,7 @@ void ObjectManager::OnGarbageCollected(JNIEnv *jEnv, jintArray object_ids) {
         auto rt = Runtime::GetRuntimeUnchecked(m_env);
         if (rt && rt->is_destroying) return;
         int javaObjectId = cppArray[i];
+        this->m_cache.evictKey(javaObjectId);
         auto itFound = this->m_idToObject.find(javaObjectId);
         if (itFound != this->m_idToObject.end()) {
             NAPI_GUARD(napi_delete_reference(m_env, itFound->second)) {}
