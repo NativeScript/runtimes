@@ -313,11 +313,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                 result = jEnv.CallCharMethodA(callerJavaObject, mid, javaArgs);
             }
 
-            JniLocalRef str(jEnv.NewString(&result, 1));
-            jboolean bol = true;
-            const char *resP = jEnv.GetStringUTFChars(str, &bol);
-            returnValue = ArgConverter::convertToJsString(env, resP, 1);
-            jEnv.ReleaseStringUTFChars(str, resP);
+            returnValue = ArgConverter::convertToJsString(env, &result, 1);
             break;
         }
         case MethodReturnType::Short: {
@@ -432,8 +428,29 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                     returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                     if (napi_util::is_null_or_undefined(env, returnValue)) {
-                        returnValue = objectManager->CreateJSWrapper(javaObjectID, *returnType,
-                                                                     result);
+                        MetadataNode *returnNode = nullptr;
+                        JniLocalRef runtimeClazz(jEnv.GetObjectClass(result));
+                        if (entry != nullptr && !isArrayReturn) {
+                            if (!entry->returnClazzResolved) {
+                                entry->returnClazzResolved = true;
+
+                                if (returnType->size() > 2 && (*returnType)[0] == 'L') {
+                                    std::string declaredName = returnType->substr(1, returnType->size() - 2);
+                                    jclass declared = jEnv.FindClass(declaredName);
+
+                                    if (declared != nullptr) {
+                                        entry->returnClazz = declared;
+                                        entry->returnNode = MetadataNode::GetOrCreate(declaredName);
+                                    }
+                                }
+                            }
+                            if (entry->returnClazz != nullptr && jEnv.isSameObject(runtimeClazz, entry->returnClazz)) {
+                                returnNode = entry->returnNode;
+                            }
+                        }
+                        returnValue = returnNode != nullptr
+                                      ? objectManager->CreateJSWrapper(javaObjectID, returnNode, runtimeClazz, result)
+                                      : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
                     }
                 }
 

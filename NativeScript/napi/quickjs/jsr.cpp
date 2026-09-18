@@ -145,3 +145,19 @@ napi_status js_get_runtime_version(napi_env env, napi_value* version) {
 
   return napi_ok;
 }
+
+napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, uint32_t capacity,
+                                 uint32_t* length) {
+  bool isArray = false;
+  if (napi_is_array(env, array, &isArray) != napi_ok || !isArray) return napi_array_expected;
+  uint32_t count = 0;
+  if (napi_get_array_length(env, array, &count) != napi_ok) return napi_array_expected;
+  if (count > capacity) count = capacity;
+  for (uint32_t i = 0; i < count; i++) {
+    napi_value element;
+    if (napi_get_element(env, array, i, &element) != napi_ok) return napi_generic_failure;
+    if (napi_get_value_double(env, element, &out[i]) != napi_ok) return napi_number_expected;
+  }
+  *length = count;
+  return napi_ok;
+}

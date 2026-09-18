@@ -428,6 +428,32 @@ class String {
                  JS_NewStringLen(runtime.context(), reinterpret_cast<const char*>(value), length));
   }
   std::string utf8(Runtime& runtime) const;
+
+  // UTF-16 in and out for the JNI bridge, on the engine's own two-byte API so unpaired
+  // surrogates survive the round trip (a UTF-8 detour would replace them).
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+    static const uint16_t empty = 0;
+    return adopt(runtime, JS_NewStringUTF16(runtime.context(),
+                                            value != nullptr ? reinterpret_cast<const uint16_t*>(value) : &empty,
+                                            length));
+  }
+  size_t utf16Length(Runtime& runtime) const { return copyUtf16(runtime, nullptr, 0); }
+  // Copies up to `capacity` code units (no terminator); returns the string length.
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+    JSContext* ctx = runtime.context();
+    JSValue value = local(runtime);
+    size_t length = 0;
+    const uint16_t* units = JS_ToCStringLenUTF16(ctx, &length, value);
+    if (units != nullptr) {
+      size_t count = length < capacity ? length : capacity;
+      if (count > 0) std::memcpy(buffer, units, count * sizeof(char16_t));
+      JS_FreeCStringUTF16(ctx, units);
+    } else {
+      length = 0;
+    }
+    JS_FreeValue(ctx, value);
+    return length;
+  }
   JSValue local(Runtime& runtime) const;
   operator Value() const;
 
@@ -1127,6 +1153,21 @@ class Function : public Object {
 
 class Array : public Object {
  public:
+
+  // Bulk-read numeric elements into `out` (at most `capacity`). Returns false if an element is
+  // not a number, in which case the caller falls back to its per-element conversion.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    size_t count = size(runtime);
+    if (count > capacity) count = capacity;
+    for (size_t i = 0; i < count; i++) {
+      Value element = getValueAtIndexBorrowed(runtime, i);
+      if (!element.isNumber()) return false;
+      out[i] = element.getNumber();
+    }
+    *length = count;
+    return true;
+  }
+
   explicit Array(Runtime& runtime, size_t size)
       : Object(std::make_shared<quickjsengine::ValueStorage>(
             quickjsengine::ValueStorage::Kind::QuickJS)) {

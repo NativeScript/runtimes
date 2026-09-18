@@ -1,4 +1,5 @@
 #include "jsi/jsc/JSCRuntime.h"
+#include <cstring>
 
 #ifdef TARGET_ENGINE_JSC
 
@@ -249,6 +250,28 @@ void Object::setProperty(Runtime& runtime, const char* name, const Array& value)
 }
 void Object::setProperty(Runtime& runtime, const char* name, const ArrayBuffer& value) {
   setProperty(runtime, name, Value(runtime, value));
+}
+
+size_t String::utf16Length(Runtime& runtime) const {
+  JSValueRef exception = nullptr;
+  JSStringRef string = JSValueToStringCopy(runtime.context(), storage_->value, &exception);
+  if (string == nullptr) return 0;
+  size_t length = JSStringGetLength(string);
+  JSStringRelease(string);
+  return length;
+}
+
+size_t String::copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+  JSValueRef exception = nullptr;
+  JSStringRef string = JSValueToStringCopy(runtime.context(), storage_->value, &exception);
+  if (string == nullptr) return 0;
+  size_t length = JSStringGetLength(string);
+  size_t count = length < capacity ? length : capacity;
+  if (count > 0) {
+    std::memcpy(buffer, JSStringGetCharactersPtr(string), count * sizeof(JSChar));
+  }
+  JSStringRelease(string);
+  return length;
 }
 
 }  // namespace engine

@@ -289,6 +289,8 @@ private:
 
         JsValue constructorFunction;
         std::vector<MethodCallbackData *> instanceMethodCallbacks;
+
+        JsValue wrapperPrototype;
     };
 
     struct MethodCallbackData {

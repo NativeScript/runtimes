@@ -29,12 +29,12 @@ namespace tns {
         static napi_value jstringToJsString(napi_env env, jstring value) {
             if (value == nullptr) return napi_util::null(env);
 
-            JEnv jenv;
-            auto chars = jenv.GetStringUTFChars(value,JNI_FALSE);
-            auto length = jenv.GetStringUTFLength(value);
-            auto jsString = convertToJsString(env, chars, length);
-            jenv.ReleaseStringUTFChars(value, chars);
-
+            JNIEnv *jni = JEnv();
+            jsize length = jni->GetStringLength(value);
+            const jchar *chars = jni->GetStringChars(value, nullptr);
+            if (chars == nullptr) return napi_util::null(env);
+            napi_value jsString = convertToJsString(env, chars, length);
+            jni->ReleaseStringChars(value, chars);
             return jsString;
         }
 
@@ -64,8 +64,19 @@ namespace tns {
         static std::u16string ConvertToUtf16String(napi_env env, napi_value s);
 
         inline static jstring ConvertToJavaString(napi_env env, napi_value jsValue) {
+            size_t length = 0;
+            if (napi_get_value_string_utf16(env, jsValue, nullptr, 0, &length) != napi_ok) return nullptr;
+            char16_t stack[256];
+            std::u16string heap;
+            char16_t *buffer = stack;
+            if (length + 1 > sizeof stack / sizeof stack[0]) {
+                heap.resize(length + 1);
+                buffer = heap.data();
+            }
+            size_t copied = 0;
+            if (napi_get_value_string_utf16(env, jsValue, buffer, length + 1, &copied) != napi_ok) return nullptr;
             JEnv jenv;
-            return jenv.NewStringUTF(napi_util::get_string_value(env, jsValue, 0));
+            return jenv.NewString(reinterpret_cast<const jchar *>(buffer), static_cast<jsize>(copied));
         }
 
         inline static napi_value convertToJsString(napi_env env, const jchar *data, int length) {

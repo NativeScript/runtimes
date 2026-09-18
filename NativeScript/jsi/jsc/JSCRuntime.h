@@ -525,6 +525,19 @@ class String {
   }
 
   std::string utf8(Runtime& runtime) const;
+
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+    static_assert(sizeof(char16_t) == sizeof(JSChar));
+    JSStringRef string = JSStringCreateWithCharacters(reinterpret_cast<const JSChar*>(value), length);
+    String result(runtime, string);
+    JSStringRelease(string);
+    return result;
+  }
+
+  size_t utf16Length(Runtime& runtime) const;
+  // Copies up to `capacity` code units (no terminator); returns the string length.
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const;
+
   JSValueRef local(Runtime& runtime) const { return storage_->value; }
   operator Value() const;
 
@@ -1120,6 +1133,21 @@ class Function : public Object {
 
 class Array : public Object {
  public:
+
+  // Bulk-read numeric elements into `out` (at most `capacity`). Returns false if an element is
+  // not a number, in which case the caller falls back to its per-element conversion.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    size_t count = size(runtime);
+    if (count > capacity) count = capacity;
+    for (size_t i = 0; i < count; i++) {
+      Value element = getValueAtIndexBorrowed(runtime, i);
+      if (!element.isNumber()) return false;
+      out[i] = element.getNumber();
+    }
+    *length = count;
+    return true;
+  }
+
   explicit Array(Runtime& runtime, size_t size)
       : Object(std::make_shared<jscengine::ValueStorage>(jscengine::ValueStorage::Kind::JSC)) {
     std::vector<JSValueRef> initial(size, JSValueMakeUndefined(runtime.context()));

@@ -50,8 +50,18 @@ namespace tns {
 
         JsValue GetOrCreateProxyWeak(jint javaObjectID, const JsValue &instance);
 
+        // strongRef: JS-constructed instances (extend/implement) must stay alive while Java holds them,
+        // because Java may call back into them; wrappers for Java-returned objects are held weakly and
+        // finalize themselves. verified: the caller built the object itself, skip the marker probe.
         void Link(const JsValue &object, uint32_t javaObjectID, jclass clazz,
-                  MetadataNode *node = nullptr);
+                  MetadataNode *node = nullptr, jobject instance = nullptr,
+                  bool strongRef = true, bool verified = false);
+
+        // Same as CreateJSWrapper(id, typeName, instance) with the class metadata already resolved.
+        JsValue CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance);
+
+        // Estimated per-wrapper cost reported to the engine (Java object + runtime bookkeeping).
+        static constexpr int64_t kWrapperExternalCost = 1024;
 
         // Returns the class metadata stored on the per-instance JSInstanceInfo
         // (host proxy's, or the raw instance's native state). Used by
@@ -97,13 +107,28 @@ namespace tns {
         // It derives from engine::HostObject because that is what the native
         // state slot stores; it overrides none of the traps and is never exposed
         // to JS as an object of its own.
+        // Shared between the ObjectManager and every weakly held wrapper's JSInstanceInfo;
+        // cleared by OnDisposeRuntime so late native-state destruction becomes a no-op.
+        struct OwnerToken {
+            ObjectManager *manager = nullptr;
+            JsRuntime *runtime = nullptr;
+        };
+
         struct JSInstanceInfo : public engine::HostObject {
         public:
             JSInstanceInfo(uint32_t javaObjectID, jclass claz)
                     : JavaObjectID(javaObjectID), ObjectClazz(claz) {
             }
+            // For weakly held (Java-returned) wrappers the native-state holder is collected with the
+            // wrapper, so this destructor is the finalizer: it posts the Java-side release to the
+            // looper (see WrapperPostFinalizer). Runs inside the engine's GC pass, so it only enqueues.
+            ~JSInstanceInfo() override;
 
             uint32_t JavaObjectID;
+            // Set for weakly held wrappers only. The engine destroys native state on its own
+            // schedule -- possibly after ~Runtime has deleted the ObjectManager -- so the owner is
+            // reached through a token the manager invalidates on dispose.
+            std::shared_ptr<OwnerToken> owner;
             jclass ObjectClazz;
             // Cached super-call flag (-1 = unresolved, 0 = false, 1 = true).
             int8_t isSuper = -1;
@@ -182,12 +207,15 @@ namespace tns {
             std::set<HostObjectProxy *> proxies;
         };
 
+        void EnsureInstanceStrong(int javaObjectID);
         JsValue CreateHostObjectProxy(const JsValue &instance, JSInstanceInfo *instanceInfo,
                                       bool isPrimary);
 
         // Actual cleanup, deferred to the runtime's safe post-GC finalizer drain
         // (Runtime::PostFinalizer) so its handle-releasing work is legal.
         static void HostObjectProxyPostFinalizer(JsRuntime &rt, void *data, void *hint);
+        static void WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint);
+        JsValue CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance);
 
         std::shared_ptr<JSInstanceInfo> GetJSInstanceInfoShared(const JsValue &object);
 
@@ -214,7 +242,15 @@ namespace tns {
         // The napi tree stored a weak napi_ref for proxies and a strong one for
         // instances; those map onto engine::WeakObject and an owned Value.
         robin_hood::unordered_map<int, engine::WeakObject> m_idToProxy;
-        robin_hood::unordered_map<int, JsValue> m_idToObject;
+        // Strong handle for JS-constructed instances, weak for Java-returned wrappers.
+        struct WrapperHandle {
+            JsValue strong;
+            engine::WeakObject weak;
+            bool isStrong = false;
+        };
+        robin_hood::unordered_map<int, WrapperHandle> m_idToObject;
+        std::shared_ptr<OwnerToken> m_ownerToken;
+        JsValue LockWrapper(const WrapperHandle &handle);
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;
 

@@ -404,6 +404,7 @@ class Value {
   // the same storage, so here they are the old two-step. Declared on every
   // engine so the shared bridge can call one name.
   std::string utf8(Runtime& runtime) const;
+
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
 
   // The jsi handle behind this value, materialising one for the inline scalar
@@ -473,6 +474,18 @@ class String {
                                size_t length);
 
   std::string utf8(Runtime& runtime) const;
+  // UTF-16 in and out for the JNI bridge, on jsi's own two-byte API so unpaired surrogates
+  // survive the round trip (a UTF-8 detour would replace them).
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length);
+  std::u16string utf16(Runtime& runtime) const;
+  size_t utf16Length(Runtime& runtime) const { return utf16(runtime).size(); }
+  // Copies up to `capacity` code units (no terminator); returns the string length.
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+    std::u16string units = utf16(runtime);
+    size_t count = units.size() < capacity ? units.size() : capacity;
+    if (count > 0) std::memcpy(buffer, units.data(), count * sizeof(char16_t));
+    return units.size();
+  }
 
   operator Value() const { return Value::fromStorage(storage_); }
 
@@ -678,6 +691,21 @@ class Function : public Object {
 
 class Array : public Object {
  public:
+
+  // Bulk-read numeric elements into `out` (at most `capacity`). Returns false if an element is
+  // not a number, in which case the caller falls back to its per-element conversion.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    size_t count = size(runtime);
+    if (count > capacity) count = capacity;
+    for (size_t i = 0; i < count; i++) {
+      Value element = getValueAtIndexBorrowed(runtime, i);
+      if (!element.isNumber()) return false;
+      out[i] = element.getNumber();
+    }
+    *length = count;
+    return true;
+  }
+
   Array() = default;
   Array(Runtime& runtime, size_t size);
   explicit Array(Object object) : Object(std::move(object)) {}
@@ -935,6 +963,22 @@ inline String String::createFromUtf8(Runtime& runtime, const uint8_t* value,
             rt,
             value != nullptr ? value : reinterpret_cast<const uint8_t*>(""),
             length))));
+  });
+}
+
+inline String String::createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+  return hermesengine::guard(runtime, [&] {
+    ::facebook::jsi::Runtime& rt = runtime.jsi();
+    return String::fromStorage(hermesengine::makeStorage(
+        ::facebook::jsi::Value(::facebook::jsi::String::createFromUtf16(
+            rt, value != nullptr ? value : u"", length))));
+  });
+}
+
+inline std::u16string String::utf16(Runtime& runtime) const {
+  if (storage_ == nullptr) return {};
+  return hermesengine::guard(runtime, [&] {
+    return storage_->string(runtime.jsi()).utf16(runtime.jsi());
   });
 }
 

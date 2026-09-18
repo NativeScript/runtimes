@@ -540,6 +540,28 @@ class String {
     return v8engine::toUtf8(runtime.isolate(), local(runtime));
   }
 
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+    return String(runtime, v8::String::NewFromTwoByte(
+                               runtime.isolate(), reinterpret_cast<const uint16_t*>(value),
+                               v8::NewStringType::kNormal, static_cast<int>(length))
+                               .ToLocalChecked());
+  }
+
+  size_t utf16Length(Runtime& runtime) const {
+    return static_cast<size_t>(local(runtime)->Length());
+  }
+
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+    v8::Local<v8::String> str = local(runtime);
+    size_t length = static_cast<size_t>(str->Length());
+    size_t count = length < capacity ? length : capacity;
+    if (count > 0) {
+      str->WriteV2(runtime.isolate(), 0, static_cast<uint32_t>(count),
+                   reinterpret_cast<uint16_t*>(buffer), v8::String::WriteFlags::kNone);
+    }
+    return length;
+  }
+
   v8::Local<v8::String> local(Runtime& runtime) const {
     if (storage_->kind == v8engine::ValueStorage::Kind::V8Borrowed) {
       return storage_->borrowedValue.As<v8::String>();
@@ -1228,6 +1250,32 @@ class Function : public Object {
 
 class Array : public Object {
  public:
+
+  // Bulk-read numeric elements into `out` (at most `capacity`). Returns false if an element is
+  // not a number, in which case the caller falls back to its per-element conversion. V8 walks
+  // the packed backing store with Iterate: no handle and no exception plumbing per element.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    v8::Local<v8::Array> array = local(runtime).As<v8::Array>();
+    size_t count = static_cast<size_t>(array->Length());
+    if (count > capacity) count = capacity;
+    struct State { double* out; size_t count; size_t written; bool ok; } state{out, count, 0, true};
+    v8::Maybe<void> result = array->Iterate(
+        runtime.context(),
+        [](uint32_t index, v8::Local<v8::Value> element, void* data) {
+          auto* s = static_cast<State*>(data);
+          if (index >= s->count) return v8::Array::CallbackResult::kBreak;
+          if (!element->IsNumber()) { s->ok = false; return v8::Array::CallbackResult::kBreak; }
+          s->out[index] = element.As<v8::Number>()->Value();
+          s->written++;
+          return v8::Array::CallbackResult::kContinue;
+        },
+        &state);
+    // Dictionary-mode arrays only report present entries; unwritten holes go to the fallback.
+    if (result.IsNothing() || !state.ok || state.written != count) return false;
+    *length = count;
+    return true;
+  }
+
   explicit Array(Runtime& runtime, size_t size)
       : Object(std::make_shared<v8engine::ValueStorage>(v8engine::ValueStorage::Kind::V8)) {
     storage_->reset(runtime.isolate(),

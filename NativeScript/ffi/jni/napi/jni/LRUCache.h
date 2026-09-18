@@ -100,12 +100,18 @@ class LRUCache {
             }
         }
 
+        // Record a value the caller already holds (takes ownership of it). An existing entry
+        // for the key is evicted first: the fresh reference is the one known to be live, and the
+        // old one would otherwise leak outside the cache's capacity accounting.
+        void seed(const key_type& key, const value_type& value) {
+            evictKey(key);
+            insert(key, value);
+        }
+
         void update(const key_type& key, const value_type& value) {
             jweak ref = m_loadCallback(key, m_state);
             insert(key, ref);
         }
-
-    private:
 
         // Evict a specific key (used when a cached value is no longer valid).
         void evictKey(const key_type& key) {
@@ -118,6 +124,8 @@ class LRUCache {
                 m_key_to_value.erase(it);
             }
         }
+
+    private:
 
         // Record a fresh key-value pair in the cache
         void insert(const key_type& k, const value_type& v) {

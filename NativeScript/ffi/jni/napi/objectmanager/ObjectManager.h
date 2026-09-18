@@ -27,6 +27,7 @@ namespace tns {
 
         JniLocalRef GetJavaObjectByJsObject(napi_value object, int *objectId = nullptr,
                                             bool *isSuper = nullptr);
+        int ResolveJavaObjectId(napi_value object, int *objectId, bool *isSuper);
 
 
         JniLocalRef GetJavaObjectByJsObjectFast(napi_value object);
@@ -47,12 +48,19 @@ namespace tns {
         napi_value
         CreateJSWrapper(jint javaObjectID, const std::string &typeName, jobject instance);
 
+        napi_value
+        CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance);
+
         napi_value GetOrCreateProxy(jint javaObjectID, napi_value instance);
 
         napi_value GetOrCreateProxyWeak(jint javaObjectID, napi_value instance);
 
         void Link(napi_value object, uint32_t javaObjectID, jclass clazz,
-                  MetadataNode *node = nullptr);
+                  MetadataNode *node = nullptr,
+                  jobject instance = nullptr,
+                  bool strongRef = true,
+                  bool verified = false);
+
 
         // Returns the class metadata stored on the per-instance JSInstanceInfo
         // (host proxy's, or the raw instance's wrap). Used by
@@ -125,6 +133,7 @@ namespace tns {
             int64_t arrayLength = -1;      // cached fixed length (arrays only; -1=unresolved)
         };
 
+        void EnsureInstanceStrong(int javaObjectID);
         napi_value CreateHostObjectProxy(napi_value instance,
                                          JSInstanceInfo *instanceInfo,
                                          bool isPrimary);
@@ -163,14 +172,18 @@ namespace tns {
         JSInstanceInfo *GetJSInstanceInfoFromRuntimeObject(napi_value object);
 
         napi_value
-        CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz);
+        CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz, jobject instance = nullptr);
+        napi_value
+        CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance);
 
         static void JSObjectFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
+        static void JSObjectPostFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
 
         static void
         JSObjectProxyFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
 
         jweak GetJavaObjectByID(uint32_t javaObjectID);
+
 
         jobject GetJavaObjectByIDImpl(uint32_t javaObjectID);
 
@@ -190,6 +203,8 @@ namespace tns {
         robin_hood::unordered_set<int> m_markedAsWeakIds;
 
         LRUCache<int, jweak> m_cache;
+
+        static constexpr int64_t kWrapperExternalCost = 1024;
 
         volatile int m_currentObjectId;
 

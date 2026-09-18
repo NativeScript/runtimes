@@ -148,10 +148,25 @@ napi_value MetadataNode::CreateJSWrapper(napi_env env, ObjectManager *objectMana
     if (m_isArray) {
         obj = CreateArrayWrapper(env);
     } else {
-        obj = objectManager->GetEmptyObject();
-        napi_value ctorFunc = GetConstructorFunction(env);
-        NAPI_GUARD(napi_set_named_property(env, obj, CONSTRUCTOR, ctorFunc)) {}
-        napi_util::setPrototypeOf(env, obj, napi_util::get_prototype(env, ctorFunc));
+        napi_value prototype = nullptr;
+        auto cache = GetMetadataNodeCache(env);
+        auto itFound = cache->CtorFuncCache.find(m_treeNode);
+        if (itFound != cache->CtorFuncCache.end() && itFound->second.wrapperPrototype != nullptr) {
+            prototype = napi_util::get_ref_value(env, itFound->second.wrapperPrototype);
+        }
+        if (prototype == nullptr || napi_util::is_null_or_undefined(env, prototype)) {
+            napi_value ctorFunc = GetConstructorFunction(env);
+            prototype = napi_util::get_prototype(env, ctorFunc);
+            itFound = cache->CtorFuncCache.find(m_treeNode);
+            if (itFound != cache->CtorFuncCache.end()) {
+                if (itFound->second.wrapperPrototype != nullptr) {
+                    NAPI_GUARD(napi_delete_reference(env, itFound->second.wrapperPrototype)) {}
+                }
+                itFound->second.wrapperPrototype = napi_util::make_ref(env, prototype, 1);
+            }
+        }
+        NAPI_GUARD(napi_create_object(env, &obj)) { return nullptr; }
+        napi_util::setPrototypeOf(env, obj, prototype);
         SetInstanceMetadata(env, obj, this);
     }
 
@@ -2757,7 +2772,13 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                 }
                 return true;
             };
-            if (!first.isStatic && !metadataSignatureIsUnambiguous) {
+            // The metadata-first match only decides how a not-yet-bound entry gets its jmethodID.
+            // Once the single candidate of a call site is bound there is nothing left to decide, so
+            // skip the per-call signature parse / napi_typeof / IsInstanceOf walk entirely.
+            const bool alreadyBound = entry != nullptr && entry->memberId != nullptr &&
+                                      initialCallbackData->parent == nullptr &&
+                                      initialCallbackData->candidates.size() == 1;
+            if (!first.isStatic && !metadataSignatureIsUnambiguous && !alreadyBound) {
                 for (auto *candidateData = initialCallbackData;
                      candidateData != nullptr;
                      candidateData = candidateData->parent) {

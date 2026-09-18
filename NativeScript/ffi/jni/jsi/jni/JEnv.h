@@ -454,6 +454,12 @@ namespace tns {
 
         static JavaVM *s_jvm;
 
+    public:
+        static JavaVM *GetJavaVM() { return s_jvm; }
+        static void ClearCachedEnv();
+
+    private:
+
         static jclass RUNTIME_CLASS;
 
         static jmethodID GET_CACHED_CLASS_METHOD_ID;

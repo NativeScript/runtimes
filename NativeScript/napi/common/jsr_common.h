@@ -50,6 +50,9 @@ napi_status js_run_bytecode_file(napi_env env, const char *file, napi_value *res
 
 napi_status js_get_runtime_version(napi_env env, napi_value* version);
 
+napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, uint32_t capacity,
+                                 uint32_t* length);
+
 // Invoked by engine-specific env teardown to execute registered node-api
 // cleanup hooks for the environment before it is released.
 void js_run_env_cleanup_hooks(napi_env env);
