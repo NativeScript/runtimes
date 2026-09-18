@@ -248,44 +248,9 @@ JsValue ArgConverter::convertToJsString(JsRuntime &rt, const jchar *data, int le
         return convertToJsString(rt, std::string());
     }
 
-    // Strict UTF-16 -> UTF-8, matching what napi_create_string_utf16 did inside
-    // the engine. Unpaired surrogates are emitted as U+FFFD rather than dropped,
-    // so a lone jchar (Type::Char, which is exactly one code unit) still yields a
-    // one-character JS string.
-    std::string utf8;
-    utf8.reserve((size_t) length);
-    for (int i = 0; i < length; i++) {
-        uint32_t cp = data[i];
-        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length) {
-            uint32_t low = data[i + 1];
-            if (low >= 0xDC00 && low <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                i++;
-            } else {
-                cp = 0xFFFD;
-            }
-        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
-            cp = 0xFFFD;
-        }
-
-        if (cp < 0x80) {
-            utf8.push_back((char) cp);
-        } else if (cp < 0x800) {
-            utf8.push_back((char) (0xC0 | (cp >> 6)));
-            utf8.push_back((char) (0x80 | (cp & 0x3F)));
-        } else if (cp < 0x10000) {
-            utf8.push_back((char) (0xE0 | (cp >> 12)));
-            utf8.push_back((char) (0x80 | ((cp >> 6) & 0x3F)));
-            utf8.push_back((char) (0x80 | (cp & 0x3F)));
-        } else {
-            utf8.push_back((char) (0xF0 | (cp >> 18)));
-            utf8.push_back((char) (0x80 | ((cp >> 12) & 0x3F)));
-            utf8.push_back((char) (0x80 | ((cp >> 6) & 0x3F)));
-            utf8.push_back((char) (0x80 | (cp & 0x3F)));
-        }
-    }
-
-    return convertToJsString(rt, utf8);
+    static_assert(sizeof(jchar) == sizeof(char16_t));
+    return JsValue(rt, JsString::createFromUtf16(rt, reinterpret_cast<const char16_t *>(data),
+                                                 static_cast<size_t>(length)));
 }
 
 u16string ArgConverter::ConvertToUtf16String(JsRuntime &rt, const JsValue &s) {

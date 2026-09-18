@@ -403,9 +403,7 @@ bool JsArgConverter::ConvertJavaScriptArray(JsRuntime &rt, const JsValue &jsArr,
 
     const auto &arraySignature = (*m_tokens)[index];
 
-    std::string elementType = arraySignature.substr(1);
-
-    const char elementTypePrefix = elementType[0];
+    const char elementTypePrefix = arraySignature.size() > 1 ? arraySignature[1] : ' ';
 
     jclass elementClass;
     std::string strippedClassName;
@@ -453,8 +451,18 @@ bool JsArgConverter::ConvertJavaScriptArray(JsRuntime &rt, const JsValue &jsArr,
         case 'I': {
             arr = jenv.NewIntArray(arrLength);
             std::vector<jint> ints(arrLength);
-            for (jsize i = 0; i < arrLength; i++) {
-                ints[i] = (jint) js_util::get_int32(jsArray.getValueAtIndexBorrowed(rt, i));
+            // Bulk read through the engine (V8: Array::Iterate) into a stack buffer for small arrays.
+            double stackDoubles[64];
+            std::vector<double> heapDoubles;
+            double *doubles = stackDoubles;
+            if (arrLength > 64) { heapDoubles.resize(arrLength); doubles = heapDoubles.data(); }
+            size_t got = 0;
+            if (jsArray.copyNumbers(rt, doubles, (size_t) arrLength, &got) && got == (size_t) arrLength) {
+                for (jsize i = 0; i < arrLength; i++) ints[i] = (jint) (int32_t) doubles[i];
+            } else {
+                for (jsize i = 0; i < arrLength; i++) {
+                    ints[i] = (jint) js_util::get_int32(jsArray.getValueAtIndexBorrowed(rt, i));
+                }
             }
             jenv.SetIntArrayRegion((jintArray) arr, 0, arrLength, ints.data());
             break;
@@ -479,15 +487,22 @@ bool JsArgConverter::ConvertJavaScriptArray(JsRuntime &rt, const JsValue &jsArr,
         }
         case 'D': {
             arr = jenv.NewDoubleArray(arrLength);
-            std::vector<jdouble> doubles(arrLength);
-            for (jsize i = 0; i < arrLength; i++) {
-                doubles[i] = (jdouble) js_util::get_number(jsArray.getValueAtIndexBorrowed(rt, i));
+            // Bulk read through the engine (V8: Array::Iterate) into a stack buffer for small arrays.
+            jdouble stackDoubles[64];
+            std::vector<jdouble> heapDoubles;
+            jdouble *doubles = stackDoubles;
+            if (arrLength > 64) { heapDoubles.resize(arrLength); doubles = heapDoubles.data(); }
+            size_t got = 0;
+            if (!jsArray.copyNumbers(rt, doubles, (size_t) arrLength, &got) || got != (size_t) arrLength) {
+                for (jsize i = 0; i < arrLength; i++) {
+                    doubles[i] = (jdouble) js_util::get_number(jsArray.getValueAtIndexBorrowed(rt, i));
+                }
             }
-            jenv.SetDoubleArrayRegion((jdoubleArray) arr, 0, arrLength, doubles.data());
+            jenv.SetDoubleArrayRegion((jdoubleArray) arr, 0, arrLength, doubles);
             break;
         }
         case 'L':
-            strippedClassName = elementType.substr(1, elementType.length() - 2);
+            strippedClassName = arraySignature.substr(2, arraySignature.length() - 3);
             elementClass = jenv.FindClass(strippedClassName);
             arr = jenv.NewObjectArray(arrLength, elementClass, nullptr);
             for (jsize i = 0; i < arrLength; i++) {
@@ -730,7 +745,7 @@ JniLocalRef JsArgConverter::GetByteBuffer(JsRuntime &rt, const JsValue &object, 
 
     ObjectManager::MarkObject(rt, object);
 
-    objectManager->Link(object, id, clazz);
+    objectManager->Link(object, id, clazz, nullptr, buffer);
 
     return objectManager->GetJavaObjectByJsObject(object);
 }

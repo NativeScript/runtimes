@@ -100,12 +100,14 @@ class LRUCache {
             }
         }
 
+        void seed(const key_type& key, const value_type& value) {
+            if (m_key_to_value.find(key) == m_key_to_value.end()) insert(key, value);
+        }
+
         void update(const key_type& key, const value_type& value) {
             jweak ref = m_loadCallback(key, m_state);
             insert(key, ref);
         }
-
-    private:
 
         // Evict a specific key (used when a cached value is no longer valid).
         void evictKey(const key_type& key) {
@@ -118,6 +120,8 @@ class LRUCache {
                 m_key_to_value.erase(it);
             }
         }
+
+    private:
 
         // Record a fresh key-value pair in the cache
         void insert(const key_type& k, const value_type& v) {

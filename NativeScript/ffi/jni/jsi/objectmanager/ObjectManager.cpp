@@ -6,6 +6,7 @@
 #include "NativeScriptException.h"
 #include "Runtime.h"
 #include "CallbackHandlers.h"
+#include "EngineHost.h"
 #include <algorithm>
 #include <sstream>
 
@@ -20,7 +21,7 @@ jmethodID ObjectManager::GET_NAME_METHOD_ID = nullptr;
 
 ObjectManager::ObjectManager(jobject javaRuntimeObject) :
         m_javaRuntimeObject(javaRuntimeObject),
-        m_cache(NewWeakGlobalRefCallback, DeleteWeakGlobalRefCallback, ValidateWeakGlobalRefCallback, 1000, this),
+        m_cache(NewWeakGlobalRefCallback, DeleteWeakGlobalRefCallback, nullptr, 1000, this),
         m_currentObjectId(0),
         m_rt(nullptr),
         m_proxyRegistry(std::make_shared<ProxyRegistry>()) {
@@ -245,7 +246,13 @@ ObjectManager::GetJSInstanceInfoShared(const JsValue &object) {
 ObjectManager::JSInstanceInfo *ObjectManager::GetJSInstanceInfo(const JsValue &object) {
     if (!object.isObject()) return nullptr;
 
-    auto proxy = object.asObjectBorrowed(*m_rt).getHostObject<HostObjectProxy>(*m_rt);
+    JsObject borrowed = object.asObjectBorrowed(*m_rt);
+    // Plain wrappers (the common case): the native-state slot is type-token checked, so this is
+    // safe on any object and avoids the "#napi" prototype-chain probe.
+    auto direct = borrowed.getNativeState<JSInstanceInfo>(*m_rt);
+    if (direct != nullptr) return direct.get();
+
+    auto proxy = borrowed.getHostObject<HostObjectProxy>(*m_rt);
     if (proxy != nullptr) {
         if (proxy->instanceInfo) {
             return proxy->instanceInfo;
@@ -598,14 +605,32 @@ int ObjectManager::GetOrCreateObjectId(jobject object) {
     return javaObjectID;
 }
 
+JsValue ObjectManager::LockWrapper(const WrapperHandle &handle) {
+    if (handle.isStrong) return JsValue(*m_rt, handle.strong);
+    if (handle.weak.empty()) return js_util::undefined();
+    return handle.weak.lock(*m_rt);
+}
+
 JsValue ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
     auto it = m_idToObject.find(javaObjectID);
     if (it == m_idToObject.end()) {
         return js_util::undefined();
     }
 
-    JsValue instance = it->second;
+    JsValue instance = LockWrapper(it->second);
     if (js_util::is_null_or_undefined(instance)) return js_util::undefined();
+
+    // Identity: if JS already holds a proxy for this id (instances constructed from JS are
+    // handed out as proxies by RegisterInstance), that proxy is the object JS knows.
+    auto proxyIt = m_idToProxy.find(javaObjectID);
+    if (proxyIt != m_idToProxy.end() && !proxyIt->second.empty()) {
+        JsValue proxy = proxyIt->second.lock(*m_rt);
+        if (!js_util::is_null_or_undefined(proxy)) return proxy;
+    }
+    // Otherwise plain instances are handed out directly: the wrapper is weakly tracked and
+    // finalizes itself, so the host-object proxy only earns its keep for arrays (indexed access).
+    MetadataNode *node = GetInstanceNode(instance);
+    if (node != nullptr && !node->isArray()) return instance;
     return GetOrCreateProxy(javaObjectID, instance);
 }
 
@@ -618,41 +643,48 @@ JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, const std::string &typ
                                        jobject instance) {
     JEnv jenv;
     JniLocalRef clazz(jenv.GetObjectClass(instance));
+    auto className = GetClassName(static_cast<jclass>(clazz));
+    auto node = MetadataNode::GetOrCreate(className);
+    return CreateJSWrapperForNode(javaObjectID, node, clazz, instance);
+}
 
-    return CreateJSWrapperHelper(javaObjectID, typeName, clazz);
+JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
+    return CreateJSWrapperForNode(javaObjectID, node, clazz, instance);
 }
 
 JsValue ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName,
                                              jclass clazz) {
     auto className = (clazz != nullptr) ? GetClassName(clazz) : typeName;
-
     auto node = MetadataNode::GetOrCreate(className);
-    JsValue proxy = js_util::undefined();
-    JsValue jsWrapper = node->CreateJSWrapper(*m_rt, this);
-    if (jsWrapper.isObject()) {
-        // Reuse the class we already resolved via GetObjectClass on the instance
-        // path instead of re-resolving it with a JNI FindClass. The class is only
-        // stored on JSInstanceInfo::ObjectClazz, which nothing on this path reads,
-        // so a fresh FindClass is pure overhead; only fall back to it for the
-        // typeName-only overload where no instance class was available.
-        jclass linkClazz = clazz;
-        if (linkClazz == nullptr) {
-            JEnv jenv;
-            linkClazz = jenv.FindClass(className);
-        }
-        Link(jsWrapper, javaObjectID, linkClazz, node);
-        if (node->isArray()) {
-            jsWrapper.asObject(*m_rt).setProperty(*m_rt, "__is__javaArray", true);
-        }
-        proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
+    if (clazz == nullptr) {
+        JEnv jenv;
+        clazz = jenv.FindClass(className);
     }
+    return CreateJSWrapperForNode(javaObjectID, node, clazz, nullptr);
+}
 
-    return proxy;
+JsValue ObjectManager::CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
+    JsValue jsWrapper = node->CreateJSWrapper(*m_rt, this);
+    if (!jsWrapper.isObject()) return js_util::undefined();
+
+    // Java-returned wrappers are held weakly and finalize themselves (see ~JSInstanceInfo).
+    Link(jsWrapper, javaObjectID, clazz, node, instance, /*strongRef*/ false, /*verified*/ true);
+    if (node->isArray()) {
+        jsWrapper.asObject(*m_rt).setProperty(*m_rt, "__is__javaArray", true);
+        return GetOrCreateProxy(javaObjectID, jsWrapper);
+    }
+    return jsWrapper;
 }
 
 void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass clazz,
-                         MetadataNode *node) {
-    if (!IsRuntimeJsObject(object)) {
+                         MetadataNode *node, jobject instance, bool strongRef, bool verified) {
+    if (instance != nullptr) {
+        // Seed the id->object cache so the first method/field access on this wrapper does not
+        // round-trip into Java (getJavaObjectByID) to fetch an object we are holding right now.
+        JEnv jenv;
+        m_cache.seed(javaObjectID, jenv.NewWeakGlobalRef(instance));
+    }
+    if (!verified && !IsRuntimeJsObject(object)) {
         std::string errMsg("Trying to link invalid 'this' to a Java object");
         throw NativeScriptException(errMsg);
     }
@@ -661,12 +693,64 @@ void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass cl
 
     auto jsInstanceInfo = std::make_shared<JSInstanceInfo>(javaObjectID, clazz);
     jsInstanceInfo->node = node;
+    if (!strongRef) {
+        jsInstanceInfo->owner = this;
+        jsInstanceInfo->ownerRuntime = m_rt;
+        // Tell the engine what this wrapper pins on the Java side so it schedules GCs under
+        // native pressure instead of only when its own heap grows.
+        auto rtOwner = Runtime::GetRuntimeUnchecked(*m_rt);
+        if (rtOwner != nullptr) rtOwner->GetEngineHost()->AdjustExternalMemory(kWrapperExternalCost);
+    }
 
     // One slot, one owner: the native state both carries the record and keeps it
     // alive, replacing the napi tree's external-plus-wrap pair.
     object.asObjectBorrowed(*m_rt).setNativeState<JSInstanceInfo>(*m_rt, jsInstanceInfo);
 
-    m_idToObject.emplace(javaObjectID, JsValue(*m_rt, object));
+    WrapperHandle handle;
+    if (strongRef) {
+        handle.strong = JsValue(*m_rt, object);
+        handle.isStrong = true;
+    } else {
+        handle.weak = engine::WeakObject(*m_rt, object);
+    }
+    // A collected wrapper leaves its (now empty) weak handle behind until finalized; replace it.
+    m_idToObject[javaObjectID] = std::move(handle);
+}
+
+// Weakly held wrappers: the native-state holder dies with the wrapper, inside the engine's GC
+// pass, where only JNI and queueing are allowed. The Java-side release and the engine handle
+// bookkeeping run on the looper tick.
+ObjectManager::JSInstanceInfo::~JSInstanceInfo() {
+    if (owner == nullptr || ownerRuntime == nullptr) return;
+    auto *pending = new int(static_cast<int>(JavaObjectID));
+    Runtime::PostFinalizer(*ownerRuntime, WrapperPostFinalizer, pending, owner);
+}
+
+void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) {
+    auto *pending = reinterpret_cast<int *>(data);
+    if (pending == nullptr) return;
+    int javaObjectID = *pending;
+    delete pending;
+    auto rtOwner = Runtime::GetRuntimeUnchecked(rt);
+    if (rtOwner == nullptr || rtOwner->is_destroying) return;
+    auto objManager = reinterpret_cast<ObjectManager *>(hint);
+    if (objManager == nullptr || objManager != rtOwner->GetObjectManager()) return;
+
+    rtOwner->GetEngineHost()->AdjustExternalMemory(-kWrapperExternalCost);
+    if (objManager->m_weakObjectIds.find(javaObjectID) == objManager->m_weakObjectIds.end()) {
+        objManager->m_weakObjectIds.emplace(javaObjectID);
+        JEnv jEnv;
+        jEnv.CallVoidMethod(objManager->m_javaRuntimeObject, objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
+                            javaObjectID);
+    }
+    // Drop the id->wrapper entry now instead of waiting for a Java GC notification that may
+    // never come; only if it still points at nothing (a new wrapper may have been linked).
+    auto it = objManager->m_idToObject.find(javaObjectID);
+    if (it != objManager->m_idToObject.end() && !it->second.isStrong &&
+        js_util::is_null_or_undefined(objManager->LockWrapper(it->second))) {
+        objManager->m_idToObject.erase(it);
+    }
+    objManager->m_cache.evictKey(javaObjectID);
 }
 
 bool ObjectManager::CloneLink(const JsValue &src, const JsValue &dest) {
@@ -759,6 +843,7 @@ void ObjectManager::ReleaseObjectNow(JsRuntime &rt, int javaObjectId) {
 
     objMgr->m_idToProxy.erase(javaObjectId);
     objMgr->m_idToObject.erase(javaObjectId);
+    objMgr->m_cache.evictKey(javaObjectId);
 
     Runtime::GetRuntime(rt)->js_method_cache->cleanupObject(javaObjectId);
 }
@@ -787,6 +872,7 @@ void ObjectManager::OnGarbageCollected(JNIEnv *jEnv, jintArray object_ids) {
         auto rt = Runtime::GetRuntimeUnchecked(*m_rt);
         if (rt && rt->is_destroying) return;
         int javaObjectId = cppArray[i];
+        this->m_cache.evictKey(javaObjectId);
         auto itFound = this->m_idToObject.find(javaObjectId);
         if (itFound != this->m_idToObject.end()) {
             this->m_idToObject.erase(javaObjectId);

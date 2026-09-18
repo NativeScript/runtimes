@@ -423,8 +423,29 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
                 returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (js_util::is_null_or_undefined(returnValue)) {
-                    returnValue = objectManager->CreateJSWrapper(javaObjectID, *returnType,
-                                                                 result);
+                    MetadataNode *returnNode = nullptr;
+                    JniLocalRef runtimeClazz(jEnv.GetObjectClass(result));
+                    if (entry != nullptr && !isArrayReturn) {
+                        if (!entry->returnClazzResolved) {
+                            entry->returnClazzResolved = true;
+                            // returnType is a JNI descriptor (Lpkg/Cls;); FindClass and the metadata want pkg/Cls.
+                            if (returnType->size() > 2 && (*returnType)[0] == 'L') {
+                                std::string declaredName = returnType->substr(1, returnType->size() - 2);
+                                // JEnv::FindClass returns a cached global ref that lives for the process.
+                                jclass declared = jEnv.FindClass(declaredName);
+                                if (declared != nullptr) {
+                                    entry->returnClazz = declared;
+                                    entry->returnNode = MetadataNode::GetOrCreate(declaredName);
+                                }
+                            }
+                        }
+                        if (entry->returnClazz != nullptr && jEnv.isSameObject(runtimeClazz, entry->returnClazz)) {
+                            returnNode = entry->returnNode;
+                        }
+                    }
+                    returnValue = returnNode != nullptr
+                                  ? objectManager->CreateJSWrapper(javaObjectID, returnNode, runtimeClazz, result)
+                                  : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
                 }
             }
 

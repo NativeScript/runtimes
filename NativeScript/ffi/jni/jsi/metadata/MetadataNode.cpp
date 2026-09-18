@@ -173,11 +173,22 @@ JsValue MetadataNode::CreateJSWrapper(JsRuntime &rt, ObjectManager *objectManage
         return CreateArrayWrapper(rt);
     }
 
-    JsValue obj = objectManager->GetEmptyObject();
-    JsValue ctorFunc = GetConstructorFunction(rt);
-    auto object = obj.asObjectBorrowed(rt);
-    object.setProperty(rt, "constructor", ctorFunc);
-    js_util::setPrototypeOf(rt, obj, js_util::get_prototype(rt, ctorFunc));
+    auto cache = GetMetadataNodeCache(rt);
+    auto itFound = cache->CtorFuncCache.find(m_treeNode);
+    JsValue prototype;
+    if (itFound != cache->CtorFuncCache.end() && itFound->second.wrapperPrototype.isObject()) {
+        prototype = JsValue(rt, itFound->second.wrapperPrototype);
+    } else {
+        JsValue ctorFunc = GetConstructorFunction(rt);
+        prototype = js_util::get_prototype(rt, ctorFunc);
+        itFound = cache->CtorFuncCache.find(m_treeNode);
+        if (itFound != cache->CtorFuncCache.end()) {
+            itFound->second.wrapperPrototype = JsValue(rt, prototype);
+        }
+    }
+    JsObject plain(rt);
+    JsValue obj(rt, plain);
+    js_util::setPrototypeOf(rt, obj, prototype);
     SetInstanceMetadata(rt, obj, this);
 
     return obj;

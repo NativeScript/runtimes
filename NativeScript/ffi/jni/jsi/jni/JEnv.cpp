@@ -7,30 +7,37 @@
 using namespace tns;
 using namespace std;
 
-JEnv::JEnv()
-        : m_env(nullptr) {
-    JNIEnv *env = nullptr;
-    jint ret = s_jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+// A JNIEnv* is valid for as long as its thread stays attached, so resolve it once per
+// thread instead of asking the JavaVM on every JEnv construction (a Java call builds
+// several JEnv objects on its way through the bridge).
+static thread_local JNIEnv *t_cachedEnv = nullptr;
 
+static JNIEnv *ResolveEnv() {
+    JNIEnv *env = nullptr;
+    jint ret = JEnv::GetJavaVM()->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
     if ((ret != JNI_OK) || (env == nullptr)) {
-        ret = s_jvm->AttachCurrentThread(&env, nullptr);
+        ret = JEnv::GetJavaVM()->AttachCurrentThread(&env, nullptr);
         assert(ret == JNI_OK);
         assert(env != nullptr);
     }
-
-    m_env = env;
+    t_cachedEnv = env;
+    return env;
 }
 
-JEnv::JEnv(JNIEnv *jniEnv) {
-    jint ret = s_jvm->GetEnv(reinterpret_cast<void **>(&jniEnv), JNI_VERSION_1_6);
-
-    if ((ret != JNI_OK) || (jniEnv == nullptr)) {
-        ret = s_jvm->AttachCurrentThread(&jniEnv, nullptr);
-        assert(ret == JNI_OK);
-        assert(jniEnv != nullptr);
+JEnv::JEnv()
+        : m_env(t_cachedEnv) {
+    if (m_env == nullptr) [[unlikely]] {
+        m_env = ResolveEnv();
     }
+}
 
-    m_env = jniEnv;
+JEnv::JEnv(JNIEnv *jniEnv)
+        : m_env(jniEnv) {
+    if (m_env == nullptr) [[unlikely]] {
+        m_env = ResolveEnv();
+    } else {
+        t_cachedEnv = jniEnv;
+    }
 }
 
 JEnv::~JEnv() {
@@ -571,9 +578,7 @@ void JEnv::DeleteWeakGlobalRef(jweak obj) {
 }
 
 jobject JEnv::NewLocalRef(jobject ref) {
-    jobject jo = m_env->NewLocalRef(ref);
-    CheckForJavaException();
-    return jo;
+    return m_env->NewLocalRef(ref);
 }
 
 void JEnv::DeleteLocalRef(jobject localRef) {
@@ -899,3 +904,7 @@ JEnv::GetInterfaceStaticMethodIDAndJClass(const std::string &interfaceName,
 }
 
 
+
+void JEnv::ClearCachedEnv() {
+    t_cachedEnv = nullptr;
+}

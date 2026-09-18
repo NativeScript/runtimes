@@ -451,6 +451,7 @@ void WorkerWrapper::BackgroundLooper(std::shared_ptr<WorkerWrapper> self) {
 
     // ART aborts if a native thread exits while still attached. This must be
     // the very last JNI-touching action on this thread.
+    JEnv::ClearCachedEnv();
     jvm->DetachCurrentThread();
 }
 

@@ -55,6 +55,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "jsi/shared/Utf16.h"
 
 namespace nativescript {
 namespace engine {
@@ -404,6 +405,7 @@ class Value {
   // the same storage, so here they are the old two-step. Declared on every
   // engine so the shared bridge can call one name.
   std::string utf8(Runtime& runtime) const;
+
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
 
   // The jsi handle behind this value, materialising one for the inline scalar
@@ -473,6 +475,21 @@ class String {
                                size_t length);
 
   std::string utf8(Runtime& runtime) const;
+  // UTF-16 in and out for the JNI bridge. This backend's native string API is UTF-8, so these
+  // transcode; V8 and JSC provide them natively.
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+    return createFromUtf8(runtime, ::nativescript::engine::utf16::toUtf8(value, length));
+  }
+  size_t utf16Length(Runtime& runtime) const {
+    return ::nativescript::engine::utf16::fromUtf8(utf8(runtime)).size();
+  }
+  // Copies up to `capacity` code units (no terminator); returns the string length.
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+    std::u16string units = ::nativescript::engine::utf16::fromUtf8(utf8(runtime));
+    size_t count = units.size() < capacity ? units.size() : capacity;
+    for (size_t i = 0; i < count; i++) buffer[i] = units[i];
+    return units.size();
+  }
 
   operator Value() const { return Value::fromStorage(storage_); }
 
@@ -678,6 +695,21 @@ class Function : public Object {
 
 class Array : public Object {
  public:
+
+  // Bulk-read numeric elements into `out` (at most `capacity`). Returns false if an element is
+  // not a number, in which case the caller falls back to its per-element conversion.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    size_t count = size(runtime);
+    if (count > capacity) count = capacity;
+    for (size_t i = 0; i < count; i++) {
+      Value element = getValueAtIndexBorrowed(runtime, i);
+      if (!element.isNumber()) return false;
+      out[i] = element.getNumber();
+    }
+    *length = count;
+    return true;
+  }
+
   Array() = default;
   Array(Runtime& runtime, size_t size);
   explicit Array(Object object) : Object(std::move(object)) {}
