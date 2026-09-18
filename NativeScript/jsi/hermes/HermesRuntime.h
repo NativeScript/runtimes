@@ -55,7 +55,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "jsi/shared/Utf16.h"
 
 namespace nativescript {
 namespace engine {
@@ -475,19 +474,16 @@ class String {
                                size_t length);
 
   std::string utf8(Runtime& runtime) const;
-  // UTF-16 in and out for the JNI bridge. This backend's native string API is UTF-8, so these
-  // transcode; V8 and JSC provide them natively.
-  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
-    return createFromUtf8(runtime, ::nativescript::engine::utf16::toUtf8(value, length));
-  }
-  size_t utf16Length(Runtime& runtime) const {
-    return ::nativescript::engine::utf16::fromUtf8(utf8(runtime)).size();
-  }
+  // UTF-16 in and out for the JNI bridge, on jsi's own two-byte API so unpaired surrogates
+  // survive the round trip (a UTF-8 detour would replace them).
+  static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length);
+  std::u16string utf16(Runtime& runtime) const;
+  size_t utf16Length(Runtime& runtime) const { return utf16(runtime).size(); }
   // Copies up to `capacity` code units (no terminator); returns the string length.
   size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
-    std::u16string units = ::nativescript::engine::utf16::fromUtf8(utf8(runtime));
+    std::u16string units = utf16(runtime);
     size_t count = units.size() < capacity ? units.size() : capacity;
-    for (size_t i = 0; i < count; i++) buffer[i] = units[i];
+    if (count > 0) std::memcpy(buffer, units.data(), count * sizeof(char16_t));
     return units.size();
   }
 
@@ -967,6 +963,22 @@ inline String String::createFromUtf8(Runtime& runtime, const uint8_t* value,
             rt,
             value != nullptr ? value : reinterpret_cast<const uint8_t*>(""),
             length))));
+  });
+}
+
+inline String String::createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
+  return hermesengine::guard(runtime, [&] {
+    ::facebook::jsi::Runtime& rt = runtime.jsi();
+    return String::fromStorage(hermesengine::makeStorage(
+        ::facebook::jsi::Value(::facebook::jsi::String::createFromUtf16(
+            rt, value != nullptr ? value : u"", length))));
+  });
+}
+
+inline std::u16string String::utf16(Runtime& runtime) const {
+  if (storage_ == nullptr) return {};
+  return hermesengine::guard(runtime, [&] {
+    return storage_->string(runtime.jsi()).utf16(runtime.jsi());
   });
 }
 

@@ -575,8 +575,9 @@ napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, ui
   struct State {
     double* out;
     uint32_t count;
+    uint32_t written;
     bool numbersOnly;
-  } state{out, count, true};
+  } state{out, count, 0, true};
 
   // Iterate walks the backing store of packed arrays directly: no handle per element and no
   // Node-API status plumbing. The callback may not allocate or call back into V8.
@@ -590,11 +591,15 @@ napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, ui
           return v8::Array::CallbackResult::kBreak;
         }
         s->out[index] = element.As<v8::Number>()->Value();
+        s->written++;
         return v8::Array::CallbackResult::kContinue;
       },
       &state);
   if (result.IsNothing()) return napi_generic_failure;
   if (!state.numbersOnly) return napi_number_expected;
+  // Dictionary-mode arrays only report present entries, so holes leave slots unwritten;
+  // hand those to the per-element path, which sees them as undefined.
+  if (state.written != count) return napi_number_expected;
   *length = count;
   return napi_ok;
 }

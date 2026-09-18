@@ -133,6 +133,7 @@ namespace tns {
             int64_t arrayLength = -1;      // cached fixed length (arrays only; -1=unresolved)
         };
 
+        void EnsureInstanceStrong(int javaObjectID);
         napi_value CreateHostObjectProxy(napi_value instance,
                                          JSInstanceInfo *instanceInfo,
                                          bool isPrimary);

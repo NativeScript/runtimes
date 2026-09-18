@@ -1258,7 +1258,7 @@ class Array : public Object {
     v8::Local<v8::Array> array = local(runtime).As<v8::Array>();
     size_t count = static_cast<size_t>(array->Length());
     if (count > capacity) count = capacity;
-    struct State { double* out; size_t count; bool ok; } state{out, count, true};
+    struct State { double* out; size_t count; size_t written; bool ok; } state{out, count, 0, true};
     v8::Maybe<void> result = array->Iterate(
         runtime.context(),
         [](uint32_t index, v8::Local<v8::Value> element, void* data) {
@@ -1266,10 +1266,12 @@ class Array : public Object {
           if (index >= s->count) return v8::Array::CallbackResult::kBreak;
           if (!element->IsNumber()) { s->ok = false; return v8::Array::CallbackResult::kBreak; }
           s->out[index] = element.As<v8::Number>()->Value();
+          s->written++;
           return v8::Array::CallbackResult::kContinue;
         },
         &state);
-    if (result.IsNothing() || !state.ok) return false;
+    // Dictionary-mode arrays only report present entries; unwritten holes go to the fallback.
+    if (result.IsNothing() || !state.ok || state.written != count) return false;
     *length = count;
     return true;
   }

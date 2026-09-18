@@ -578,7 +578,9 @@ void JEnv::DeleteWeakGlobalRef(jweak obj) {
 }
 
 jobject JEnv::NewLocalRef(jobject ref) {
-    return m_env->NewLocalRef(ref);
+    jobject jo = m_env->NewLocalRef(ref);
+    CheckForJavaException();
+    return jo;
 }
 
 void JEnv::DeleteLocalRef(jobject localRef) {

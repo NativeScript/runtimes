@@ -107,6 +107,13 @@ namespace tns {
         // It derives from engine::HostObject because that is what the native
         // state slot stores; it overrides none of the traps and is never exposed
         // to JS as an object of its own.
+        // Shared between the ObjectManager and every weakly held wrapper's JSInstanceInfo;
+        // cleared by OnDisposeRuntime so late native-state destruction becomes a no-op.
+        struct OwnerToken {
+            ObjectManager *manager = nullptr;
+            JsRuntime *runtime = nullptr;
+        };
+
         struct JSInstanceInfo : public engine::HostObject {
         public:
             JSInstanceInfo(uint32_t javaObjectID, jclass claz)
@@ -118,9 +125,10 @@ namespace tns {
             ~JSInstanceInfo() override;
 
             uint32_t JavaObjectID;
-            // Set for weakly held wrappers only.
-            ObjectManager *owner = nullptr;
-            JsRuntime *ownerRuntime = nullptr;
+            // Set for weakly held wrappers only. The engine destroys native state on its own
+            // schedule -- possibly after ~Runtime has deleted the ObjectManager -- so the owner is
+            // reached through a token the manager invalidates on dispose.
+            std::shared_ptr<OwnerToken> owner;
             jclass ObjectClazz;
             // Cached super-call flag (-1 = unresolved, 0 = false, 1 = true).
             int8_t isSuper = -1;
@@ -199,6 +207,7 @@ namespace tns {
             std::set<HostObjectProxy *> proxies;
         };
 
+        void EnsureInstanceStrong(int javaObjectID);
         JsValue CreateHostObjectProxy(const JsValue &instance, JSInstanceInfo *instanceInfo,
                                       bool isPrimary);
 
@@ -240,6 +249,7 @@ namespace tns {
             bool isStrong = false;
         };
         robin_hood::unordered_map<int, WrapperHandle> m_idToObject;
+        std::shared_ptr<OwnerToken> m_ownerToken;
         JsValue LockWrapper(const WrapperHandle &handle);
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;

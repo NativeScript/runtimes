@@ -35,7 +35,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "jsi/shared/Utf16.h"
 
 #include "quickjs.h"
 
@@ -430,18 +429,30 @@ class String {
   }
   std::string utf8(Runtime& runtime) const;
 
+  // UTF-16 in and out for the JNI bridge, on the engine's own two-byte API so unpaired
+  // surrogates survive the round trip (a UTF-8 detour would replace them).
   static String createFromUtf16(Runtime& runtime, const char16_t* value, size_t length) {
-    return createFromUtf8(runtime, ::nativescript::engine::utf16::toUtf8(value, length));
+    static const uint16_t empty = 0;
+    return adopt(runtime, JS_NewStringUTF16(runtime.context(),
+                                            value != nullptr ? reinterpret_cast<const uint16_t*>(value) : &empty,
+                                            length));
   }
-  size_t utf16Length(Runtime& runtime) const {
-    return ::nativescript::engine::utf16::fromUtf8(utf8(runtime)).size();
-  }
+  size_t utf16Length(Runtime& runtime) const { return copyUtf16(runtime, nullptr, 0); }
   // Copies up to `capacity` code units (no terminator); returns the string length.
   size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
-    std::u16string units = ::nativescript::engine::utf16::fromUtf8(utf8(runtime));
-    size_t count = units.size() < capacity ? units.size() : capacity;
-    for (size_t i = 0; i < count; i++) buffer[i] = units[i];
-    return units.size();
+    JSContext* ctx = runtime.context();
+    JSValue value = local(runtime);
+    size_t length = 0;
+    const uint16_t* units = JS_ToCStringLenUTF16(ctx, &length, value);
+    if (units != nullptr) {
+      size_t count = length < capacity ? length : capacity;
+      if (count > 0) std::memcpy(buffer, units, count * sizeof(char16_t));
+      JS_FreeCStringUTF16(ctx, units);
+    } else {
+      length = 0;
+    }
+    JS_FreeValue(ctx, value);
+    return length;
   }
   JSValue local(Runtime& runtime) const;
   operator Value() const;

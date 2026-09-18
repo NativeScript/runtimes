@@ -196,15 +196,7 @@ napi_value ObjectManager::GetOrCreateProxy(jint javaObjectID, napi_value instanc
 
 #endif
 
-    auto javaObjectIdFound = m_weakObjectIds.find(javaObjectID);
-    if (javaObjectIdFound != m_weakObjectIds.end()) {
-        m_weakObjectIds.erase(javaObjectID);
-        JEnv jenv;
-        jenv.CallVoidMethod(m_javaRuntimeObject,
-                            MAKE_INSTANCE_STRONG_METHOD_ID,
-                            javaObjectID);
-        DEBUG_WRITE("Making instance strong: %d", javaObjectID);
-    }
+    EnsureInstanceStrong(javaObjectID);
 
     m_idToProxy.emplace(javaObjectID, napi_util::make_ref(m_env, proxy, 0));
 
@@ -852,6 +844,18 @@ ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeN
     return CreateJSWrapperForNode(javaObjectID, node, clazz, instance);
 }
 
+// Java keeps an instance strong while a JS wrapper for it is alive and weak otherwise. The
+// Java side reuses the id of a weakened instance (getOrCreateJavaObjectID consults the weak
+// table too), so any path that (re)creates a wrapper must move it back to the strong table.
+void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
+    auto it = m_weakObjectIds.find(javaObjectID);
+    if (it == m_weakObjectIds.end()) return;
+    m_weakObjectIds.erase(it);
+    JEnv jenv;
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
+    DEBUG_WRITE("Making instance strong: %d", javaObjectID);
+}
+
 napi_value
 ObjectManager::CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
     napi_status status;
@@ -864,6 +868,7 @@ ObjectManager::CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jcl
         // so a fresh FindClass is pure overhead; only fall back to it for the
         // typeName-only overload where no instance class was available.
         Link(jsWrapper, javaObjectID, clazz, node, instance, /*strongRef*/ false, /*verified*/ true);
+        EnsureInstanceStrong(javaObjectID);
         if (node->isArray()) {
             NAPI_GUARD(napi_set_named_property(m_env, jsWrapper, "__is__javaArray",
                                     napi_util::get_true(m_env))) {}

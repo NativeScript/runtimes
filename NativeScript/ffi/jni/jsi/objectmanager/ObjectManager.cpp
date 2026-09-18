@@ -61,6 +61,9 @@ ObjectManager::ObjectManager(jobject javaRuntimeObject) :
 
 void ObjectManager::Init(JsRuntime &rt) {
     m_rt = &rt;
+    m_ownerToken = std::make_shared<OwnerToken>();
+    m_ownerToken->manager = this;
+    m_ownerToken->runtime = &rt;
 
     JsFunction jsObjectCtor = JsFunction::createFromHostConstructor(
             rt, JsPropNameID::forAscii(rt, "JSObject"), 0,
@@ -85,6 +88,12 @@ void ObjectManager::OnDisposeRuntime() {
     m_idToProxy.clear();
     m_idToObject.clear();
     m_jsObjectCtor = JsFunction();
+    // Wrapper native state outlives this object (the engine frees it during its own teardown);
+    // detach it so ~JSInstanceInfo does not reach a deleted manager or runtime.
+    if (m_ownerToken != nullptr) {
+        m_ownerToken->manager = nullptr;
+        m_ownerToken->runtime = nullptr;
+    }
 
     // The host-object proxies are owned by the *engine*, and each holds an owned
     // handle to the instance it wraps. Nothing above reaches them: they are only
@@ -138,15 +147,7 @@ JsValue ObjectManager::GetOrCreateProxy(jint javaObjectID, const JsValue &instan
     }
     JsValue proxy = CreateHostObjectProxy(instance, info, /*isPrimary=*/true);
 
-    auto javaObjectIdFound = m_weakObjectIds.find(javaObjectID);
-    if (javaObjectIdFound != m_weakObjectIds.end()) {
-        m_weakObjectIds.erase(javaObjectID);
-        JEnv jenv;
-        jenv.CallVoidMethod(m_javaRuntimeObject,
-                            MAKE_INSTANCE_STRONG_METHOD_ID,
-                            javaObjectID);
-        DEBUG_WRITE("Making instance strong: %d", javaObjectID);
-    }
+    EnsureInstanceStrong(javaObjectID);
 
     m_idToProxy.emplace(javaObjectID, engine::WeakObject(*m_rt, proxy));
 
@@ -663,12 +664,25 @@ JsValue ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::strin
     return CreateJSWrapperForNode(javaObjectID, node, clazz, nullptr);
 }
 
+// Java keeps an instance strong while a JS wrapper for it is alive and weak otherwise. The
+// Java side reuses the id of a weakened instance (getOrCreateJavaObjectID consults the weak
+// table too), so any path that (re)creates a wrapper must move it back to the strong table.
+void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
+    auto it = m_weakObjectIds.find(javaObjectID);
+    if (it == m_weakObjectIds.end()) return;
+    m_weakObjectIds.erase(it);
+    JEnv jenv;
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
+    DEBUG_WRITE("Making instance strong: %d", javaObjectID);
+}
+
 JsValue ObjectManager::CreateJSWrapperForNode(jint javaObjectID, MetadataNode *node, jclass clazz, jobject instance) {
     JsValue jsWrapper = node->CreateJSWrapper(*m_rt, this);
     if (!jsWrapper.isObject()) return js_util::undefined();
 
     // Java-returned wrappers are held weakly and finalize themselves (see ~JSInstanceInfo).
     Link(jsWrapper, javaObjectID, clazz, node, instance, /*strongRef*/ false, /*verified*/ true);
+    EnsureInstanceStrong(javaObjectID);
     if (node->isArray()) {
         jsWrapper.asObject(*m_rt).setProperty(*m_rt, "__is__javaArray", true);
         return GetOrCreateProxy(javaObjectID, jsWrapper);
@@ -694,8 +708,7 @@ void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass cl
     auto jsInstanceInfo = std::make_shared<JSInstanceInfo>(javaObjectID, clazz);
     jsInstanceInfo->node = node;
     if (!strongRef) {
-        jsInstanceInfo->owner = this;
-        jsInstanceInfo->ownerRuntime = m_rt;
+        jsInstanceInfo->owner = m_ownerToken;
         // Tell the engine what this wrapper pins on the Java side so it schedules GCs under
         // native pressure instead of only when its own heap grows.
         auto rtOwner = Runtime::GetRuntimeUnchecked(*m_rt);
@@ -721,9 +734,9 @@ void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass cl
 // pass, where only JNI and queueing are allowed. The Java-side release and the engine handle
 // bookkeeping run on the looper tick.
 ObjectManager::JSInstanceInfo::~JSInstanceInfo() {
-    if (owner == nullptr || ownerRuntime == nullptr) return;
+    if (owner == nullptr || owner->manager == nullptr || owner->runtime == nullptr) return;
     auto *pending = new int(static_cast<int>(JavaObjectID));
-    Runtime::PostFinalizer(*ownerRuntime, WrapperPostFinalizer, pending, owner);
+    Runtime::PostFinalizer(*owner->runtime, WrapperPostFinalizer, pending, owner->manager);
 }
 
 void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) {
@@ -737,6 +750,14 @@ void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) 
     if (objManager == nullptr || objManager != rtOwner->GetObjectManager()) return;
 
     rtOwner->GetEngineHost()->AdjustExternalMemory(-kWrapperExternalCost);
+    // Between the GC that killed the wrapper and this tick, Java may have handed the same
+    // object out again and a new wrapper may have been linked under this id. Everything below
+    // is keyed by id, so it belongs to that live wrapper now and must be left alone.
+    auto it = objManager->m_idToObject.find(javaObjectID);
+    if (it != objManager->m_idToObject.end() &&
+        !js_util::is_null_or_undefined(objManager->LockWrapper(it->second))) {
+        return;
+    }
     if (objManager->m_weakObjectIds.find(javaObjectID) == objManager->m_weakObjectIds.end()) {
         objManager->m_weakObjectIds.emplace(javaObjectID);
         JEnv jEnv;
@@ -744,12 +765,8 @@ void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) 
                             javaObjectID);
     }
     // Drop the id->wrapper entry now instead of waiting for a Java GC notification that may
-    // never come; only if it still points at nothing (a new wrapper may have been linked).
-    auto it = objManager->m_idToObject.find(javaObjectID);
-    if (it != objManager->m_idToObject.end() && !it->second.isStrong &&
-        js_util::is_null_or_undefined(objManager->LockWrapper(it->second))) {
-        objManager->m_idToObject.erase(it);
-    }
+    // never come.
+    if (it != objManager->m_idToObject.end()) objManager->m_idToObject.erase(it);
     objManager->m_cache.evictKey(javaObjectID);
 }
 

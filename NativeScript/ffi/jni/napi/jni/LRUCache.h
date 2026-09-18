@@ -100,8 +100,12 @@ class LRUCache {
             }
         }
 
+        // Record a value the caller already holds (takes ownership of it). An existing entry
+        // for the key is evicted first: the fresh reference is the one known to be live, and the
+        // old one would otherwise leak outside the cache's capacity accounting.
         void seed(const key_type& key, const value_type& value) {
-            if (m_key_to_value.find(key) == m_key_to_value.end()) insert(key, value);
+            evictKey(key);
+            insert(key, value);
         }
 
         void update(const key_type& key, const value_type& value) {
