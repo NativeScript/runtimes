@@ -270,7 +270,6 @@ function main() {
     "# GENERATED from the app's JS bundle. Do not edit.\n" +
       "# Seed only -- the metadata generator computes the closure over\n" +
       "# supertypes, nested classes and signature types before filtering.\n" +
-      "# See docs/metadata-filtering.md.\n" +
       sorted.join("\n") +
       "\n"
   );

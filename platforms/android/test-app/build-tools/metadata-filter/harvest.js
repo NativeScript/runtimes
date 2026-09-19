@@ -5,8 +5,7 @@
  * The output is deliberately two-sided. `resolved` is what the analysis could
  * name exactly. `roots` is what it could only place -- a package it is sure the
  * program reaches into but whose class it cannot name, because the access was
- * computed. A filter built from `resolved` alone would be wrong: see
- * docs/metadata-filtering.md for the measurement that says by how much. Every
+ * computed. A filter built from `resolved` alone would be wrong. Every
  * construct this file cannot resolve must widen `roots`, never fail silently;
  * that asymmetry is the whole safety argument.
  */

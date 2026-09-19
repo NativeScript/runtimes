@@ -868,7 +868,7 @@ task 'collectAllJars' {
 //
 // The seed is only a starting point -- the generator closes over supertypes,
 // nested classes and signature types before dropping anything, and fails the
-// build if that closure turns out to be unsound. See docs/metadata-filtering.md.
+// build if that closure turns out to be unsound.
 def nsFilterMetadata = project.hasProperty("nsFilterMetadata")
 
 // Build-owned, and deliberately NOT $rootDir/whitelist.mdg: that path belongs to

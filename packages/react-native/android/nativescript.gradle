@@ -72,13 +72,12 @@ def nsEntryFile = reactExt?.entryFile?.getOrNull()?.asFile?.absolutePath
 // On by default, and release-only: a debug build has no bundle on disk to
 // analyse, and guessing from a partial view is what breaks apps. Shipping
 // metadata for the whole compile classpath means an app that touches 5% of the
-// platform pays for 100% of it, in both APK size and startup parse time.
 //
 // The seed is a lower bound that the generator widens (supertypes, nested
 // classes, signature types) before dropping anything, because usage alone is
 // not enough: android.os.Bundle is never named in JS and never resolved as a
 // node, yet removing it makes Activity.onCreate(Bundle) unbuildable and the app
-// crashes at launch. See docs/metadata-filtering.md.
+// crashes at launch.
 //
 // -PnsFilterMetadata=false opts out and ships the whole classpath, which is the
 // escape hatch if a filtered build misses something.
@@ -981,7 +980,6 @@ android.applicationVariants.all { variant ->
         // break in the field. The seed is only a starting point: the generator
         // closes over supertypes, nested classes and signature types, and fails
         // the build if that closure turns out unsound.
-        // See docs/metadata-filtering.md.
         if (nsFilterMetadata) {
             def seedTask = tasks.register("generateNativeScriptMetadataSeed${variantName}") {
                 group = "nativescript"

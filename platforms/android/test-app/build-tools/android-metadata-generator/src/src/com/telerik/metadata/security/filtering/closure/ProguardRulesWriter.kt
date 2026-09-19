@@ -35,7 +35,7 @@ object ProguardRulesWriter {
                     # here are absent from the metadata too, so JS cannot name
                     # them and R8 is free to remove them.
                     #
-                    # Regenerate by rebuilding; see docs/metadata-filtering.md.
+                    # Regenerate by rebuilding.
 
                     """.trimIndent()
             )
