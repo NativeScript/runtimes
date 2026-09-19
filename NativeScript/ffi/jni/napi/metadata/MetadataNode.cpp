@@ -1163,39 +1163,6 @@ MetadataNode *MetadataNode::GetOrCreate(const string &className) {
     return node;
 }
 
-#if defined(NS_METADATA_USAGE_TRACE)
-// Ground truth for the build-time metadata filter: every metadata node the app
-// actually materialises, emitted once, at the single point where a tree node
-// first becomes a MetadataNode. A build with this on is a measuring instrument,
-// not a shipping configuration -- see the metadata-filter lane in
-// docs/metadata-filtering.md for how the trace is diffed against the static
-// harvest.
-void MetadataNode::TraceUsage(MetadataTreeNode *treeNode) {
-    static std::set<std::string> *s_traced = new std::set<std::string>();
-
-    auto name = GetJniClassName(treeNode);
-    if (name.empty()) {
-        return;
-    }
-
-    if (!s_traced->insert(name).second) {
-        return;
-    }
-
-    uint8_t nodeType = s_metadataReader.GetNodeType(treeNode);
-    const char *kind = s_metadataReader.IsNodeTypePackage(nodeType)
-                       ? "P"
-                       : (s_metadataReader.IsNodeTypeInterface(nodeType) ? "I" : "C");
-
-    // R marks a node the metadata files did not contain, rebuilt by reflection.
-    // A filtered build is allowed to omit these -- that path is why omitting
-    // them is safe -- so the coverage check must not count them as misses.
-    const char *origin = treeNode->synthesizedAtRuntime ? "R" : "F";
-
-    __android_log_print(ANDROID_LOG_INFO, "NS_MD_USE", "%s%s %s", kind, origin, name.c_str());
-}
-#endif
-
 MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     MetadataNode *result = nullptr;
 
@@ -1204,9 +1171,6 @@ MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
     if (it != s_treeNode2NodeCache.end()) {
         result = it->second;
     } else {
-#if defined(NS_METADATA_USAGE_TRACE)
-        TraceUsage(treeNode);
-#endif
             auto name = GetJniClassName(treeNode);
             if (!name.empty()) {
                 auto it2 = s_name2NodeCache.find(name);
@@ -2634,6 +2598,8 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
 
         auto callbackData = reinterpret_cast<MethodCallbackData *>(data);
         auto initialCallbackData = reinterpret_cast<MethodCallbackData *>(data);
+        MethodCallbackData *selectedCallbackData = nullptr;
+        std::vector<MetadataEntry *> arityCandidates;
 
         string *className;
         auto &first = callbackData->candidates.front();
@@ -2646,6 +2612,8 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
             !first.isExtensionFunction &&
             first.getParamCount() == argc) {
             className = &callbackData->node->m_name;
+            selectedCallbackData = callbackData;
+            arityCandidates.push_back(&first);
             entry = &first;
         }
 
@@ -2654,27 +2622,29 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
 
             className = &callbackData->node->m_name;
 
-            // Iterates through all methods and finds the best match based on the number of arguments
-            auto found = false;
+            arityCandidates.clear();
             for (auto &c: candidates) {
-                found = (!c.isExtensionFunction && c.getParamCount() == argc) ||
-                        (c.isExtensionFunction && c.getParamCount() == argc + 1);
-                if (found) {
-                    if (c.isExtensionFunction) {
-                        className = &c.getDeclaringType();
-                    }
-                    entry = &c;
-                    DEBUG_WRITE("MetaDataEntry Method %s's signature is: %s",
-                                entry->getName().c_str(),
-                                entry->getSig().c_str());
-                    break;
+                if ((!c.isExtensionFunction && c.getParamCount() == argc) ||
+                    (c.isExtensionFunction && c.getParamCount() == argc + 1)) {
+                    arityCandidates.push_back(&c);
                 }
             }
 
-            // Iterates through the parent class's methods to find a good match
-            if (!found) {
+            if (!arityCandidates.empty()) {
+                selectedCallbackData = callbackData;
+                if (arityCandidates.front()->isExtensionFunction) {
+                    className = &arityCandidates.front()->getDeclaringType();
+                }
+                break;
+            } else {
                 callbackData = callbackData->parent;
             }
+        }
+
+        if (arityCandidates.size() == 1) {
+            entry = arityCandidates.front();
+        } else if (arityCandidates.size() > 1) {
+            entry = arityCandidates.front();
         }
 
 
@@ -2691,15 +2661,53 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                         initialCallbackData->node->IsNodeTypeInterface() ? 1 : 0;
             }
             bool isFromInterface = initialCallbackData->cachedIsFromInterface == 1;
-            if (initialCallbackData->objectManager == nullptr) {
+        if (initialCallbackData->objectManager == nullptr) {
                 initialCallbackData->objectManager =
                         Runtime::GetRuntime(env)->GetObjectManager();
             }
 
+
             size_t metadataMatches = 0;
             MetadataEntry *metadataMatch = nullptr;
             bool metadataSignatureIsUnambiguous = false;
-            auto metadataTypesMatch = [&](MetadataEntry &candidate) {
+            bool forceReflectionFallback = false;
+            bool preserveGenericObject = false;
+            bool hasObjectCandidate = false;
+            bool hasSpecificInterfaceCandidate = false;
+            bool hasExactStringCandidate = false;
+            for (auto *candidate : arityCandidates) {
+                const auto signature = candidate->getSig();
+                hasObjectCandidate |= signature.find("Ljava/lang/Object;") != std::string::npos;
+                hasSpecificInterfaceCandidate |= signature.find("Ljava/io/Serializable;") != std::string::npos ||
+                                                signature.find("Ljava/lang/CharSequence;") != std::string::npos;
+                hasExactStringCandidate |= signature.find("(Ljava/lang/String;") == 0;
+            }
+            preserveGenericObject = hasObjectCandidate && hasSpecificInterfaceCandidate && !hasExactStringCandidate;
+            struct MetadataCandidateMatch {
+                MetadataEntry *entry;
+                std::vector<jclass> parameterClasses;
+            };
+            std::vector<MetadataCandidateMatch> metadataCandidateMatches;
+            JEnv metadataEnv;
+            bool hasNullArgument = false;
+            for (size_t i = 0; i < argc; i++) {
+                napi_valuetype valueType;
+                if (napi_typeof(env, argv[i], &valueType) != napi_ok) {
+                    hasNullArgument = true;
+                    break;
+                }
+                if (valueType != napi_object && valueType != napi_function) {
+                    continue;
+                }
+                napi_value nullNode = nullptr;
+                if (napi_get_named_property(env, argv[i], PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
+                    !napi_util::is_null_or_undefined(env, nullNode)) {
+                    hasNullArgument = true;
+                    break;
+                }
+            }
+            auto metadataTypesMatch = [&](MetadataEntry &candidate,
+                                           std::vector<jclass> &parameterClasses) {
                 const auto signature = candidate.getSig();
                 if (signature.empty() || signature[0] != '(') {
                     return false;
@@ -2728,58 +2736,209 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                     parameterTypes.emplace_back(signature.substr(start, index - start));
                 }
 
+                if (candidate.isExtensionFunction) {
+                    if (parameterTypes.empty()) return false;
+                    parameterTypes.erase(parameterTypes.begin());
+                }
                 if (parameterTypes.size() != argc) return false;
 
-                JEnv metadataEnv;
+                parameterClasses.assign(argc, nullptr);
                 for (size_t i = 0; i < argc; i++) {
                     const auto &parameterType = parameterTypes[i];
                     napi_valuetype valueType;
                     napi_typeof(env, argv[i], &valueType);
                     if (parameterType[0] == 'L' || parameterType[0] == '[') {
-                        if (valueType != napi_object && valueType != napi_function) return false;
-                        auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(argv[i]);
-                        if (actualObject.IsNull()) return false;
+                        jclass expectedClass = nullptr;
                         auto expectedName = parameterType;
                         if (expectedName[0] == 'L') {
                             expectedName = expectedName.substr(1, expectedName.size() - 2);
                         }
-                        auto expectedClass = metadataEnv.FindClass(expectedName);
+                        expectedClass = metadataEnv.FindClass(expectedName);
                         if (expectedClass == nullptr) {
                             metadataEnv.ExceptionClear();
                             return false;
                         }
-                        if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                        parameterClasses[i] = expectedClass;
+
+                        if (valueType == napi_string) {
+                            if (expectedName != "java/lang/String") {
+                                return false;
+                            }
+                            auto stringClass = metadataEnv.FindClass("java/lang/String");
+                            if (stringClass == nullptr) {
+                                metadataEnv.ExceptionClear();
+                                return false;
+                            }
+                            if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) {
+                                return false;
+                            }
+                        } else {
+                            if (valueType != napi_object && valueType != napi_function) return false;
+                            napi_value nullNode = nullptr;
+                            if (napi_get_named_property(env, argv[i], PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
+                                !napi_util::is_null_or_undefined(env, nullNode)) {
+                                return false;
+                            }
+                            auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(argv[i]);
+                            if (actualObject.IsNull()) return false;
+                            if (parameterType[0] == '[' && expectedName == "[Ljava/lang/Object;") {
+                                if (ObjectManager::GetClassName((jobject) actualObject) != expectedName) {
+                                    return false;
+                                }
+                            }
+                            bool hasSerializableCandidate = false;
+                            for (auto *arityCandidate : arityCandidates) {
+                                if (arityCandidate->getSig().find("Ljava/io/Serializable;") != std::string::npos) {
+                                    hasSerializableCandidate = true;
+                                    break;
+                                }
+                            }
+                            if (expectedName == "java/lang/Object" && !hasSerializableCandidate) {
+                                return false;
+                            }
+                            if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                        }
                     } else if (parameterType[0] == 'Z') {
                         if (valueType != napi_boolean) return false;
-                    } else if (valueType != napi_number) {
+                    } else if (valueType != napi_number ||
+                               (parameterType[0] != 'B' && parameterType[0] != 'C' &&
+                                parameterType[0] != 'S' && parameterType[0] != 'I' &&
+                                parameterType[0] != 'J' && parameterType[0] != 'F' &&
+                                parameterType[0] != 'D')) {
                         return false;
                     }
                 }
                 return true;
             };
-            if (!first.isStatic && !metadataSignatureIsUnambiguous) {
-                for (auto *candidateData = initialCallbackData;
-                     candidateData != nullptr;
-                     candidateData = candidateData->parent) {
-                    for (auto &candidate : candidateData->candidates) {
-                        if (!candidate.isExtensionFunction &&
-                            candidate.isStatic == first.isStatic &&
-                            candidate.getIsResolved() &&
-                            candidate.getParamCount() == argc &&
-                            metadataTypesMatch(candidate)) {
-                            metadataMatches++;
-                            metadataMatch = &candidate;
+            if (!hasNullArgument && selectedCallbackData != nullptr && arityCandidates.size() > 1 && !preserveGenericObject) {
+                for (auto *candidate : arityCandidates) {
+                    if (candidate->isStatic != first.isStatic) {
+                        continue;
+                    }
+                    std::vector<jclass> parameterClasses;
+                    if (metadataTypesMatch(*candidate, parameterClasses)) {
+                        metadataCandidateMatches.push_back({candidate, std::move(parameterClasses)});
+                    }
+                }
+
+                for (size_t i = 0; i < metadataCandidateMatches.size(); i++) {
+                    bool dominated = false;
+                    for (size_t j = 0; j < metadataCandidateMatches.size(); j++) {
+                        if (i == j) continue;
+
+                        const auto &candidate = metadataCandidateMatches[i];
+                        const auto &other = metadataCandidateMatches[j];
+                        for (size_t parameter = 0; parameter < argc; parameter++) {
+                            auto candidateClass = candidate.parameterClasses[parameter];
+                            auto otherClass = other.parameterClasses[parameter];
+                            if (candidateClass == nullptr || otherClass == nullptr) {
+                                if (candidate.entry->getSig() != other.entry->getSig()) {
+                                    break;
+                                }
+                                continue;
+                            }
+
+                            if (metadataEnv.IsAssignableFrom(candidateClass, otherClass) == JNI_TRUE) {
+                                if (metadataEnv.IsAssignableFrom(otherClass, candidateClass) != JNI_TRUE) {
+                                    dominated = true;
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if (dominated) break;
+                    }
+                    if (!dominated) {
+                        metadataMatches++;
+                        metadataMatch = metadataCandidateMatches[i].entry;
+                    }
+                }
+                metadataSignatureIsUnambiguous = metadataMatches == 1 && metadataMatch != nullptr;
+                bool hasExactStringCandidate = false;
+                for (const auto &candidate : metadataCandidateMatches) {
+                    if (candidate.entry->getSig().find("(Ljava/lang/String;") == 0) {
+                        hasExactStringCandidate = true;
+                        break;
+                    }
+                }
+                if (metadataCandidateMatches.size() > 1 && !hasExactStringCandidate) {
+                    metadataSignatureIsUnambiguous = false;
+                    metadataMatch = nullptr;
+                    forceReflectionFallback = false;
+                }
+                if (!metadataSignatureIsUnambiguous && !metadataCandidateMatches.empty()) {
+                    for (const auto &candidate : metadataCandidateMatches) {
+                        const auto signature = candidate.entry->getSig();
+                        const auto closeParen = signature.find(')');
+                        if (closeParen != std::string::npos && closeParen > 1 &&
+                            signature[1] == '[') {
+                            forceReflectionFallback = true;
+                            break;
+                        }
+                        if (closeParen != std::string::npos && closeParen > 1 &&
+                            signature[1] != 'L' && signature[1] != 'Z') {
+                            forceReflectionFallback = true;
+                            break;
                         }
                     }
                 }
-                metadataSignatureIsUnambiguous = metadataMatches == 1 &&
-                                                 metadataMatch != nullptr;
+                if (!metadataSignatureIsUnambiguous && metadataCandidateMatches.empty()) {
+                    for (auto *candidate : arityCandidates) {
+                        if (candidate->isExtensionFunction) {
+                            continue;
+                        }
+                        const auto signature = candidate->getSig();
+                        const auto closeParen = signature.find(')');
+                        const bool hasObjectParameter = signature.find("Ljava/lang/Object;") != std::string::npos;
+                        const bool hasArrayParameter = signature.find('[') != std::string::npos;
+                        const bool hasPrimitiveParameter = closeParen != std::string::npos && closeParen > 1 &&
+                                                           signature[1] != 'L' && signature[1] != '[' && signature[1] != 'Z';
+                        if (!hasObjectParameter && !hasArrayParameter && !hasPrimitiveParameter) {
+                            continue;
+                        }
+                        for (size_t i = 0; i < argc; i++) {
+                            napi_valuetype valueType;
+                            napi_typeof(env, argv[i], &valueType);
+                            if (valueType == napi_object || valueType == napi_function || valueType == napi_number) {
+                                forceReflectionFallback = true;
+                                break;
+                            }
+                        }
+                        if (forceReflectionFallback) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!hasNullArgument && entry != nullptr && !entry->isExtensionFunction && arityCandidates.size() == 1) {
+                std::vector<jclass> parameterClasses;
+                if (metadataTypesMatch(*entry, parameterClasses)) {
+                    metadataMatch = entry;
+                    metadataSignatureIsUnambiguous = true;
+                } else {
+                    const auto signature = entry->getSig();
+                    if (entry->isStatic || signature.find("Ljava/lang/Object;") == std::string::npos) {
+                        entry = nullptr;
+                    }
+                }
+            }
+            if (!hasNullArgument && entry != nullptr && entry->isExtensionFunction) {
+                metadataMatch = entry;
+                metadataSignatureIsUnambiguous = true;
             }
             if (metadataSignatureIsUnambiguous) {
                 entry = metadataMatch;
+            } else if (forceReflectionFallback) {
+                entry = nullptr;
             }
+            const bool selectedIsStatic = entry != nullptr
+                                          ? entry->isStatic
+                                          : (arityCandidates.size() == 1
+                                             ? arityCandidates.front()->isStatic
+                                             : first.isStatic);
             napi_value result = CallbackHandlers::CallJavaMethod(env, jsThis, *className, methodName, entry,
-                                                    isFromInterface, first.isStatic, info,
+                                                    isFromInterface, selectedIsStatic, info,
                                                     argc, argv, initialCallbackData->objectManager,
                                                     metadataSignatureIsUnambiguous);
 //            napi_value error;

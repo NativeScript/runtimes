@@ -38,6 +38,41 @@ using namespace tns;
 
 
 namespace {
+bool EnsureMetadataReturnType(MetadataEntry *entry) {
+    if (entry == nullptr) {
+        return false;
+    }
+
+    auto &returnType = entry->getReturnType();
+    if (!returnType.empty()) {
+        return true;
+    }
+
+    const auto &signature = entry->getSig();
+    const auto closeParen = signature.find(')');
+    if (closeParen == std::string::npos || closeParen + 1 >= signature.size()) {
+        return false;
+    }
+
+    const auto candidate = signature.substr(closeParen + 1);
+    switch (candidate[0]) {
+        case 'V': case 'Z': case 'B': case 'C': case 'S':
+        case 'I': case 'J': case 'F': case 'D':
+            if (candidate.size() != 1) return false;
+            break;
+        case 'L':
+            if (candidate.size() < 3 || candidate.back() != ';') return false;
+            break;
+        case '[':
+            if (candidate.size() < 2) return false;
+            break;
+        default:
+            return false;
+    }
+
+    returnType = candidate;
+    return true;
+}
 // Converts a NativeScriptException into a JS throw, the way every callback in
 // this tree has to. The napi tree needed no equivalent: there a native error
 // was reported with napi_throw and a plain return, so nothing could unwind out
@@ -114,24 +149,43 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     MethodCache::CacheMethodInfo mi;
     bool isSuper = false;
 
+    if (metadataSignatureIsUnambiguous && entry != nullptr &&
+        !EnsureMetadataReturnType(entry)) {
+        entry = nullptr;
+        metadataSignatureIsUnambiguous = false;
+    }
+
     if (metadataSignatureIsUnambiguous && entry != nullptr && entry->memberId == nullptr) {
         JEnv metadataEnv;
         auto metadataClass = metadataEnv.FindClass(className);
         if (metadataClass != nullptr) {
-            auto metadataMethod = isStatic
-                                  ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
-                                                                   entry->getSig())
-                                  : metadataEnv.GetMethodID(metadataClass, methodName,
-                                                            entry->getSig());
+            jmethodID metadataMethod;
+            jclass resolvedMetadataClass = metadataClass;
+            if (isStatic && isFromInterface) {
+                auto methodAndClassPair = metadataEnv.GetInterfaceStaticMethodIDAndJClass(
+                        className, methodName, entry->getSig());
+                metadataMethod = methodAndClassPair.first;
+                if (methodAndClassPair.second != nullptr) {
+                    resolvedMetadataClass = methodAndClassPair.second;
+                }
+            } else {
+                metadataMethod = isStatic
+                                 ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
+                                                                  entry->getSig())
+                                 : metadataEnv.GetMethodID(metadataClass, methodName,
+                                                           entry->getSig());
+            }
             if (metadataMethod != nullptr) {
                 entry->memberId = reinterpret_cast<void *>(metadataMethod);
-                entry->clazz = metadataClass;
+                entry->clazz = resolvedMetadataClass;
             } else {
                 metadataEnv.ExceptionClear();
+                entry = nullptr;
                 metadataSignatureIsUnambiguous = false;
             }
         } else {
             metadataEnv.ExceptionClear();
+            entry = nullptr;
             metadataSignatureIsUnambiguous = false;
         }
     }
