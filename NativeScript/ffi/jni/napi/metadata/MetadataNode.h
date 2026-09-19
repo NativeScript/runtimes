@@ -130,11 +130,6 @@ private:
     static ExtendedClassCacheData GetCachedExtendedClassData(napi_env env, const std::string& proxyClassName);
     static std::string GetJniClassName(const MetadataTreeNode* node);
 
-#if defined(NS_METADATA_USAGE_TRACE)
-    static void TraceUsage(MetadataTreeNode *treeNode);
-#endif
-
-
     static void SetClassAccessor(napi_env env, napi_value constructor);
 
     static MetadataEntry GetChildMetadataForPackage(MetadataNode *node, const char *propName);
