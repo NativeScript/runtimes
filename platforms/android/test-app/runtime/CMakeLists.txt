@@ -470,12 +470,6 @@ if (NS_CONTENT_KEYED_BINDINGS)
     target_compile_definitions(NativeScript PRIVATE NS_CONTENT_KEYED_BINDINGS)
 endif ()
 
-# Emit the set of metadata nodes the app actually resolves. Wired from
-# runtime/build.gradle (-Pmetadata-usage-trace); a diagnostic build only.
-if (NS_METADATA_USAGE_TRACE)
-    target_compile_definitions(NativeScript PRIVATE NS_METADATA_USAGE_TRACE)
-endif ()
-
 # if("${ANDROID_ABI}" MATCHES "armeabi-v7a$" OR "${ANDROID_ABI}" MATCHES "x86$")
 #     # On API Level 19 and lower we need to link with android_support
 #     # because it contains some implementation of functions such as "strtoll" and "strtoul"
