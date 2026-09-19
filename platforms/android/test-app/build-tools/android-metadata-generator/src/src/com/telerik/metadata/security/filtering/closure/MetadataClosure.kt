@@ -11,7 +11,7 @@ import com.telerik.metadata.storage.functions.extensions.ExtensionFunctionsStora
  *
  * A whitelist naming exactly the classes an app was observed to use does not
  * work: it produces metadata that cannot start the app. Two reasons, both
- * measured -- see docs/metadata-filtering.md.
+ * measured.
  *
  *  - A retained class's *supertypes* carry most of its members.
  *  - A retained method's *signature types* must be present **exactly**. When one
