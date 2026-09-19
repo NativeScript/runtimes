@@ -14,31 +14,8 @@ device QV7120NC26), not reasoned about.
 
 ## How to reproduce the measurements
 
-Two instruments, both added by this lane:
-
-**Ground truth** -- what the app really resolves at runtime:
-
-```bash
-cd platforms/android/test-app
-./gradlew :app:assembleDebug -Pengine=HERMES -PbindingLayer=jsi -Pmetadata-usage-trace
-# run the app, then:
-adb logcat | grep NS_MD_USE      # "C android/app/Activity", "P android/os", …
-```
-
-`-Pmetadata-usage-trace` compiles `NS_METADATA_USAGE_TRACE` into
-`MetadataNode::GetOrCreateInternal`, the one place a metadata tree node becomes
-a `MetadataNode`. It logs each node once. It is a diagnostic build only.
-
-> The flag has to reach the compiler, not just Gradle. Confirm with
-> `grep NS_METADATA_USAGE_TRACE runtime/.cxx/Debug/*/arm64-v8a/compile_commands.json`
-> and match the APK's `.so` build-id to that config -- a stale `.so` packaged by
-> AGP has produced convincing all-green runs of a feature that was compiled out.
-> Note that `-Pengine=V8-13` builds the **napi** tree and `-Pengine=HERMES
-> -PbindingLayer=jsi` the jsi one. Both carry the tracer; they did not always,
-> and a trace taken against the tree you did not build is empty rather than
-> wrong, which is easy to misread as "nothing resolved".
-
-**Static harvest** -- what an analysis of the JS can see:
+The static harvest is the supported measurement path; it describes what an
+analysis of the JavaScript can see without runtime instrumentation:
 
 ```bash
 node platforms/android/test-app/build-tools/metadata-filter/harvest.js \
