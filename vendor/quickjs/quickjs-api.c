@@ -2562,28 +2562,44 @@ napi_status napi_get_all_property_names(napi_env env, napi_value object,
 
   JSValue array = JS_NewArray(env->context);
   JSValue proto = JS_DupValue(env->context, jsValue);
+  uint32_t array_index = 0;
 
   while (!JS_IsNull(proto)) {
     JSPropertyEnum* tab = NULL;
     uint32_t len = 0;
 
-    JS_GetOwnPropertyNames(env->context, &tab, &len, proto, get_filter);
+    if (JS_GetOwnPropertyNames(env->context, &tab, &len, proto, get_filter)) {
+      JS_FreeValue(env->context, proto);
+      JS_FreeValue(env->context, array);
+      return napi_pending_exception;
+    }
 
     for (uint32_t i = 0; i < len; i++) {
       JSValue name = JS_AtomToValue(env->context, tab[i].atom);
-      JS_SetPropertyInt64(env->context, array, i, name);
+      if (JS_SetPropertyInt64(env->context, array, array_index++, name) < 0) {
+        JS_FreePropertyEnum(env->context, tab, len);
+        JS_FreeValue(env->context, proto);
+        JS_FreeValue(env->context, array);
+        return napi_pending_exception;
+      }
     }
 
     JS_FreePropertyEnum(env->context, tab, len);
 
-    // Free the prototype.
-    JS_FreeValue(env->context, proto);
-
+    JSValue current_proto = proto;
     if (key_mode == napi_key_include_prototypes) {
-      proto = JS_GetPrototype(env->context, proto);
+        proto = JS_GetPrototype(env->context, current_proto);
+        if (JS_IsException(proto)) {
+            JS_FreeValue(env->context, current_proto);
+            JS_FreeValue(env->context, proto);
+            JS_FreeValue(env->context, array);
+            return napi_pending_exception;
+        }
     } else {
-      proto = JS_NULL;
+        proto = JS_NULL;
     }
+
+    JS_FreeValue(env->context, current_proto);
   }
 
   return CreateScopedResult(env, array, result);

@@ -61,6 +61,10 @@ void Timers::Init(napi_env env, napi_value global) {
     napi_util::napi_set_function(env, global, "__ns__setInterval", SetIntervalCallback, this);
     napi_util::napi_set_function(env, global, "__ns__clearTimeout", ClearTimer, this);
     napi_util::napi_set_function(env, global, "__ns__clearInterval", ClearTimer, this);
+    napi_util::napi_set_function(env, global, "setTimeout", SetTimeoutCallback, this);
+    napi_util::napi_set_function(env, global, "setInterval", SetIntervalCallback, this);
+    napi_util::napi_set_function(env, global, "clearTimeout", ClearTimer, this);
+    napi_util::napi_set_function(env, global, "clearInterval", ClearTimer, this);
 
     napi_status status;
     // Non-fatal to timer operation if this fails (only affects GC cleanup of
