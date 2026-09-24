@@ -16,7 +16,7 @@ std::shared_ptr<T> v8HostObject(Runtime& runtime, v8::Local<v8::Value> value) {
     return nullptr;
   }
   auto* holder = static_cast<engine::v8engine::HostObjectHolder*>(
-      object->GetAlignedPointerFromInternalField(0));
+      object->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
   if (holder == nullptr ||
       holder->typeToken != engine::v8engine::hostObjectTypeToken<T>()) {
     return nullptr;
@@ -36,7 +36,7 @@ T* v8HostObjectRaw(v8::Local<v8::Value> value) {
     return nullptr;
   }
   auto* holder = static_cast<engine::v8engine::HostObjectHolder*>(
-      object->GetAlignedPointerFromInternalField(0));
+      object->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
   if (holder == nullptr ||
       holder->typeToken != engine::v8engine::hostObjectTypeToken<T>()) {
     return nullptr;

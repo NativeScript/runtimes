@@ -6,6 +6,9 @@
 #include <unordered_map>
 
 #include "js_native_api_types.h"
+// jsr_ns_runtime (used for runtime_ below) moved out of js_native_api_types.h
+// and into jsr_common.h.
+#include "jsr_common.h"
 #include "runtime/apple/SpinLock.h"
 #include "runtime/apple/modules/RuntimeModules.h"
 
@@ -60,7 +63,7 @@ class Runtime {
   double startTime_;
   double realtimeOrigin_;
 
-  napi_runtime runtime_ = nullptr;
+  jsr_ns_runtime runtime_ = nullptr;
   napi_env env_ = nullptr;
   napi_handle_scope globalScope_ = nullptr;
   RuntimeModules modules_ = RuntimeModules();

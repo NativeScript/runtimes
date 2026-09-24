@@ -1,16 +1,17 @@
 apply plugin: 'com.android.library'
 
-// can be: "V8-11", "V8-10", "V8-13", "JSC", "HERMES", "QUICKJS", "QUICKJS_NG", "PRIMJS".
+// can be: "V8", "JSC", "HERMES", "QUICKJS", "QUICKJS_NG", "PRIMJS".
+// QUICKJS is an alias for QUICKJS_NG; the bellard tree was dropped.
 // "SHERMES" is accepted as a compatibility alias for the Static Hermes build.
 
-def jsEngine = "V8-13"
+def jsEngine = "V8"
 def hasEngine = project.hasProperty("engine")
 if (hasEngine) {
     jsEngine = engine
 }
 def runtimeVersionFile = new File(projectDir, "../../../../NativeScript/runtime/android/version/Version.h")
 
-def hasHostObjects = project.hasProperty("useHostObjects")
+def hasHostObjects = true //project.hasProperty("useHostObjects")
 def isNapiModule = project.hasProperty("asNapiModule");
 
 printf("Compiling NativeScript with %s.\n", jsEngine)
@@ -35,7 +36,21 @@ if (useCCache) {
     println "Use CCache build triggered."
 }
 
-def defaultNdkVersion = "27.1.12297006"
+// Bytecode stack-trace support. Defaults on (opt out with -PnsBytecodeDisabled).
+// Defines NS_BYTECODE_ENABLED so BuildStacktraceFrames accepts bytecode frames
+// (app-relative source names) and rebuilds their full runtime URL. Harmless when
+// the app ships plain JS — those frames always carry a "file://" URL already.
+def bytecodeStacktraces = !project.hasProperty("nsBytecodeDisabled")
+if (bytecodeStacktraces) {
+    println "Bytecode stack-trace frame support enabled."
+}
+
+// V8 14.9's internal headers (src/base/atomicops.h, src/base/memcopy.h) use
+// std::atomic_ref unconditionally. libc++ only ships it from LLVM 19, which
+// means NDK r29 -- r27 and r28 both fail to compile the inspector sources.
+// Upstream V8 never hits this because Chromium builds Android with its own
+// clang rather than the NDK's.
+def defaultNdkVersion = "29.0.14206865"
 
 def hasNdkVersion = project.hasProperty("ndkVersion")
 if (hasNdkVersion) {
@@ -70,6 +85,34 @@ if (hasNdkVersion) {
    } else {
        NDK_PATH = "$System.env.ANDROID_HOME/ndk/${ndkVersion}"
    }
+}
+
+// V8 14.9's internal headers use std::atomic_ref, which libc++ only ships from
+// LLVM 19 (NDK r29). r27/r28 fail deep inside src/base/atomicops.h with a wall
+// of template errors that says nothing about the real cause, and $ANDROID_NDK
+// in the environment silently outranks defaultNdkVersion -- so check here and
+// either pick a usable NDK or say plainly what is wrong.
+if (jsEngine.contains("V8")) {
+    def MIN_NDK_MAJOR_FOR_V8 = 29
+    def resolvedMajor = (NDK_PATH =~ /ndk\/(\d+)\./) ? ((NDK_PATH =~ /ndk\/(\d+)\./)[0][1] as int) : -1
+
+    if (resolvedMajor in 0..<MIN_NDK_MAJOR_FOR_V8) {
+        def ndkRoot = new File("$System.env.ANDROID_HOME/ndk")
+        def candidate = (ndkRoot.listFiles({ File f -> f.isDirectory() } as FileFilter) ?: [])
+                .findAll { (it.name =~ /^(\d+)\./) && ((it.name =~ /^(\d+)\./)[0][1] as int) >= MIN_NDK_MAJOR_FOR_V8 }
+                .min { it.name }
+
+        if (candidate != null) {
+            println "WARNING: NDK ${resolvedMajor} cannot build V8 14.9 (needs std::atomic_ref, " +
+                    "NDK r${MIN_NDK_MAJOR_FOR_V8}+). Using ${candidate.name} instead."
+            NDK_PATH = candidate.absolutePath
+        } else {
+            throw new GradleException(
+                "V8 requires NDK r${MIN_NDK_MAJOR_FOR_V8} or newer (std::atomic_ref in V8 14.9's " +
+                "headers); resolved NDK is r${resolvedMajor} at ${NDK_PATH}. Install r${MIN_NDK_MAJOR_FOR_V8}+ " +
+                "and pass -PndkVersion=<version>, or point \$ANDROID_NDK at it.")
+        }
+    }
 }
 
 println "Runtime using NDK_PATH: " + NDK_PATH
@@ -131,12 +174,20 @@ android {
                     arguments.add("-DIS_NAPI_MODULE=true")
                 }
 
+                if (bytecodeStacktraces) {
+                    arguments.add("-DNS_BYTECODE=1")
+                }
+
                if (jsEngine == "QUICKJS" || jsEngine == "QUICKJS_NG") {
                     arguments.add("-DQUICKJS=1")
-                    arguments.add("-DUSE_MIMALLOC=1")
-                   if (jsEngine == "QUICKJS_NG") {
-                       arguments.add("-DQUICKJS_NG=1")
-                   }
+                    // There is only one quickjs engine now: the NativeScript-patched
+                    // quickjs-ng vendored at vendor/quickjs/source_ng, which is the
+                    // same tree the Apple build uses. The bellard tree was dropped
+                    // (it never carried the NativeScript patches), so QUICKJS is
+                    // kept purely as an alias for QUICKJS_NG.
+                    arguments.add("-DQUICKJS_NG=1")
+                    // SHERMES is kept as an alias for the static-hermes (hermesvm)
+                    // engine, which is now the canonical HERMES engine.
                 } else if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
                     arguments.add("-DHERMES=1")
                 } else if (jsEngine == "PRIMJS") {
@@ -145,13 +196,6 @@ android {
                     arguments.add("-DJSC=1")
                 } else if (jsEngine.contains("V8")) {
                     arguments.add("-DV8=1")
-                   if (jsEngine == "V8-10") {
-                       arguments.add("-DV8_10=1")
-                   } else if (jsEngine == "V8-11") {
-                       arguments.add("-DV8_11=1")
-                   } else {
-                       arguments.add("-DV8_13=1")
-                   }
                 }
 
 //              arguments "-DANDROID_TOOLCHAIN=clang", "-DANDROID_STL=c++_static", "-DANDROID_NDK_ROOT=${NDK_PATH}"
@@ -172,11 +216,24 @@ android {
         ndk {
             minSdkVersion NS_DEFAULT_MIN_SDK_VERSION as int
             if (onlyX86) {
-                abiFilters 'x86'
+                // The updated JSC only ships 64-bit libraries, so fall back to
+                // x86_64 when a single-ABI (emulator) build is requested.
+                abiFilters jsEngine == "JSC" ? 'x86_64' : 'x86'
+            } else if (jsEngine == "JSC") {
+                // The newer JSC engine only provides arm64-v8a and x86_64
+                // prebuilts, so restrict the runtime to those two ABIs.
+                abiFilters 'x86_64', 'arm64-v8a'
             } else {
                 abiFilters 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
             }
         }
+
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     buildTypes {
@@ -203,7 +260,7 @@ android {
             exclude "**/libhermesvm.so"
             exclude "**/libjsi.so"
         }
-    } else if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+    } else if (jsEngine == "HERMES") {
         packagingOptions {
             exclude "**/libjsc.so"
             exclude "**/libhermes.so"
@@ -241,6 +298,9 @@ dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     testImplementation "junit:junit:${ns_default_junit_version}"
     testImplementation "org.mockito:mockito-core:${ns_default_mockito_core_version}"
+    if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+        implementation 'com.facebook.fbjni:fbjni:0.7.0'
+    }
 }
 
 
@@ -265,6 +325,17 @@ tasks.configureEach { task ->
 
     if (task =~ /configureCMake.*/) {
         task.finalizedBy(":app:buildMetadata")
+        if (jsEngine.startsWith("V8")) {
+            task.dependsOn('downloadV8Libs')
+        }
+        // Before configure, not before build: CMake records the prebuilt .so as
+        // the imported target's runtime file, and that is what AGP packages into
+        // the APK. A config generated while the libs are missing carries no
+        // runtime file, so a later build succeeds and the app dies at launch
+        // with "dlopen failed: library libhermesvm.so not found".
+        if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+            task.dependsOn('downloadHermesLibs')
+        }
     }
 
     if (task =~ /buildCMake.*/) {
@@ -333,6 +404,47 @@ tasks.configureEach { task ->
 
     if (taskName.contains("bundleLibCompileToJar")) {
         task.finalizedBy(":app:cleanupAllJars")
+    }
+}
+
+// The prebuilt V8 static libs are ~380 MB, so they are fetched on demand rather
+// than committed (see .gitignore). This mirrors what build_nativescript.sh does
+// for the Apple xcframework, and pulls from the same pinned release so both
+// platforms link the same V8 build.
+//
+def v8EngineLibDir = new File(projectDir, "src/main/libs/v8")
+
+tasks.register('downloadV8Libs', Exec) {
+    description = 'Fetch the prebuilt V8 static libs when they are not present.'
+    workingDir = new File(projectDir, "../../../..")
+    commandLine 'bash', 'scripts/download_v8.sh'
+    onlyIf {
+        // Missing entirely, or present but with no ABI subdirectory in it.
+        !v8EngineLibDir.isDirectory() ||
+            (v8EngineLibDir.listFiles({ File f -> f.isDirectory() } as FileFilter) ?: []).length == 0
+    }
+}
+
+// Hermes ships as prebuilt .so files rather than sources, from the same pinned
+// release the Apple xcframework comes from, and is gitignored like the V8 libs.
+//
+// The check is for the .so itself, not just the directory: a partial or
+// interrupted download leaves the tree in place, and "directory exists" would
+// then skip the fetch and fail in ninja with "missing and no known rule to make
+// it", which reads like a broken checkout rather than a missing download.
+def hermesEngineLibDir = new File(projectDir, "src/main/libs/hermes")
+
+tasks.register('downloadHermesLibs', Exec) {
+    description = 'Fetch the prebuilt Hermes libs when they are not present.'
+    workingDir = new File(projectDir, "../../../..")
+    commandLine 'bash', 'scripts/download_hermes.sh'
+    onlyIf {
+        def abis = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]
+        !["debug", "release"].every { variant ->
+            abis.every { abi ->
+                new File(hermesEngineLibDir, "${variant}/${abi}/libhermesvm.so").isFile()
+            }
+        }
     }
 }
 

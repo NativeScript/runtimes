@@ -623,7 +623,7 @@ class Object {
     if (object->InternalFieldCount() < 1) {
       return nullptr;
     }
-    return static_cast<v8engine::HostObjectHolder*>(object->GetAlignedPointerFromInternalField(0));
+    return static_cast<v8engine::HostObjectHolder*>(object->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
   }
 
   std::shared_ptr<v8engine::ValueStorage> storage_;

@@ -7,6 +7,7 @@
 #include <android/log.h>
 #include "NativeScriptAssert.h"
 #include "Runtime.h"
+#include "native_api_util.h"
 
 using namespace tns;
 
@@ -25,27 +26,39 @@ void MessageLoopTimer::Init(napi_env env) {
 
 void MessageLoopTimer::RegisterStartStopFunctions(napi_env env) {
 
+    napi_status status;
     napi_value timer_start;
     napi_value timer_stop;
 
     const char * timer_start_name = "__messageLoopTimerStart";
     const char * timer_stop_name = "__messageLoopTimerStop";
 
-    napi_create_function(env, timer_start_name, strlen(timer_start_name), MessageLoopTimer::StartCallback,
-                         this, &timer_start);
-    napi_create_function(env, timer_stop_name, strlen(timer_stop_name), MessageLoopTimer::StopCallback,
-                         this, &timer_stop);
+    NAPI_GUARD(napi_create_function(env, timer_start_name, strlen(timer_start_name), MessageLoopTimer::StartCallback,
+                         this, &timer_start)) {
+        return;
+    }
+    NAPI_GUARD(napi_create_function(env, timer_stop_name, strlen(timer_stop_name), MessageLoopTimer::StopCallback,
+                         this, &timer_stop)) {
+        return;
+    }
 
     napi_value global;
-    napi_get_global(env, &global);
-    napi_set_named_property(env, global, timer_start_name, timer_start);
-    napi_set_named_property(env, global, timer_stop_name, timer_stop);
+    NAPI_GUARD(napi_get_global(env, &global)) {
+        return;
+    }
+    NAPI_GUARD(napi_set_named_property(env, global, timer_start_name, timer_start)) {
+        return;
+    }
+    NAPI_GUARD(napi_set_named_property(env, global, timer_stop_name, timer_stop)) {}
 }
 
 napi_value MessageLoopTimer::StartCallback(napi_env env, napi_callback_info info) {
 
-    void * data;
-    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    napi_status status;
+    void * data = nullptr;
+    NAPI_GUARD(napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data)) {
+        return nullptr;
+    }
 
     auto self = static_cast<MessageLoopTimer *>(data);
 
@@ -55,8 +68,11 @@ napi_value MessageLoopTimer::StartCallback(napi_env env, napi_callback_info info
 }
 
 napi_value MessageLoopTimer::StopCallback(napi_env env, napi_callback_info info) {
-    void * data;
-    napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+    napi_status status;
+    void * data = nullptr;
+    NAPI_GUARD(napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data)) {
+        return nullptr;
+    }
     auto self = static_cast<MessageLoopTimer *>(data);
 
 

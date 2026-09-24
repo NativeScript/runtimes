@@ -1,16 +1,39 @@
 #include "jsr.h"
+
+#ifdef __ANDROID__
+#include "File.h"
+#include "NativeScriptAssert.h"
+#include "bytecode_container.h"
+#endif
+
 #include "quicks-runtime.h"
 
 JSR::JSR() = default;
 tns::ConcurrentMap<napi_env, JSR *> JSR::env_to_jsr_cache;
 
-napi_status js_create_runtime(napi_runtime *runtime) {
-    return qjs_create_runtime(runtime);
-}
-napi_status js_create_napi_env(napi_env *env, napi_runtime runtime) {
-    napi_status status = qjs_create_napi_env(env, runtime);
-    JSR::env_to_jsr_cache.Insert((*env), new JSR());
+// Engine-agnostic runtime handle for the jsr layer. QuickJS keeps its own
+// napi_runtime (the real engine runtime defined in quickjs-api.c); this wrapper
+// just points at it so the jsr API can speak jsr_ns_runtime while
+// quickjs-api.c / quicks-runtime.h stay unchanged.
+struct jsr_ns_runtime__ {
+  napi_runtime rt;
+};
+
+napi_status js_create_runtime(jsr_ns_runtime* runtime) {
+  if (!runtime) return napi_invalid_arg;
+  auto* wrapper = new jsr_ns_runtime__();
+  napi_status status = qjs_create_runtime(&wrapper->rt);
+  if (status != napi_ok) {
+    delete wrapper;
     return status;
+  }
+  *runtime = wrapper;
+  return napi_ok;
+}
+napi_status js_create_napi_env(napi_env* env, jsr_ns_runtime runtime) {
+  napi_status status = qjs_create_napi_env(env, runtime->rt);
+  JSR::env_to_jsr_cache.Insert((*env), new JSR());
+  return status;
 }
 
 napi_status js_set_runtime_flags(const char *flags) {
@@ -31,22 +54,69 @@ napi_status js_unlock_env(napi_env env) {
 }
 
 napi_status js_free_napi_env(napi_env env) {
-    JSR* jsr = JSR::env_to_jsr_cache.Get(env);
-    js_run_env_cleanup_hooks(env);
-    JSR::env_to_jsr_cache.Remove(env);
-    delete jsr;
-    return qjs_free_napi_env(env);
+  JSR* jsr = JSR::env_to_jsr_cache.Get(env);
+  js_run_env_cleanup_hooks(env);
+  JSR::env_to_jsr_cache.Remove(env);
+  delete jsr;
+  return qjs_free_napi_env(env);
 }
 
-napi_status js_free_runtime(napi_runtime runtime) {
-    return qjs_free_runtime(runtime);
+napi_status js_free_runtime(jsr_ns_runtime runtime) {
+  napi_status status = qjs_free_runtime(runtime->rt);
+  delete runtime;
+  return status;
 }
 
-napi_status js_execute_script(napi_env env,
-                              napi_value script,
-                              const char *file,
-                              napi_value *result) {
-    return qjs_execute_script(env, script, file, result);
+#ifdef __ANDROID__
+
+#ifdef __QUICKJS_NG__
+static const char* kBytecodeMagic = "NSBCNGS";  // 7 chars + NUL = 8-byte magic
+static const char* kEngineName = "QuickJS-NG";
+#else
+static const char* kBytecodeMagic = "NSBCQJS";
+static const char* kEngineName = "QuickJS";
+#endif
+
+napi_status js_run_bytecode_file(napi_env env, const char* file,
+                                 napi_value* result) {
+  std::string path;
+  if (!nsbc::ResolvePath(file, path)) {
+    DEBUG_WRITE("[bytecode] Unable to resolve file: %s", path.c_str());
+    return napi_cannot_run_js;
+  }
+  if (!nsbc::HasMagic(path, kBytecodeMagic)) {
+    DEBUG_WRITE("[bytecode] Unable to find %s header: %s", kEngineName,
+                path.c_str());
+    return napi_cannot_run_js;
+  }
+
+  int length = 0;
+  auto data = tns::File::ReadBinary(path, length);
+  if (!data) return napi_cannot_run_js;
+  if (static_cast<size_t>(length) <= nsbc::kHeaderLen) {
+    delete[] static_cast<uint8_t*>(data);
+    return napi_cannot_run_js;
+  }
+
+  DEBUG_WRITE("[bytecode] loading %s bytecode: %s (%d bytes)", kEngineName,
+              file, length);
+
+  // JS_ReadObject copies what it needs, so the buffer can be freed after.
+  napi_status status = qjs_run_bytecode(
+      env, static_cast<const uint8_t*>(data) + nsbc::kHeaderLen,
+      static_cast<size_t>(length) - nsbc::kHeaderLen, file, result);
+  delete[] static_cast<uint8_t*>(data);
+  return status;
+}
+
+#endif  // __ANDROID__
+
+napi_status js_execute_script(napi_env env, napi_value script, const char* file,
+                              napi_value* result) {
+#ifdef __ANDROID__
+  DEBUG_WRITE("[script] loading script: %s", file);
+#endif
+  return qjs_execute_script(env, script, file, result);
 }
 
 napi_status js_execute_pending_jobs(napi_env env) {

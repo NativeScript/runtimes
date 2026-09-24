@@ -192,7 +192,8 @@ void NativeApiSelectorGroupWeakCallback(
 void NativeApiSelectorGroupCallback(
     const v8::FunctionCallbackInfo<v8::Value>& info) {
   auto* holder = static_cast<NativeApiSelectorGroupDataHolder*>(
-      info.Data().As<v8::External>()->Value());
+      info.Data().As<v8::External>()->Value(
+          v8::kExternalPointerTypeTagDefault));
   auto* data = holder != nullptr ? holder->data.get() : nullptr;
   if (data == nullptr || data->selectors == nullptr ||
       data->preparedInvocations == nullptr) {
@@ -283,7 +284,8 @@ Function CreateNativeApiSelectorGroupFunctionImpl(
   engine::v8engine::trackRuntimeAllocation(runtime.isolate(), holder);
 
   v8::Local<v8::External> external =
-      v8::External::New(runtime.isolate(), holder);
+      v8::External::New(runtime.isolate(), holder,
+                        v8::kExternalPointerTypeTagDefault);
   v8::Local<v8::FunctionTemplate> functionTemplate =
       v8::FunctionTemplate::New(runtime.isolate(),
                                 NativeApiSelectorGroupCallback, external);

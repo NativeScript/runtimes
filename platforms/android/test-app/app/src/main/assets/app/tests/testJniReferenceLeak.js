@@ -1,5 +1,23 @@
 describe("Tests JNI reference leak", function () {
-	
+
+	// These specs are deliberate stress loops -- 10k marshalling round trips
+	// each, 100k for the interface-implementation one -- and take well over
+	// jasmine's 5s DEFAULT_TIMEOUT_INTERVAL on the slower engines. That budget
+	// is meant for async specs that never call done(); applying it here just
+	// fails a spec for being slow, which is the one thing a stress test is
+	// supposed to be. Every expectation inside them passes when they are
+	// allowed to finish. Same pattern as shared/Workers/index.js.
+	var originalTimeout;
+
+	beforeEach(function () {
+		originalTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
+		jasmine.DEFAULT_TIMEOUT_INTERVAL = 120000;
+	});
+
+	afterEach(function () {
+		jasmine.DEFAULT_TIMEOUT_INTERVAL = originalTimeout;
+	});
+
 //	var myCustomEquality = function(first, second) {
 //		return first == second;
 //	};

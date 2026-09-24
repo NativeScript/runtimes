@@ -84,3 +84,20 @@ packages/react-native/native-api/
 
 # Rust metadata bundle analyzer build output
 metadata-generator/symbol-analyzer/target/
+
+# Prebuilt V8 static libs, fetched by scripts/download_v8.sh rather than
+# committed -- they are ~380 MB. The Apple xcframework is already excluded via
+# /Frameworks/ above. The shared V8 headers under vendor/v8 ARE tracked: they
+# are text, and the build needs them without a network round trip.
+/platforms/android/test-app/runtime/src/main/libs/v8/
+
+# V8's internal headers (~27 MB, 2400 files), fetched by download_v8.sh for the
+# v8_inspector sources. Unlike vendor/v8/include these are not tracked: they are
+# large, entirely unedited, and pinned to the same release as the binaries.
+/vendor/v8/src/
+/vendor/v8/third_party/
+
+# Prebuilt Hermes libs, fetched by scripts/download_hermes.sh from the same
+# release as the Apple xcframework. Committing them let the .so files drift out
+# of step with the headers.
+/platforms/android/test-app/runtime/src/main/libs/hermes/

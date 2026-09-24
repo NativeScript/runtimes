@@ -55,7 +55,7 @@ void NativeApiLazyGlobalGetter(v8::Local<v8::Name>,
     return;
   }
 
-  auto* data = static_cast<NativeApiLazyGlobalData*>(info.Data().As<v8::External>()->Value());
+  auto* data = static_cast<NativeApiLazyGlobalData*>(info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
   if (data == nullptr) {
     return;
   }
@@ -105,7 +105,8 @@ bool InstallNativeApiLazyGlobal(Runtime& runtime, std::shared_ptr<NativeApiBridg
 
   auto* data = new NativeApiLazyGlobalData(isolate, name, kind);
   engine::v8engine::trackRuntimeAllocation(isolate, data);
-  v8::Local<v8::External> external = v8::External::New(isolate, data);
+  v8::Local<v8::External> external = v8::External::New(
+      isolate, data, v8::kExternalPointerTypeTagDefault);
 
   bool installed = global
                        ->SetNativeDataProperty(context, property, NativeApiLazyGlobalGetter,

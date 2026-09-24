@@ -1,23 +1,26 @@
 describe("Test URLSearchParams ", function () {
     const fooBar = "foo=1&bar=2";
     it("Test URLSearchParams keys", function(){
+        // keys() returns a spec iterator, not an array — consume it via spread.
         const params = new URLSearchParams(fooBar);
-        const keys = params.keys();
+        const keys = [...params.keys()];
         expect(keys[0]).toBe("foo");
         expect(keys[1]).toBe("bar");
     });
     
     it("Test URLSearchParams values", function(){
+        // values() returns a spec iterator, not an array — consume it via spread.
         const params = new URLSearchParams(fooBar);
-        const values = params.values();
+        const values = [...params.values()];
         expect(values[0]).toBe("1");
         expect(values[1]).toBe("2");
     });
     
     
     it("Test URLSearchParams entries", function(){
+        // entries() returns a spec iterator, not an array — consume it via spread.
         const params = new URLSearchParams(fooBar);
-        const entries = params.entries();
+        const entries = [...params.entries()];
         expect(entries[0][0]).toBe("foo");
         expect(entries[0][1]).toBe("1");
         
@@ -43,7 +46,8 @@ describe("Test URLSearchParams ", function () {
         const params = new URLSearchParams(fooBar);
         params.append("first", "Osei");
         params.delete("first");
-        expect(params.get("first")).toBe(undefined);
+        // Spec: get() returns null for a missing name (url.bs:4016).
+        expect(params.get("first")).toBe(null);
     });
     
     

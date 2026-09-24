@@ -1,10 +1,38 @@
 #ifndef SRC_JS_NATIVE_API_H_
 #define SRC_JS_NATIVE_API_H_
 
+// This runtime intentionally enables the experimental Node-API surface (see
+// NAPI_EXPERIMENTAL below). Opt out of the informational #warning that
+// js_native_api_types.h emits for it, rather than having every translation unit
+// print it. Must be set before that header is first included.
+#ifndef NODE_API_EXPERIMENTAL_NO_WARNING
+#define NODE_API_EXPERIMENTAL_NO_WARNING
+#endif
+
 #include "js_native_api_types.h"
 
-#if !defined __cplusplus || (defined(_MSC_VER) && _MSC_VER < 1900)
-typedef uint16_t char16_t;
+// If you need __declspec(dllimport), either include <node_api.h> instead, or
+// define NAPI_EXTERN as __declspec(dllimport) on the compiler's command line.
+#ifndef NAPI_EXTERN
+#ifdef _WIN32
+#define NAPI_EXTERN __declspec(dllexport)
+#elif defined(__wasm__)
+#define NAPI_EXTERN                                                            \
+  __attribute__((visibility("default")))                                       \
+  __attribute__((__import_module__("napi")))
+#else
+#define NAPI_EXTERN __attribute__((visibility("default")))
+#endif
+#endif
+
+#define NAPI_AUTO_LENGTH SIZE_MAX
+
+#ifdef __cplusplus
+#define EXTERN_C_START extern "C" {
+#define EXTERN_C_END }
+#else
+#define EXTERN_C_START
+#define EXTERN_C_END
 #endif
 
 EXTERN_C_START
@@ -14,8 +42,20 @@ EXTERN_C_START
 #include <stdint.h>  // NOLINT(modernize-deprecated-headers)
 
 #define NAPI_AUTO_LENGTH SIZE_MAX
+
+// js_native_api_types.h (included above) now owns these, with the upstream
+// #ifndef NAPI_VERSION / NAPI_EXPERIMENTAL logic. Defining them unconditionally
+// here redefined them and warned in every translation unit.
+#ifndef NAPI_VERSION_EXPERIMENTAL
 #define NAPI_VERSION_EXPERIMENTAL 2147483647
+#endif
+#ifndef NAPI_VERSION
 #define NAPI_VERSION 8
+#endif
+
+#ifndef NAPI_EXPERIMENTAL
+#define NAPI_EXPERIMENTAL 1
+#endif
 
 NAPI_EXTERN napi_status napi_get_last_error_info(napi_env env, const napi_extended_error_info **result);
 
@@ -429,7 +469,12 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_reject_deferred(napi_env env,
 NAPI_EXTERN napi_status NAPI_CDECL napi_is_promise(napi_env env,
                                                    napi_value value,
                                                    bool *is_promise);
-
+#ifdef __PRIMJS__
+// Running a script
+NAPI_EXTERN napi_status NAPI_CDECL napi_run_script(napi_env env, const char* script,
+                                                   size_t length, const char* filename,
+                                                   napi_value* result);
+#else
 // Running a script
 NAPI_EXTERN napi_status NAPI_CDECL napi_run_script(napi_env env,
                                                    napi_value script,
@@ -439,6 +484,8 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_run_script_source(napi_env env,
                                                           napi_value script,
                                                           const char* source_url,
                                                           napi_value* result);
+#endif
+
 
 // ES Module support
 NAPI_EXTERN napi_status NAPI_CDECL napi_run_script_as_module(napi_env env,
@@ -544,11 +591,35 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_object_seal(napi_env env,
                                                     napi_value object);
 
 #ifdef USE_HOST_OBJECT
-NAPI_EXTERN napi_status NAPI_CDECL napi_create_host_object(napi_env env, napi_value value, napi_finalize finalize, void* data, bool is_array, napi_value getter, napi_value setter, napi_value* result);
+// Creates a host object: a transparent proxy whose property operations are
+// dispatched to the native `methods` (see napi_host_object_methods). `data` is
+// passed to every callback and is also retrievable via
+// napi_get_host_object_data; `finalize` (optional) runs when the host object is
+// garbage-collected. `methods` and its `get`/`set` members are required.
+NAPI_EXTERN napi_status NAPI_CDECL
+napi_create_host_object(napi_env env,
+                        napi_finalize finalize,
+                        void* data,
+                        const napi_host_object_methods* methods,
+                        napi_value* result);
 
-NAPI_EXTERN napi_status NAPI_CDECL napi_get_host_object_data(napi_env env, napi_value object, void** data);
+NAPI_EXTERN napi_status NAPI_CDECL napi_get_host_object_data(napi_env env,
+                                                            napi_value object,
+                                                            void** data);
 
-NAPI_EXTERN napi_status NAPI_CDECL napi_is_host_object(napi_env env, napi_value object, bool* result);
+NAPI_EXTERN napi_status NAPI_CDECL napi_is_host_object(napi_env env,
+                                                       napi_value object,
+                                                       bool* result);
+#endif
+
+#ifdef NAPI_EXPERIMENTAL
+// Defers `finalize_cb` to a safe pass after the GC finalizer, where reference
+// and other JS/GC-state-affecting Node-API calls are allowed. Implemented for
+// the V8 engine.
+NAPI_EXTERN napi_status NAPI_CDECL node_api_post_finalizer(napi_env env,
+                                                          napi_finalize finalize_cb,
+                                                          void* finalize_data,
+                                                          void* finalize_hint);
 #endif
 
 #endif // NAPI_VERSION >= 8

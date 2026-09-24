@@ -2,6 +2,7 @@
 #include "runtime/apple/SpinLock.h"
 #ifdef ENABLE_JS_RUNTIME
 
+#include "NativeScriptException.h"
 #include "Runtime.h"
 #include "RuntimeConfig.h"
 #include "js_native_api.h"
@@ -324,7 +325,19 @@ napi_value runtimeScheduleOnRunLoop(napi_env env, napi_callback_info cbinfo) {
     napi_value global = nullptr;
     if (napi_get_reference_value(env, callbackRef, &callback) == napi_ok &&
         callback != nullptr && napi_get_global(env, &global) == napi_ok) {
-      napi_call_function(env, global, callback, 0, nullptr, nullptr);
+      // A throwing callback leaves an exception pending on the env. Draining
+      // the microtask queue on top of that is not just untidy: on Hermes,
+      // drainJobs() sees the already-thrown value, reports EXCEPTION, and JSI
+      // turns that into a C++ throw out of this block. Report it here and
+      // clear it, so the queue is drained against a clean runtime.
+      if (napi_call_function(env, global, callback, 0, nullptr, nullptr) !=
+          napi_ok) {
+        napi_value exception = nullptr;
+        if (napi_get_and_clear_last_exception(env, &exception) == napi_ok &&
+            !napi_util::is_null_or_undefined(env, exception)) {
+          NativeScriptException::OnUncaughtError(env, exception);
+        }
+      }
       js_execute_pending_jobs(env);
     }
     napi_delete_reference(env, callbackRef);

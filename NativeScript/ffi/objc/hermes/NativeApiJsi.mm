@@ -34,8 +34,10 @@
 #include "ffi.h"
 #include "NativeApiJsiSignatureDispatch.h"
 
+#ifndef NATIVESCRIPT_REACT_NATIVE
 extern "C" void* js_lock_unsafe_jsi_runtime(facebook::jsi::Runtime* runtime);
 extern "C" void js_unlock_unsafe_jsi_runtime(void* lockToken);
+#endif
 
 @protocol NativeApiClassBuilderProtocol
 @end
@@ -83,6 +85,11 @@ void SetNativeApiObjectPrototype(Runtime& runtime, Object& object,
 // through the unsafe JSI runtime without the ThreadSafeRuntime lock permits two
 // threads to mutate the VM concurrently. This recursive scope is also safe for
 // host operations that are already running on the JS thread.
+//
+// Not under @nativescript/react-native: there the bridge is installed into a
+// React Native-owned jsi::Runtime, so no standalone runtime lock exists and
+// serialization remains React Native's responsibility.
+#ifndef NATIVESCRIPT_REACT_NATIVE
 #define NATIVESCRIPT_NATIVE_API_RUNTIME_SCOPE 1
 
 class NativeApiRuntimeScope final {
@@ -102,6 +109,7 @@ class NativeApiRuntimeScope final {
  private:
   void* lockToken_;
 };
+#endif  // NATIVESCRIPT_REACT_NATIVE
 
 // clang-format off
 #define NATIVESCRIPT_NATIVE_API_RUNTIME_NAME "jsi"

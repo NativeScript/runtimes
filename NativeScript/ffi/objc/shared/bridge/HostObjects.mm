@@ -16,7 +16,7 @@ using NativeApiHostSetResult = bool;
 // compile time so the shared bridge code stays engine-agnostic.
 template <typename T>
 Object createNativeInstanceHostObject(Runtime& runtime, std::shared_ptr<T> host) {
-#ifdef TARGET_ENGINE_V8
+#if defined(TARGET_ENGINE_V8) || defined(TARGET_ENGINE_JSC)
   return Object::createNativeInstanceHostObject(runtime, std::move(host));
 #else
   return Object::createFromHostObject(runtime, std::move(host));

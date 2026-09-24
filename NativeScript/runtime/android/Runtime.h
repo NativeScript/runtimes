@@ -3,8 +3,10 @@
 
 #include "jni.h"
 #include <string>
+#include <memory>
 #include "JniLocalRef.h"
 #include "MessageLoopTimer.h"
+#include "FinalizerQueue.h"
 #include <android/looper.h>
 #include "js_native_api.h"
 #include "robin_hood.h"
@@ -22,6 +24,7 @@
 namespace tns {
 
     class JSMethodCache;
+    class LooperTasks;
 
     class Runtime {
     public:
@@ -43,6 +46,21 @@ namespace tns {
             return env_to_runtime_cache.Get(env);
         }
 
+        // Engine-agnostic replacement for node_api_post_finalizer: schedules
+        // `cb(env, data, hint)` to run at the next runtime message-loop tick
+        // instead of immediately. Call this from a GC finalizer that needs to
+        // delete references / touch the JS heap (illegal during the GC sweep on
+        // every engine). Falls back to running inline if the runtime is already
+        // tearing down (no loop left to drain it).
+        static void PostFinalizer(napi_env env, napi_finalize cb, void *data, void *hint) {
+            Runtime *rt = GetRuntimeUnchecked(env);
+            if (rt != nullptr && rt->m_finalizerQueue != nullptr && !rt->is_destroying) {
+                rt->m_finalizerQueue->Post(cb, data, hint);
+            } else if (cb != nullptr) {
+                cb(env, data, hint);
+            }
+        }
+
         static void Init(JavaVM *vm);
 
         static void
@@ -62,7 +80,11 @@ namespace tns {
 
         void RunModule(const char *moduleName);
 
-        void RunWorker(jstring scriptFile);
+        void RunWorker(const std::string &filePath);
+
+        // Tears down a worker's Runtime (engine scope + env free) and deletes
+        // it. Called from the native worker thread during shutdown.
+        static void DisposeWorkerRuntime(Runtime *runtime);
 
         jobject RunScript(JNIEnv *_env, jobject obj, jstring scriptFile);
 
@@ -86,10 +108,18 @@ namespace tns {
 
         napi_env GetNapiEnv();
 
-        napi_runtime GetNapiRuntime();
+        jsr_ns_runtime GetNapiRuntime();
 
         static ALooper *GetMainLooper() {
             return m_mainLooper;
+        }
+
+        static JavaVM *GetJVM() {
+            return java_vm;
+        }
+
+        std::shared_ptr<LooperTasks> GetLooperTasks() {
+            return m_looperTasks;
         }
 
         void Lock();
@@ -148,11 +178,12 @@ namespace tns {
         int m_id;
         jobject m_runtime;
 
-        napi_runtime rt;
+        jsr_ns_runtime rt;
         napi_env env;
         napi_handle_scope global_scope;
 
         MessageLoopTimer *m_loopTimer;
+        FinalizerQueue *m_finalizerQueue = nullptr;
         int64_t m_lastUsedMemory;
         napi_ref m_gcFunc;
         volatile bool m_runGC;
@@ -165,6 +196,8 @@ namespace tns {
         bool m_isMainThread;
 
         ModuleInternal m_module;
+
+        std::shared_ptr<LooperTasks> m_looperTasks;
 
         static int GetAndroidVersion();
 

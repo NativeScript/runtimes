@@ -237,12 +237,21 @@ const void* hostObjectTypeToken() {
 
 struct HostObjectHolder {
   HostObjectHolder(std::shared_ptr<RuntimeState> state, std::shared_ptr<HostObject> hostObject,
-                   const void* typeToken)
-      : state(std::move(state)), hostObject(std::move(hostObject)), typeToken(typeToken) {}
+                   const void* typeToken, bool nativeInstance = false)
+      : state(std::move(state)),
+        hostObject(std::move(hostObject)),
+        typeToken(typeToken),
+        nativeInstance(nativeInstance) {}
 
   std::shared_ptr<RuntimeState> state;
   std::shared_ptr<HostObject> hostObject;
   const void* typeToken = nullptr;
+  // Set for wrappers around an ObjC instance, whose JS prototype is allowed to
+  // shadow a native property. Recorded as a flag rather than derived from
+  // typeToken: the wrapper class is defined inside an anonymous namespace in
+  // the engine translation unit, so a type token taken anywhere else names a
+  // different type and never compares equal.
+  bool nativeInstance = false;
 };
 
 struct FunctionHolder {
@@ -514,6 +523,18 @@ class Object {
                                          jscengine::hostObjectTypeToken<T>());
   }
 
+  // The wrapper for an ObjC instance. Same object as createFromHostObject
+  // builds, but marked so property reads defer to the JS prototype chain when
+  // it carries the name -- V8 gets that from its kNonMasking template; JSC's
+  // class callback runs before the prototype is consulted, so it has to ask.
+  template <typename T>
+  static Object createNativeInstanceHostObject(Runtime& runtime, std::shared_ptr<T> host) {
+    auto baseHost = std::static_pointer_cast<HostObject>(std::move(host));
+    return createFromHostObjectWithToken(runtime, std::move(baseHost),
+                                         jscengine::hostObjectTypeToken<T>(),
+                                         /* nativeInstance */ true);
+  }
+
   Value getProperty(Runtime& runtime, const char* name) const {
     JSStringRef property = jscengine::makeJSString(name);
     JSValueRef exception = nullptr;
@@ -654,7 +675,8 @@ class Object {
       : storage_(std::move(storage)) {}
 
   static Object createFromHostObjectWithToken(Runtime& runtime, std::shared_ptr<HostObject> host,
-                                              const void* typeToken);
+                                              const void* typeToken,
+                                              bool nativeInstance = false);
 
   jscengine::HostObjectHolder* hostObjectHolder(Runtime& runtime) const {
     return static_cast<jscengine::HostObjectHolder*>(JSObjectGetPrivate(local(runtime)));

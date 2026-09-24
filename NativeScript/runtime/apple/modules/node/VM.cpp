@@ -726,7 +726,7 @@ bool ExtractV8DependencySpecifiers(v8::Isolate* isolate,
 
   for (int index = 0; index < length; ++index) {
     v8::Local<v8::Data> entry =
-        requests->Get(isolate->GetCurrentContext(), index);
+        requests->Get(index);
     v8::Local<v8::String> specifier =
         v8::ModuleRequest::Cast(*entry)->GetSpecifier();
     v8::String::Utf8Value text(isolate, specifier);
@@ -1552,7 +1552,7 @@ JSValue CloneQuickJSValue(JSContext* sourceContext,
     return result;
   }
 
-  if (JS_IsBigInt(sourceContext, value)) {
+  if (JS_IsBigInt(value)) {
     int64_t bigintValue = 0;
     if (JS_ToBigInt64(sourceContext, &bigintValue, value) < 0) {
       JS_ThrowTypeError(destinationContext,

@@ -23,7 +23,10 @@
 #include "runtime/apple/modules/node/Node.h"
 #include "runtime/apple/modules/web/Web.h"
 
-#ifdef TARGET_ENGINE_QUICKJS
+#ifdef TARGET_ENGINE_V8
+// vendor/v8 is on the include path for V8 builds (see NativeScript/CMakeLists).
+#include "v8-module-loader.h"
+#elif defined(TARGET_ENGINE_QUICKJS)
 #include "quickjs.h"
 #include "quicks-runtime.h"
 #endif

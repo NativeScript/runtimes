@@ -22,6 +22,7 @@
 #endif
 
 typedef struct napi_async_context__* napi_async_context;
+
 typedef struct napi_callback_scope__* napi_callback_scope;
 typedef napi_env node_api_basic_env;
 

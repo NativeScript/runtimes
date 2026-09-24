@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Metadata
-project(NativeScript CXX OBJCXX)
+# C is required for the quickjs engine sources (quickjs.c, libregexp.c, …) and
+# quickjs-api.c. It used to be enabled as a side effect of add_subdirectory()ing
+# mimalloc; without it CMake silently drops every .c file from the target and the
+# build fails at link with undefined JS_* symbols.
+project(NativeScript C CXX OBJCXX)
 
 set(NAME NativeScript)
 set(VERSION 0.1.0)
@@ -111,7 +115,12 @@ elseif(TARGET_ENGINE STREQUAL "v8")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_V8")
 elseif(TARGET_ENGINE STREQUAL "quickjs")
   set(TARGET_ENGINE_QUICKJS TRUE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_QUICKJS")
+  # The shared quickjs backend selects between the quickjs-ng and bellard APIs
+  # with __QJS_NG__ / __QUICKJS_NG__. Only quickjs-ng is vendored now, so both
+  # platforms must define them or the bellard branches get compiled against an
+  # ng header (JS_IsArray, JS_FreeValue, … then mismatch on arity).
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__QJS_NG__ -D__QUICKJS_NG__")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_QUICKJS -D__QJS_NG__ -D__QUICKJS_NG__")
 elseif(TARGET_ENGINE STREQUAL "jsc")
   set(TARGET_ENGINE_JSC TRUE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_JSC")
@@ -336,17 +345,31 @@ if(ENABLE_JS_RUNTIME)
   )
 
   if(TARGET_ENGINE_V8)
+    # V8's headers come from the pinned release via scripts/download_v8.sh, the
+    # same set Android uses. Both spellings are needed: <v8.h> from the napi
+    # backend, and "src/inspector/..." from the console/inspector code, which
+    # spells paths relative to the V8 checkout root.
+    set(V8_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/v8")
+    if(NOT EXISTS "${V8_VENDOR_DIR}/src/inspector/v8-console-message.h")
+      message(FATAL_ERROR
+        "V8 headers missing at ${V8_VENDOR_DIR}. Run scripts/download_v8.sh.")
+    endif()
+
     include_directories(
       napi/v8
-      napi/v8/v8_inspector
+      ${V8_VENDOR_DIR}
+      ${V8_VENDOR_DIR}/v8_inspector
+      ${V8_VENDOR_DIR}/include
+      # V8 14.9's internals include Abseil as <absl/...>.
+      ${V8_VENDOR_DIR}/third_party/abseil-cpp
     )
 
     set(SOURCE_FILES
       ${SOURCE_FILES}
-      napi/v8/v8-api.cpp
-      napi/v8/v8-module-loader.cpp
+      ${V8_VENDOR_DIR}/v8-api.cpp
+      ${V8_VENDOR_DIR}/v8-module-loader.cpp
       napi/v8/jsr.cpp
-      napi/v8/SimpleAllocator.cpp
+      ${V8_VENDOR_DIR}/SimpleAllocator.cpp
     )
 
     if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "v8")
@@ -357,23 +380,24 @@ if(ENABLE_JS_RUNTIME)
     endif()
 
   elseif(TARGET_ENGINE_HERMES)
-    set(HERMES_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Frameworks/hermes-headers")
+    set(HERMES_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/hermes/include")
 
     include_directories(
       napi/hermes
     )
 
-    if(EXISTS "${HERMES_HEADERS_DIR}/jsi/jsi.h" AND EXISTS "${HERMES_HEADERS_DIR}/hermes/hermes.h")
-      include_directories(
-        ${HERMES_HEADERS_DIR}
-      )
-    else()
-      include_directories(
-        napi/hermes/include
-        napi/hermes/include/hermes
-        napi/hermes/include/jsi
-      )
+    # Fetched by scripts/download_hermes.sh alongside hermes.xcframework, not
+    # committed -- these headers must match the prebuilt binary, and a stale
+    # in-tree copy silently compiling against the wrong ABI is worse than a
+    # missing one.
+    if(NOT EXISTS "${HERMES_HEADERS_DIR}/jsi/jsi.h")
+      message(FATAL_ERROR
+        "Hermes headers missing at ${HERMES_HEADERS_DIR}. Run scripts/download_hermes.sh.")
     endif()
+
+    include_directories(
+      ${HERMES_HEADERS_DIR}
+    )
 
     set(SOURCE_FILES
       ${SOURCE_FILES}
@@ -388,34 +412,26 @@ if(ENABLE_JS_RUNTIME)
     endif()
 
   elseif(TARGET_ENGINE_QUICKJS)
-    set(MI_BUILD_OBJECT OFF)
-    set(MI_OVERRIDE OFF)
-    set(MI_BUILD_SHARED OFF)
-    set(MI_BUILD_TESTS OFF)
-
     set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO")
-
-    add_subdirectory(napi/quickjs/mimalloc-dev mimalloc)
 
     include_directories(
       napi/quickjs
-      napi/quickjs/source
+      ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/quickjs/source_ng
       napi/common
-      mimalloc
-      napi/quickjs/mimalloc-dev/include
     )
 
     set(SOURCE_FILES ${SOURCE_FILES}
 
-      # quickjs
-      napi/quickjs/source/cutils.c
-      napi/quickjs/source/libregexp.c
-      napi/quickjs/source/libbf.c
-      napi/quickjs/source/libunicode.c
-      napi/quickjs/source/quickjs.c
+      # quickjs-ng, NativeScript-patched, vendored at the repo root and shared
+      # with the Android build. 0.11.0 replaced libbf with dtoa.
+      ../vendor/quickjs/source_ng/cutils.c
+      ../vendor/quickjs/source_ng/libregexp.c
+      ../vendor/quickjs/source_ng/libunicode.c
+      ../vendor/quickjs/source_ng/quickjs.c
+      ../vendor/quickjs/source_ng/dtoa.c
 
       # napi
-      napi/quickjs/quickjs-api.c
+      ../vendor/quickjs/quickjs-api.c
       napi/quickjs/jsr.cpp
     )
 
@@ -429,12 +445,12 @@ if(ENABLE_JS_RUNTIME)
   elseif(TARGET_ENGINE_JSC)
     include_directories(
       napi/jsc
-      napi/jsc/include
+      ../vendor/jsc
       napi/common
     )
 
     set(SOURCE_FILES ${SOURCE_FILES}
-      napi/jsc/jsc-api.cpp
+      ../vendor/jsc/jsc-api.cpp
       napi/jsc/jsr.cpp
     )
 
@@ -502,16 +518,13 @@ target_sources(
   "NativeScript.h"
 )
 
-if(TARGET_ENGINE_V8 AND TARGET_PLATFORM_IOS)
-  # iOS V8 slices are built with pointer compression enabled. Keep embedder
-  # build flags in sync to satisfy V8::Initialize() build config checks.
-  target_compile_definitions(
-    ${NAME}
-    PRIVATE
-    V8_COMPRESS_POINTERS
-    V8_31BIT_SMIS_ON_64BIT_ARCH
-  )
-endif()
+# NOTE: the Apple V8 slices are built with v8_enable_pointer_compression=false
+# (see scripts/matrix/build-ios.sh in v8-buildscripts), so the embedder must NOT
+# declare V8_COMPRESS_POINTERS -- V8::Initialize() aborts on a mismatch in
+# either direction. This previously defined it for iOS, which was correct for
+# the old 14.3 xcframework but would abort at startup against 14.9. The Android
+# slices differ: they leave the gn arg at its default, which is ON for 64-bit.
+
 
 if(ENABLE_JS_RUNTIME)
   target_compile_definitions(${NAME} PRIVATE ENABLE_JS_RUNTIME)
@@ -739,14 +752,6 @@ elseif(TARGET_PLATFORM_IOS)
     ${NAME}
     PRIVATE
     "-framework UIKit"
-  )
-endif()
-
-if(TARGET_ENGINE_QUICKJS)
-  target_link_libraries(
-    ${NAME}
-    PRIVATE
-    mimalloc-static
   )
 endif()
 

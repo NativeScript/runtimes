@@ -49,13 +49,13 @@ This step involves fetching and building the V8 projectory, explanation for whic
 
 4. Run the ninja build. Upon completion, the inspector protocol files would be at `outgn/$ARCH-release/gen/src/inspector/protocol`.
 
-5. Copy-paste all `.cpp` and `.h` files into `NativeScript/napi/android/v8/v8_inspector/src/inspector/protocol`.
+5. Copy-paste all `.cpp` and `.h` files into `NativeScript/napi/v8/v8_inspector/src/inspector/protocol`.
 
-6. Create a new C++ class extending the desired Domain (e.g. DOM). Name it according to the convention already established by the V8 team - `v8-<domain>-agent-impl.h/cpp` - under `NativeScript/napi/android/v8/v8_inspector/src/inspector`. Implement the Backend::<Domain>'s methods in the `.cpp` file.
+6. Create a new C++ class extending the desired Domain (e.g. DOM). Name it according to the convention already established by the V8 team - `v8-<domain>-agent-impl.h/cpp` - under `NativeScript/napi/v8/v8_inspector/src/inspector`. Implement the Backend::<Domain>'s methods in the `.cpp` file.
 
 7. To implement event handlers for a domain, add the runtime-side callback handlers under `NativeScript/runtime/android/inspector` and register them in `NativeScript/runtime/android/inspector/JsV8InspectorClient.cpp`.
 
-8. Register the newly created agent implementations in `NativeScript/napi/android/v8/v8_inspector/src/inspector/v8-inspector-session-impl.h/cc` - `V8InspectorSessionImpl` class:
+8. Register the newly created agent implementations in `NativeScript/napi/v8/v8_inspector/src/inspector/v8-inspector-session-impl.h/cc` - `V8InspectorSessionImpl` class:
 
 8.1. Changes in v8-inspector-session-impl.`h`
  - `#include "src/inspector/protocol/<Domain>.h`

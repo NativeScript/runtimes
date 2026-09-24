@@ -1,0 +1,376 @@
+name: Build bytecode compilers
+
+# Builds the per-host bytecode compiler CLIs for every engine that supports
+# ahead-of-time bytecode, by cloning each engine's UPSTREAM repo (not the
+# android-runtime vendored sources) and building the CLI there.
+#
+# Output: one artifact per (engine, host), named `bytecode-compiler-<engine>-<host>`,
+# each containing `<engine>/<host>/<binary>` so the downloads merge straight into
+# tools/bytecode-compiler/bin/.
+#
+# The final `bundle` job merges them all into a single `bytecode-compiler-bin`
+# artifact laid out exactly like tools/bytecode-compiler/bin/ — download it, unzip,
+# and drop its contents into tools/bytecode-compiler/bin/ as-is.
+#
+# NOTE ON COMPATIBILITY: the produced bytecode must be loadable by the engine
+# library the runtime ships. Hermes/PrimJS runtimes link prebuilt .so's and
+# QuickJS/QuickJS-NG compile from vendored source, so the refs below must be kept
+# in step with what the runtime actually bundles. Pin these to exact commits once
+# validated instead of moving branches.
+on:
+  workflow_dispatch:
+    inputs:
+      hermes_ref:
+        description: "facebook/hermes ref"
+        default: "10a40b5f1de81d007cba6afe567c4ba7a0b45f5d"
+      quickjs_ref:
+        # MUST match the quickjs submodule pin (BC_VERSION must agree with the
+        # runtime). See .gitmodules / scripts/vendor-engines-as-submodules.sh.
+        description: "bellard/quickjs ref (match the submodule pin)"
+        default: "04be246001599f5995fa2f2d8c91a0f198d3f34c"
+      quickjs_ng_ref:
+        # MUST match the quickjs_ng submodule pin (BC_VERSION must agree with the
+        # runtime, or JS_ReadObject rejects the blob). See .gitmodules /
+        # scripts/vendor-engines-as-submodules.sh.
+        description: "quickjs-ng/quickjs ref (match the submodule pin)"
+        default: "d950d55e950dd7994a96c669c31efa967b8b79f3"
+      primjs_ref:
+        description: "lynx-family/primjs ref"
+        default: "9c1fe150179b86f0ae5c6fbe670af7d76eca9df6"
+
+env:
+  HERMES_REPO: https://github.com/facebook/hermes
+  QUICKJS_REPO: https://github.com/bellard/quickjs
+  QUICKJS_NG_REPO: https://github.com/quickjs-ng/quickjs
+  PRIMJS_REPO: https://github.com/lynx-family/primjs
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Hermes — `hermesc` already emits a loadable HBC blob; no shim needed.
+  # ---------------------------------------------------------------------------
+  hermes:
+    name: hermes (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-x64,    runner: ubuntu-24.04 }
+          - { host: linux-arm64,  runner: ubuntu-24.04-arm }
+          - { host: darwin-x64,   runner: macos-15-intel }
+          - { host: darwin-arm64, runner: macos-14 }
+          - { host: win32-x64,    runner: windows-2022 }
+          # win32-arm64 dropped: hermes' Boost.Context ARM64 assembler + CMake's
+          # ASM_ARMASM linker support fail on windows-11-arm. The win32-x64
+          # hermesc runs on ARM Windows via x64 emulation (HBC output is portable).
+    steps:
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build build-essential python3
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+      - name: Install toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja -y
+
+      - name: Clone Hermes
+        shell: bash
+        # Fetch by ref so an exact commit SHA works (git clone --branch only
+        # accepts branch/tag names). GitHub allows fetching arbitrary SHAs.
+        run: |
+          set -euxo pipefail
+          ref="${{ github.event.inputs.hermes_ref || 'master' }}"
+          git init hermes
+          git -C hermes remote add origin "$HERMES_REPO"
+          git -C hermes fetch --depth 1 origin "$ref"
+          git -C hermes -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Build hermesc (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S hermes -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHERMES_BUILD_APPLE_FRAMEWORK=OFF
+          cmake --build build --target hermesc
+
+      - name: Build hermesc (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Use the default (Visual Studio) generator; Ninja+MSVC also works if the
+          # VS dev environment is on PATH.
+          cmake -S hermes -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target hermesc --config Release
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "out/hermes/${{ matrix.host }}"
+          bin="$(find build -type f \( -name hermesc -o -name hermesc.exe \) | head -n1)"
+          test -n "$bin"
+          cp "$bin" "out/hermes/${{ matrix.host }}/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-compiler-hermes-${{ matrix.host }}
+          # Root the artifact at `out/` so it carries the full
+          # `hermes/<host>/<binary>` path and merges straight into bin/.
+          path: out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # QuickJS (bellard) — build via its own Makefile (libquickjs.a, which injects
+  # -D_GNU_SOURCE -DCONFIG_VERSION), then link our blob-emitting shim.
+  # win32-x64 is CROSS-compiled on Linux via bellard's CONFIG_WIN32 (mingw-w64);
+  # win32-arm64 is not possible (mingw-w64 targets x86 only).
+  # ---------------------------------------------------------------------------
+  quickjs:
+    name: quickjs (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-x64,    runner: ubuntu-24.04 }
+          - { host: linux-arm64,  runner: ubuntu-24.04-arm }
+          - { host: darwin-x64,   runner: macos-15-intel }
+          - { host: darwin-arm64, runner: macos-14 }
+          - { host: win32-x64,    runner: ubuntu-24.04 }  # mingw cross-compile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          # mingw-w64 for the win32-x64 cross build.
+          if [ "${{ matrix.host }}" = "win32-x64" ]; then sudo apt-get install -y mingw-w64; fi
+      # macOS: make + clang ship with the Xcode command-line tools.
+
+      - name: Clone QuickJS
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ref="${{ github.event.inputs.quickjs_ref || 'master' }}"
+          git init quickjs
+          git -C quickjs remote add origin "$QUICKJS_REPO"
+          git -C quickjs fetch --depth 1 origin "$ref"
+          git -C quickjs -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Build lib + shim
+        shell: bash
+        env:
+          SHIM: ${{ github.workspace }}/tools/bytecode-compiler/native/qjs-compile.c
+        run: |
+          set -euxo pipefail
+          cd quickjs
+          jobs="$(getconf _NPROCESSORS_ONLN)"
+          out="../out/quickjs/${{ matrix.host }}"; mkdir -p "$out"
+          if [ "${{ matrix.host }}" = "win32-x64" ]; then
+            # CONFIG_WIN32=y selects the x86_64-w64-mingw32- cross toolchain.
+            make -j"$jobs" CONFIG_WIN32=y libquickjs.a
+            # bellard's win32 LIBS are "-lm -lpthread" (winpthreads provides the
+            # pthread_* and clock_gettime symbols quickjs.c uses).
+            x86_64-w64-mingw32-gcc -O2 -DNSBC_MAGIC='"NSBCQJS"' -I. \
+              -o "$out/nsbc-quickjs.exe" "$SHIM" libquickjs.a -lm -lpthread
+            # Cross-built Windows binary — not runnable on the Linux host.
+          else
+            # Use bellard's own Makefile so CONFIG_VERSION / _GNU_SOURCE and the
+            # correct source set come from upstream.
+            make -j"$jobs" libquickjs.a
+            cc -O2 -DNSBC_MAGIC='"NSBCQJS"' -I. -o "$out/nsbc-quickjs" "$SHIM" libquickjs.a -lm
+            "$out/nsbc-quickjs" || true  # usage line (exit 2) proves it links & runs
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-compiler-quickjs-${{ matrix.host }}
+          # Root the artifact at `out/` so it carries the full
+          # `quickjs/<host>/<binary>` path and merges straight into bin/.
+          path: out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # QuickJS-NG — CMake build of libqjs, then our shim (same JS_* API).
+  # ---------------------------------------------------------------------------
+  quickjs-ng:
+    name: quickjs-ng (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-x64,    runner: ubuntu-24.04 }
+          - { host: linux-arm64,  runner: ubuntu-24.04-arm }
+          - { host: darwin-x64,   runner: macos-15-intel }
+          - { host: darwin-arm64, runner: macos-14 }
+          - { host: win32-x64,    runner: windows-2022 }
+          # - { host: win32-arm64,  runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build build-essential
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+      - name: Install toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja llvm -y
+
+      - name: Clone QuickJS-NG
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ref="${{ github.event.inputs.quickjs_ng_ref || 'master' }}"
+          git init quickjs-ng
+          git -C quickjs-ng remote add origin "$QUICKJS_NG_REPO"
+          git -C quickjs-ng fetch --depth 1 origin "$ref"
+          git -C quickjs-ng -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Build lib + shim
+        shell: bash
+        env:
+          SHIM: ${{ github.workspace }}/tools/bytecode-compiler/native/qjs-compile.c
+        run: |
+          set -euxo pipefail
+          # Build the shim as a CMake target so it uses the SAME toolchain + CRT
+          # as the engine lib. Linking a separately-compiled (clang) shim against
+          # the MSVC-built qjs.lib fails with __imp_*/CRT-mismatch link errors on
+          # Windows. The 'qjs' target propagates its public include dirs and libm.
+          cp "$SHIM" quickjs-ng/nsbc-quickjs-ng.c
+          cat >> quickjs-ng/CMakeLists.txt <<'CMAKE'
+
+          add_executable(nsbc-quickjs-ng nsbc-quickjs-ng.c)
+          target_link_libraries(nsbc-quickjs-ng PRIVATE qjs)
+          target_compile_definitions(nsbc-quickjs-ng PRIVATE NSBC_MAGIC=\"NSBCNGS\")
+          CMAKE
+          cmake -S quickjs-ng -B quickjs-ng/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build quickjs-ng/build --config Release --target nsbc-quickjs-ng
+          out="out/quickjs-ng/${{ matrix.host }}"; mkdir -p "$out"
+          bin="$(find quickjs-ng/build -type f \( -name 'nsbc-quickjs-ng' -o -name 'nsbc-quickjs-ng.exe' \) | head -n1)"
+          test -n "$bin"; cp "$bin" "$out/"
+          [ "${{ runner.os }}" = "Windows" ] || "$out/nsbc-quickjs-ng" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-compiler-quickjs-ng-${{ matrix.host }}
+          # Root the artifact at `out/` so it carries the full
+          # `quickjs-ng/<host>/<binary>` path and merges straight into bin/.
+          path: out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # PrimJS — build via its own toolchain: `hab sync` fetches gn + ninja + a
+  # bundled clang + sysroot, then GN/ninja build the engine. We add our LEPUS_*
+  # shim as a sibling GN executable (reusing the qjs-cli engine deps).
+  #
+  # Unix only, and NOT linux-arm64: PrimJS's envsetup.sh aborts on Windows, and
+  # its DEPS only provides a linux sysroot for x86_64. So: linux-x64 + macOS.
+  #
+  # Validated locally on darwin-arm64 (hab sync -> gn gen -> ninja nsbc-primjs
+  # produces a working CLI). Linux uses the same flow.
+  # ---------------------------------------------------------------------------
+  primjs:
+    name: primjs (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-x64,    runner: ubuntu-24.04 }
+          - { host: darwin-x64,   runner: macos-15-intel }
+          - { host: darwin-arm64, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3 curl
+
+      - name: Clone PrimJS
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ref="${{ github.event.inputs.primjs_ref || 'develop' }}"
+          git init primjs
+          git -C primjs remote add origin "$PRIMJS_REPO"
+          git -C primjs fetch --depth 1 origin "$ref"
+          git -C primjs -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Add shim as a GN target
+        shell: bash
+        env:
+          SHIM: ${{ github.workspace }}/tools/bytecode-compiler/native/primjs-compile.c
+        run: |
+          set -euxo pipefail
+          # Build as C++ (.cc); the LEPUS_* API is extern "C" so linkage is fine.
+          cp "$SHIM" primjs/tools/qjs-cli/nsbc-primjs.cc
+          # Add the target to the ROOT BUILD.gn (always loaded, so it's always
+          # generated) linking ONLY the core engine (//src:quickjs_lib). We avoid
+          # qjs_wasm_binding — its WASM/JSC code doesn't build under the bundled
+          # toolchain's -Werror, and our shim doesn't need it. (Validated locally.)
+          cat >> primjs/BUILD.gn <<'GN'
+
+          executable("nsbc-primjs") {
+            cflags = [ "-Wno-c99-designator" ]
+            sources = [ "//tools/qjs-cli/nsbc-primjs.cc" ]
+            include_dirs = [ "//include" ]
+            deps = [ "//src:quickjs_lib" ]
+          }
+          GN
+
+      - name: Build (hab sync + gn + ninja)
+        shell: bash
+        working-directory: primjs
+        run: |
+          set -euxo pipefail
+          # hab (in-repo) fetches gn, ninja, the bundled clang toolchain + sysroot.
+          source tools/envsetup.sh
+          hab sync .
+          gn gen out/Default --args="is_debug=false"
+          ninja -C out/Default nsbc-primjs
+          out="../out/primjs/${{ matrix.host }}"; mkdir -p "$out"
+          cp out/Default/nsbc-primjs "$out/nsbc-primjs"
+          "$out/nsbc-primjs" || true  # usage line (exit 2) proves it links & runs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-compiler-primjs-${{ matrix.host }}
+          # Root the artifact at `out/` so it carries the full
+          # `primjs/<host>/<binary>` path and merges straight into bin/.
+          path: out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Bundle — merge every per-(engine, host) artifact into a single artifact laid
+  # out exactly like tools/bytecode-compiler/bin/, ready to download-and-paste.
+  # ---------------------------------------------------------------------------
+  bundle:
+    name: bundle bin/
+    runs-on: ubuntu-24.04
+    needs: [hermes, quickjs, quickjs-ng, primjs]
+    # Run even if some engine/host builds failed, so a partial bin/ is still
+    # published rather than nothing.
+    if: always()
+    steps:
+      - name: Download all compiler artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Every per-job artifact already carries an `<engine>/<host>/<binary>`
+          # path; merge-multiple overlays them into one tree = the bin/ layout.
+          pattern: bytecode-compiler-*
+          path: bin
+          merge-multiple: true
+
+      - name: Show merged layout
+        run: find bin -type f | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode-compiler-bin
+          path: bin
+          if-no-files-found: error

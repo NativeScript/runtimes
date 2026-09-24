@@ -157,6 +157,18 @@ jobs:
 
       - name: Build base CLI
         run: |
+          # Candidate and base can pin different engine releases and CMake
+          # layouts. Their ignored build/framework outputs must not bleed into
+          # one another when both revisions are built in this checkout.
+          rm -rf ./dist/intermediates/macos ./dist/NativeScript.xcframework
+          case "${ENGINE}" in
+            v8)
+              rm -rf ./Frameworks/libv8_monolith.xcframework
+              ;;
+            hermes)
+              rm -rf ./Frameworks/hermes.xcframework ./Frameworks/hermes-headers
+              ;;
+          esac
           git checkout --detach "${BASE_SHA}"
           git submodule update --init --recursive
           npm install

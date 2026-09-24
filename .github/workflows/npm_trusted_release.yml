@@ -1,30 +1,39 @@
 name: NPM Trusted Release
 
-# Publishes one or more NativeScript iOS npm packages
-# (@nativescript/ios-v8, @nativescript/ios-hermes, @nativescript/ios-jsc,
-# @nativescript/ios-quickjs, @nativescript/react-native) via npm trusted
-# publishing (OIDC).
+# Publishes any combination of the NativeScript runtime npm packages via npm
+# trusted publishing (OIDC):
+#
+#   iOS      @nativescript/ios-{v8,hermes,jsc,quickjs}
+#   Android  @nativescript/android-{v8,hermes,jsc,quickjs,quickjs-ng,primjs}
+#   RN       @nativescript/react-native
+#
+# Selection is a (platform, engines) pair: `platform` picks the family,
+# `engines` narrows it to a comma-separated subset (or `all`). Every selected
+# package becomes one matrix entry that is built on the runner it needs
+# (macos for the Apple/RN packages, ubuntu for the Android ones) and published
+# by an identical downstream job.
 #
 # Each package must be configured on npmjs.com with a trusted publisher that
-# points at this repository + workflow + environment. With `engine: all`, the
-# workflow fans out across the four iOS engine packages via a matrix; use
-# `engine: react-native` to publish @nativescript/react-native.
+# points at this repository + workflow + environment.
 
 on:
   workflow_dispatch:
     inputs:
-      engine:
-        description: "Package to release (engine package, react-native, or 'all' for every iOS engine)"
+      platform:
+        description: "Package family to release"
         required: true
         type: choice
-        default: v8
+        default: ios
         options:
-          - v8
-          - hermes
-          - jsc
-          - quickjs
+          - ios
+          - android
           - react-native
           - all
+      engines:
+        description: "Comma-separated engines, or 'all'. iOS: v8|hermes|jsc|quickjs. Android: v8|v8-10|v8-11|v8-13|hermes|jsc|quickjs|quickjs-ng|primjs. Ignored for react-native."
+        required: false
+        type: string
+        default: all
       release-type:
         description: "Version bump (patch/minor/major publish to 'latest'; prerelease uses 'preid' as the dist-tag)"
         required: false
@@ -56,7 +65,7 @@ on:
 
 concurrency:
   # Avoid overlapping publishes on the same ref/package selection.
-  group: npm-trusted-release-${{ github.ref }}-${{ inputs.engine }}
+  group: npm-trusted-release-${{ github.ref }}-${{ inputs.platform }}-${{ inputs.engines }}
   cancel-in-progress: false
 
 env:
@@ -69,61 +78,198 @@ jobs:
     permissions: {}
     outputs:
       targets: ${{ steps.compute.outputs.targets }}
+      summary: ${{ steps.compute.outputs.summary }}
     steps:
       - name: Compute matrix
         id: compute
         env:
-          ENGINE: ${{ inputs.engine }}
+          PLATFORM: ${{ inputs.platform }}
+          ENGINES: ${{ inputs.engines }}
         run: |
           set -euo pipefail
-          case "$ENGINE" in
-            all)
-              echo 'targets=["v8","hermes","jsc","quickjs"]' >> "$GITHUB_OUTPUT"
-              ;;
-            v8|hermes|jsc|quickjs|react-native)
-              printf 'targets=["%s"]\n' "$ENGINE" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unsupported engine: $ENGINE" >&2
-              exit 1
-              ;;
-          esac
+          node - >> "$GITHUB_OUTPUT" <<'NODE'
+          const platform = (process.env.PLATFORM || '').trim();
+          const raw = (process.env.ENGINES || 'all').trim().toLowerCase();
+          const tokens = raw === '' ? ['all'] : raw.split(/[\s,]+/).filter(Boolean);
+          const wantsAll = tokens.includes('all');
+
+          const IOS_ENGINES = ['v8', 'hermes', 'jsc', 'quickjs'];
+
+          // Android engine slug -> the -Pengine value gradle expects. The v8-NN
+          // slugs all ship as @nativescript/android-v8; they only differ in which
+          // V8 drop is linked in.
+          const ANDROID_ENGINES = {
+            'v8': 'V8-13',
+            'v8-10': 'V8-10',
+            'v8-11': 'V8-11',
+            'v8-13': 'V8-13',
+            'hermes': 'HERMES',
+            'jsc': 'JSC',
+            'quickjs': 'QUICKJS',
+            'quickjs-ng': 'QUICKJS_NG',
+            'primjs': 'PRIMJS',
+          };
+          const ANDROID_DEFAULT = ['v8', 'hermes', 'jsc', 'quickjs', 'quickjs-ng', 'primjs'];
+
+          const iosTarget = (engine) => ({
+            key: `ios-${engine}`,
+            platform: 'ios',
+            engine,
+            runner: 'macos-26',
+            package_dir: `packages/ios-${engine}`,
+            package_name: `@nativescript/ios-${engine}`,
+            tarball_basename: `nativescript-ios-${engine}`,
+            npm_tag_target: `ios-${engine}`,
+            npm_tag_script: 'scripts/get-npm-tag.js',
+            artifact_dir: `packages/ios-${engine}/dist`,
+            gradle_engine: '',
+          });
+
+          const androidTarget = (engine) => {
+            const gradleEngine = ANDROID_ENGINES[engine];
+            // v8-10 / v8-11 / v8-13 all publish as android-v8.
+            const pkgEngine = engine.startsWith('v8') ? 'v8' : engine;
+            return {
+              key: `android-${engine}`,
+              platform: 'android',
+              engine,
+              runner: 'ubuntu-latest',
+              package_dir: `packages/android-${pkgEngine}`,
+              package_name: `@nativescript/android-${pkgEngine}`,
+              tarball_basename: `nativescript-android-${pkgEngine}`,
+              npm_tag_target: `android-${pkgEngine}`,
+              npm_tag_script: 'platforms/android/scripts/get-npm-tag.js',
+              artifact_dir: `platforms/android/dist_${gradleEngine.toLowerCase()}`,
+              gradle_engine: gradleEngine,
+            };
+          };
+
+          const rnTarget = () => ({
+            key: 'react-native',
+            platform: 'react-native',
+            engine: '',
+            runner: 'macos-26',
+            package_dir: 'packages/react-native',
+            package_name: '@nativescript/react-native',
+            tarball_basename: 'nativescript-react-native',
+            npm_tag_target: 'react-native',
+            npm_tag_script: 'scripts/get-npm-tag.js',
+            artifact_dir: 'packages/react-native/dist',
+            gradle_engine: '',
+          });
+
+          const fail = (msg) => { console.error(msg); process.exit(1); };
+          const targets = [];
+
+          const selectIos = () => {
+            if (wantsAll) return IOS_ENGINES;
+            const picked = tokens.filter((t) => IOS_ENGINES.includes(t));
+            if (platform === 'ios' && picked.length !== tokens.length) {
+              fail(`Unsupported iOS engine(s): ${tokens.filter((t) => !IOS_ENGINES.includes(t)).join(', ')}. Valid: ${IOS_ENGINES.join(', ')}.`);
+            }
+            return picked;
+          };
+
+          const selectAndroid = () => {
+            if (wantsAll) return ANDROID_DEFAULT;
+            const valid = Object.keys(ANDROID_ENGINES);
+            const picked = tokens.filter((t) => valid.includes(t));
+            if (platform === 'android' && picked.length !== tokens.length) {
+              fail(`Unsupported Android engine(s): ${tokens.filter((t) => !valid.includes(t)).join(', ')}. Valid: ${valid.join(', ')}.`);
+            }
+            // Two v8-NN slugs would publish the same package twice.
+            const v8Slugs = picked.filter((t) => t.startsWith('v8'));
+            if (v8Slugs.length > 1) {
+              fail(`Pick a single V8 variant; ${v8Slugs.join(', ')} all publish @nativescript/android-v8.`);
+            }
+            return picked;
+          };
+
+          switch (platform) {
+            case 'ios':
+              targets.push(...selectIos().map(iosTarget));
+              break;
+            case 'android':
+              targets.push(...selectAndroid().map(androidTarget));
+              break;
+            case 'react-native':
+              targets.push(rnTarget());
+              break;
+            case 'all': {
+              const ios = selectIos();
+              const android = selectAndroid();
+              // With an explicit engine list, react-native only joins in when it
+              // is named; `all` means literally everything.
+              const rn = wantsAll || tokens.includes('react-native');
+              const unmatched = wantsAll
+                ? []
+                : tokens.filter((t) => t !== 'react-native' && !ios.includes(t) && !android.includes(t));
+              if (unmatched.length) {
+                fail(`Engine(s) valid for neither iOS nor Android: ${unmatched.join(', ')}.`);
+              }
+              targets.push(...ios.map(iosTarget), ...android.map(androidTarget));
+              if (rn) targets.push(rnTarget());
+              break;
+            }
+            default:
+              fail(`Unsupported platform: ${platform}`);
+          }
+
+          if (!targets.length) {
+            fail(`No packages selected for platform="${platform}" engines="${raw}".`);
+          }
+
+          console.log(`targets=${JSON.stringify(targets)}`);
+          console.log(`summary=${targets.map((t) => t.package_name).join(', ')}`);
+          NODE
+      - name: Show selection
+        env:
+          SUMMARY: ${{ steps.compute.outputs.summary }}
+        run: |
+          echo "Selected packages: $SUMMARY"
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.key }}
     needs: matrix
-    runs-on: macos-26
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.matrix.outputs.targets) }}
-    outputs:
-      # Per-target outputs aren't natively supported with matrices, so each job
-      # uploads its computed metadata alongside the tarball artifact.
-      placeholder: noop
+        include: ${{ fromJson(needs.matrix.outputs.targets) }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
         with:
           egress-policy: audit
       - uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
+        if: ${{ matrix.platform != 'android' }}
         with:
           xcode-version: ${{ env.XCODE_VERSION }}
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 0
-          submodules: recursive
+          # The Android build fetches (and patches) the engine submodules it needs
+          # itself, via `npm run setup`.
+          submodules: ${{ matrix.platform == 'android' && 'false' || 'recursive' }}
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
       - name: Install Python
+        if: ${{ matrix.platform != 'android' }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3"
-      - name: Install Dependencies
+      - name: Set up JDK 17
+        if: ${{ matrix.platform == 'android' }}
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - name: Install dependencies (Apple)
+        if: ${{ matrix.platform != 'android' }}
         run: |
           npm install
           python3 -m pip install --upgrade pip six
@@ -137,6 +283,14 @@ jobs:
             sudo mkdir -p /usr/local/bin
             sudo ln -sf "$(command -v cmake)" /usr/local/bin/cmake
           fi
+      - name: Install dependencies (Android)
+        if: ${{ matrix.platform == 'android' }}
+        working-directory: platforms/android
+        run: npm install
+      - name: Set up engine submodules, patches, and jsparser
+        if: ${{ matrix.platform == 'android' }}
+        working-directory: platforms/android
+        run: npm run setup
       - name: Bump version
         id: bump
         shell: bash
@@ -145,28 +299,20 @@ jobs:
           PACKAGE_VERSION: ${{ inputs.version }}
           PREID: ${{ inputs.preid }}
           NPM_TAG_OVERRIDE: ${{ inputs.npm-tag }}
-          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          ENGINE: ${{ matrix.engine }}
+          PACKAGE_DIR: ${{ matrix.package_dir }}
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          NPM_TAG_TARGET: ${{ matrix.npm_tag_target }}
+          NPM_TAG_SCRIPT: ${{ matrix.npm_tag_script }}
         run: |
           set -euo pipefail
           release_type="$RELEASE_TYPE"
           package_version="$PACKAGE_VERSION"
           preid="$PREID"
           npm_tag_override="$NPM_TAG_OVERRIDE"
-          target="$TARGET"
-          if [ "$target" = "react-native" ]; then
-            pkg_dir="packages/react-native"
-            package_name="@nativescript/react-native"
-            tarball_basename="nativescript-react-native"
-            npm_tag_target="react-native"
-          else
-            pkg_dir="packages/ios-${target}"
-            package_name="@nativescript/ios-${target}"
-            tarball_basename="nativescript-ios-${target}"
-            npm_tag_target="ios-${target}"
-            echo "IOS_VARIANT=ios-${target}" >> "$GITHUB_ENV"
-          fi
 
-          pushd "$pkg_dir" >/dev/null
+          pushd "$PACKAGE_DIR" >/dev/null
           if [ -n "$package_version" ]; then
             npm version "$package_version" --no-git-tag-version >/dev/null
           elif [ "$release_type" = "prerelease" ]; then
@@ -177,7 +323,7 @@ jobs:
           NPM_VERSION=$(node -e "console.log(require('./package.json').version)")
           popd >/dev/null
 
-          NPM_TAG=$(NPM_VERSION="$NPM_VERSION" node ./scripts/get-npm-tag.js "$npm_tag_target")
+          NPM_TAG=$(NPM_VERSION="$NPM_VERSION" node "./$NPM_TAG_SCRIPT" "$NPM_TAG_TARGET")
           if [ -n "$npm_tag_override" ]; then
             case "$npm_tag_override" in
               *[[:space:]]*)
@@ -195,62 +341,87 @@ jobs:
             echo "Exact prerelease publishes must include a prerelease identifier (for example 9.0.0-preview.0)." >&2
             exit 1
           fi
+
+          if [ "$PLATFORM" = "android" ]; then
+            # Gradle copies platforms/android/package.json into the dist dir and packs
+            # it, so the package identity has to be stamped there.
+            npm --prefix platforms/android pkg set name="$PACKAGE_NAME" version="$NPM_VERSION"
+          elif [ "$PLATFORM" = "ios" ]; then
+            # build_npm_ios.sh reads the variant it is packaging from the environment.
+            echo "IOS_VARIANT=ios-${ENGINE}" >> "$GITHUB_ENV"
+          fi
+
           echo "NPM_VERSION=$NPM_VERSION" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$NPM_TAG" >> "$GITHUB_OUTPUT"
-          echo "PACKAGE_DIR=$pkg_dir" >> "$GITHUB_OUTPUT"
-          echo "PACKAGE_NAME=$package_name" >> "$GITHUB_OUTPUT"
-          echo "TARBALL_BASENAME=$tarball_basename" >> "$GITHUB_OUTPUT"
-          echo "Resolved $package_name@$NPM_VERSION (tag: $NPM_TAG)"
-      - name: Build iOS engine (--${{ matrix.target }})
-        if: ${{ matrix.target != 'react-native' }}
+          echo "Resolved $PACKAGE_NAME@$NPM_VERSION (tag: $NPM_TAG)"
+      - name: Build iOS engine (--${{ matrix.engine }})
+        if: ${{ matrix.platform == 'ios' }}
         env:
-          TARGET: ${{ matrix.target }}
-        run: ./scripts/build_all_ios.sh "--${TARGET}"
+          ENGINE: ${{ matrix.engine }}
+        run: ./scripts/build_all_ios.sh "--${ENGINE}"
       - name: Build @nativescript/react-native
-        if: ${{ matrix.target == 'react-native' }}
+        if: ${{ matrix.platform == 'react-native' }}
         run: |
           ./scripts/build_all_react_native.sh
           ./scripts/build_react_native_turbomodule.sh
+      - name: Grant execute permission for gradlew
+        if: ${{ matrix.platform == 'android' }}
+        working-directory: platforms/android
+        run: chmod +x gradlew
+      - name: Build Android runtime (-Pengine=${{ matrix.gradle_engine }})
+        if: ${{ matrix.platform == 'android' }}
+        working-directory: platforms/android
+        env:
+          GRADLE_ENGINE: ${{ matrix.gradle_engine }}
+        run: ./gradlew -Pengine="${GRADLE_ENGINE}"
       - name: Record metadata
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
-          PACKAGE_DIR: ${{ steps.bump.outputs.PACKAGE_DIR }}
-          PACKAGE_NAME: ${{ steps.bump.outputs.PACKAGE_NAME }}
+          KEY: ${{ matrix.key }}
+          PLATFORM: ${{ matrix.platform }}
+          ENGINE: ${{ matrix.engine }}
+          ARTIFACT_DIR: ${{ matrix.artifact_dir }}
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          TARBALL_BASENAME: ${{ matrix.tarball_basename }}
           NPM_VERSION: ${{ steps.bump.outputs.NPM_VERSION }}
           NPM_TAG: ${{ steps.bump.outputs.NPM_TAG }}
-          TARBALL_BASENAME: ${{ steps.bump.outputs.TARBALL_BASENAME }}
         run: |
           set -euo pipefail
-          package_dir="$PACKAGE_DIR"
           tarball_file="${TARBALL_BASENAME}-${NPM_VERSION}.tgz"
-          mkdir -p "$package_dir/dist"
-          cat > "$package_dir/dist/release-meta.json" <<EOF
+          if [ ! -f "${ARTIFACT_DIR}/${tarball_file}" ]; then
+            echo "Expected tarball ${ARTIFACT_DIR}/${tarball_file} was not produced by the build." >&2
+            ls -la "$ARTIFACT_DIR" || true
+            exit 1
+          fi
+          cat > "${ARTIFACT_DIR}/release-meta.json" <<EOF
           {
-            "target": "$TARGET",
-            "package_dir": "$package_dir",
-            "package_name": "$PACKAGE_NAME",
-            "version": "$NPM_VERSION",
-            "tag": "$NPM_TAG",
-            "tarball": "$tarball_file"
+            "key": "${KEY}",
+            "platform": "${PLATFORM}",
+            "engine": "${ENGINE}",
+            "artifact_dir": "${ARTIFACT_DIR}",
+            "package_name": "${PACKAGE_NAME}",
+            "version": "${NPM_VERSION}",
+            "tag": "${NPM_TAG}",
+            "tarball": "${tarball_file}"
           }
           EOF
       - name: Upload npm package artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: npm-package-${{ matrix.target }}
+          name: npm-package-${{ matrix.key }}
+          if-no-files-found: error
           path: |
-            ${{ steps.bump.outputs.PACKAGE_DIR }}/dist/${{ steps.bump.outputs.TARBALL_BASENAME }}-${{ steps.bump.outputs.NPM_VERSION }}.tgz
-            ${{ steps.bump.outputs.PACKAGE_DIR }}/dist/release-meta.json
+            ${{ matrix.artifact_dir }}/${{ matrix.tarball_basename }}-${{ steps.bump.outputs.NPM_VERSION }}.tgz
+            ${{ matrix.artifact_dir }}/release-meta.json
       - name: Upload dSYMs artifact
-        if: ${{ matrix.target != 'react-native' }}
+        if: ${{ matrix.platform == 'ios' }}
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: NativeScript-dSYMs-${{ matrix.target }}
+          name: NativeScript-dSYMs-${{ matrix.key }}
           path: dist/dSYMs
 
   publish:
-    name: Publish ${{ matrix.target }}
+    name: Publish ${{ matrix.key }}
     needs:
       - matrix
       - build
@@ -260,7 +431,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.matrix.outputs.targets) }}
+        include: ${{ fromJson(needs.matrix.outputs.targets) }}
     permissions:
       contents: read
       id-token: write
@@ -275,8 +446,8 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          name: npm-package-${{ matrix.target }}
-          path: npm-package/${{ matrix.target }}
+          name: npm-package-${{ matrix.key }}
+          path: npm-package/${{ matrix.key }}
       - name: Update npm (required for OIDC trusted publishing)
         run: |
           corepack enable npm
@@ -287,10 +458,10 @@ jobs:
         id: meta
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          KEY: ${{ matrix.key }}
         run: |
           set -euo pipefail
-          meta="npm-package/${TARGET}/release-meta.json"
+          meta="npm-package/${KEY}/release-meta.json"
           if [ ! -f "$meta" ]; then
             echo "Missing release metadata at $meta" >&2
             exit 1
@@ -311,12 +482,12 @@ jobs:
           NPM_TAG: ${{ steps.meta.outputs.NPM_TAG }}
           PACKAGE_NAME: ${{ steps.meta.outputs.PACKAGE_NAME }}
           TARBALL: ${{ steps.meta.outputs.TARBALL }}
-          TARGET: ${{ matrix.target }}
+          KEY: ${{ matrix.key }}
           DRY_RUN: ${{ inputs.dry-run }}
           NODE_AUTH_TOKEN: ""
         run: |
           set -euo pipefail
-          TARBALL_PATH="npm-package/${TARGET}/${TARBALL}"
+          TARBALL_PATH="npm-package/${KEY}/${TARBALL}"
           PUBLISH_ARGS=("$TARBALL_PATH" --tag "$NPM_TAG" --access public --provenance)
           if [ "$DRY_RUN" = "true" ]; then
             PUBLISH_ARGS+=(--dry-run)
@@ -336,12 +507,12 @@ jobs:
           NPM_TAG: ${{ steps.meta.outputs.NPM_TAG }}
           PACKAGE_NAME: ${{ steps.meta.outputs.PACKAGE_NAME }}
           TARBALL: ${{ steps.meta.outputs.TARBALL }}
-          TARGET: ${{ matrix.target }}
+          KEY: ${{ matrix.key }}
           DRY_RUN: ${{ inputs.dry-run }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
         run: |
           set -euo pipefail
-          TARBALL_PATH="npm-package/${TARGET}/${TARBALL}"
+          TARBALL_PATH="npm-package/${KEY}/${TARBALL}"
           PUBLISH_ARGS=("$TARBALL_PATH" --tag "$NPM_TAG" --access public --provenance)
           if [ "$DRY_RUN" = "true" ]; then
             PUBLISH_ARGS+=(--dry-run)
@@ -361,22 +532,28 @@ jobs:
     steps:
       - name: Print summary
         env:
-          PACKAGE_SELECTION: ${{ inputs.engine }}
+          PLATFORM: ${{ inputs.platform }}
+          ENGINES: ${{ inputs.engines }}
           RELEASE_TYPE: ${{ inputs.release-type }}
           PACKAGE_VERSION: ${{ inputs.version }}
           PREID: ${{ inputs.preid }}
           NPM_TAG_OVERRIDE: ${{ inputs.npm-tag }}
           DRY_RUN: ${{ inputs.dry-run }}
-          TARGETS: ${{ needs.matrix.outputs.targets }}
+          PACKAGES: ${{ needs.matrix.outputs.summary }}
           BUILD_RESULT: ${{ needs.build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
         run: |
-          echo "Package selection: $PACKAGE_SELECTION"
-          echo "Release type:     $RELEASE_TYPE"
-          echo "Exact version:    $PACKAGE_VERSION"
-          echo "Preid:            $PREID"
-          echo "NPM tag override: $NPM_TAG_OVERRIDE"
-          echo "Dry run:          $DRY_RUN"
-          echo "Targets:          $TARGETS"
-          echo "Build result:     $BUILD_RESULT"
-          echo "Publish result:   $PUBLISH_RESULT"
+          {
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Platform | $PLATFORM |"
+            echo "| Engines | $ENGINES |"
+            echo "| Packages | $PACKAGES |"
+            echo "| Release type | $RELEASE_TYPE |"
+            echo "| Exact version | ${PACKAGE_VERSION:-(none)} |"
+            echo "| Preid | $PREID |"
+            echo "| NPM tag override | ${NPM_TAG_OVERRIDE:-(none)} |"
+            echo "| Dry run | $DRY_RUN |"
+            echo "| Build result | $BUILD_RESULT |"
+            echo "| Publish result | $PUBLISH_RESULT |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

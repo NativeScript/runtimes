@@ -4,10 +4,6 @@
 #ifdef TARGET_ENGINE_JSC
 
 namespace nativescript {
-class NativeApiObjectHostObject;
-}
-
-namespace nativescript {
 namespace engine {
 
 namespace jscengine {
@@ -77,7 +73,7 @@ bool shouldDeferToNativeInstancePrototype(JSContextRef context,
                                           HostObjectHolder* holder) {
   if (context == nullptr || object == nullptr || propertyName == nullptr ||
       holder == nullptr ||
-      holder->typeToken != hostObjectTypeToken<NativeApiObjectHostObject>() ||
+      !holder->nativeInstance ||
       isNativeInstancePrototypeBypassExcluded(propertyName)) {
     return false;
   }
@@ -252,9 +248,11 @@ void setFunctionPrototype(JSGlobalContextRef context, JSObjectRef function) {
 
 }  // namespace jscengine
 
-Object Object::createFromHostObjectWithToken(Runtime& runtime, std::shared_ptr<HostObject> host,
-                                             const void* typeToken) {
-  auto* holder = new jscengine::HostObjectHolder(runtime.state(), std::move(host), typeToken);
+Object Object::createFromHostObjectWithToken(
+    Runtime& runtime, std::shared_ptr<HostObject> host, const void* typeToken,
+    bool nativeInstance) {
+  auto* holder = new jscengine::HostObjectHolder(
+      runtime.state(), std::move(host), typeToken, nativeInstance);
   runtime.state()->track(holder, [](void* pointer) {
     auto* tracked = static_cast<jscengine::HostObjectHolder*>(pointer);
     tracked->hostObject.reset();

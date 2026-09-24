@@ -79,7 +79,7 @@ id quickJSNativeObjectArgument(
   if (JS_IsBool(value)) {
     return [NSNumber numberWithBool:JS_ToBool(context, value) != 0];
   }
-  if (JS_IsNumber(value) || JS_IsBigInt(context, value)) {
+  if (JS_IsNumber(value) || JS_IsBigInt(value)) {
     double converted = 0;
     if (quickJSNumberValue(context, value, &converted)) {
       return [NSNumber numberWithDouble:converted];
@@ -245,7 +245,7 @@ bool prepareQuickJSEngineArgument(
     case metagen::mdTypeULong:
     case metagen::mdTypeUInt64: {
       uint64_t converted = 0;
-      if (JS_IsBigInt(context, value)) {
+      if (JS_IsBigInt(value)) {
         if (JS_ToBigUint64(context, &converted, value) < 0) {
           return false;
         }

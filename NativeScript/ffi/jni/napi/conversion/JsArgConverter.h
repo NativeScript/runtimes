@@ -21,9 +21,9 @@ namespace tns {
     class JsArgConverter {
     public:
 
-        JsArgConverter(napi_env env, napi_value caller, napi_value* args, size_t argc, const std::string& methodSignature, MetadataEntry* entry);
+        JsArgConverter(napi_env env, napi_value caller, napi_value* args, size_t argc, const std::string& methodSignature, MetadataEntry* entry, JNIEnv* jniEnv = nullptr, ObjectManager* objectManager = nullptr);
 
-        JsArgConverter(napi_env env, napi_value* args, size_t argc, bool hasImplementationObject, const std::string& methodSignature, MetadataEntry* entry);
+        JsArgConverter(napi_env env, napi_value* args, size_t argc, bool hasImplementationObject, const std::string& methodSignature, MetadataEntry* entry, JNIEnv* jniEnv = nullptr, ObjectManager* objectManager = nullptr);
 
         JsArgConverter(napi_env env, napi_value* args, size_t argc, const std::string& methodSignature);
 
@@ -81,6 +81,19 @@ namespace tns {
 
         napi_env m_env;
 
+        // Current thread's JNIEnv* threaded down from the caller (avoids
+        // re-querying the JavaVM via GetEnv); nullptr => construct locally.
+        JNIEnv* m_jniEnv = nullptr;
+
+        // Returns a JEnv reusing the threaded JNIEnv* when available.
+        inline JEnv GetJEnv() const {
+            return m_jniEnv != nullptr ? JEnv(m_jniEnv, JEnv::Adopt::Trusted) : JEnv();
+        }
+
+        // Cached ObjectManager threaded from the caller (avoids a locked
+        // env->runtime lookup per object-typed argument).
+        ObjectManager* m_objectManager = nullptr;
+
         int m_argsLen;
 
         bool m_isValid;
@@ -89,9 +102,11 @@ namespace tns {
         int m_args_refs[255];
         int m_args_refs_size = 0;
 
-        std::string m_methodSignature;
-
-        std::vector<std::string> m_tokens;
+        // Parsed argument-type tokens. On the common path this points directly at
+        // the MetadataEntry's cached `parsedSig` (no copy); only the entry-less /
+        // unresolved fallback owns its tokens in m_ownedTokens.
+        const std::vector<std::string>* m_tokens = nullptr;
+        std::vector<std::string> m_ownedTokens;
 
         Error m_error;
     };

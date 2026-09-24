@@ -48,20 +48,368 @@ bool EnsureConstructorThis(napi_env env, const char* constructorName,
                             nullptr) == napi_ok;
 }
 
+void ThrowTypeError(napi_env env, const char* msg) {
+  napi_throw_type_error(env, nullptr, msg);
+}
+
+napi_value js_str(napi_env env, std::string_view s) {
+  napi_value v;
+  napi_create_string_utf8(env, s.data(), s.length(), &v);
+  return v;
+}
+
+// Brand-checked unwrap of an already-retrieved receiver. Throws "Illegal
+// invocation" (TypeError) when it is not a wrapped URLSearchParams.
+URLSearchParams* GetInstanceOf(napi_env env, napi_value jsThis) {
+  URLSearchParams* instance = nullptr;
+  if (napi_unwrap(env, jsThis, reinterpret_cast<void**>(&instance)) !=
+          napi_ok ||
+      instance == nullptr) {
+    ThrowTypeError(env, "Illegal invocation");
+    return nullptr;
+  }
+  return instance;
+}
+
+// Brand-checked instance retrieval: throws "Illegal invocation" (TypeError)
+// when the receiver is not a wrapped URLSearchParams, matching the spec.
 URLSearchParams* GetInstance(napi_env env, napi_callback_info info) {
-  NS_NAPI_PREAMBLE
   napi_value jsThis;
-  void* data;
-  NAPI_GUARD(napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, &data)) {
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr) !=
+      napi_ok) {
     return nullptr;
   }
 
-  URLSearchParams* instance;
-  NAPI_GUARD(napi_unwrap(env, jsThis, reinterpret_cast<void**>(&instance))) {
+  URLSearchParams* instance = nullptr;
+  if (napi_unwrap(env, jsThis, reinterpret_cast<void**>(&instance)) !=
+          napi_ok ||
+      instance == nullptr) {
+    ThrowTypeError(env, "Illegal invocation");
     return nullptr;
   }
 
   return instance;
+}
+
+napi_value WellKnownSymbol(napi_env env, const char* name) {
+  napi_value global, symbolCtor, sym;
+  napi_get_global(env, &global);
+  napi_get_named_property(env, global, "Symbol", &symbolCtor);
+  napi_get_named_property(env, symbolCtor, name, &sym);
+  return sym;
+}
+
+napi_value SymbolIterator(napi_env env) {
+  return WellKnownSymbol(env, "iterator");
+}
+
+// WebIDL USVString coercion: ToString (invokes user toString, throws for
+// Symbol). Returns false leaving a pending exception on failure.
+bool ValueToString(napi_env env, napi_value v, std::string& out) {
+  napi_value str;
+  if (napi_coerce_to_string(env, v, &str) != napi_ok) {
+    return false;
+  }
+  size_t len = 0;
+  if (napi_get_value_string_utf8(env, str, nullptr, 0, &len) != napi_ok) {
+    return false;
+  }
+  std::vector<char> buf(len + 1);
+  napi_get_value_string_utf8(env, str, buf.data(), len + 1, nullptr);
+  out.assign(buf.data(), len);
+  return true;
+}
+
+enum IterKind { ITER_KEYS = 0, ITER_VALUES = 1, ITER_ENTRIES = 2 };
+
+// Per-iterator state: tracks the current index and what to yield. Freed by the
+// iterator object's finalizer.
+struct IterState {
+  uint32_t idx;
+  int kind;
+};
+
+// Internal, non-enumerable keys the iterator carries:
+//  - ITER_SOURCE_KEY: a strong reference to the source URLSearchParams (kept
+//    alive for `next`); released by ordinary property teardown.
+//  - ITER_BRAND_KEY: a napi_external wrapping this iterator's IterState*, used
+//    by `next` for the receiver brand check.
+// Holding these as properties (not napi_refs) means the iterator's finalizer
+// never has to delete a reference — illegal during the GC sweep on every
+// engine — so it can stay a plain C++ delete (see MakeIterator).
+static constexpr const char* ITER_SOURCE_KEY = "__nsSource";
+static constexpr const char* ITER_BRAND_KEY = "__nsBrand";
+
+// ES IteratorClose: best-effort call to the iterator's return() on abrupt
+// completion (so a generator's `finally` runs), preserving any pending
+// exception.
+void IteratorClose(napi_env env, napi_value iterObj) {
+  napi_value savedEx = nullptr;
+  bool pending = false;
+  napi_is_exception_pending(env, &pending);
+  if (pending) {
+    napi_get_and_clear_last_exception(env, &savedEx);
+  }
+  napi_value returnFn;
+  if (napi_get_named_property(env, iterObj, "return", &returnFn) == napi_ok &&
+      napi_util::is_of_type(env, returnFn, napi_function)) {
+    napi_value res;
+    napi_call_function(env, iterObj, returnFn, 0, nullptr, &res);
+    bool p2 = false;
+    napi_is_exception_pending(env, &p2);
+    if (p2) {
+      napi_value e;
+      napi_get_and_clear_last_exception(env, &e);
+    }
+  }
+  if (savedEx != nullptr) {
+    napi_throw(env, savedEx);
+  }
+}
+
+// The `next` function of a live URLSearchParams iterator.
+napi_value IteratorNext(napi_env env, napi_callback_info info) {
+  napi_value jsThis;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr) !=
+      napi_ok) {
+    ThrowTypeError(env, "Illegal invocation");
+    return nullptr;
+  }
+
+  // Brand check *and* state lookup in one step: the iterator state is read out
+  // of the receiver's own external property. A foreign receiver (next.call({}))
+  // carries no such property and is rejected, which is what the spec requires.
+  //
+  // The state is deliberately NOT taken from this callback's `data`, even
+  // though MakeIterator passes it there too: that would require the pointer to
+  // survive a round trip through two different Node-API mechanisms, and PrimJS
+  // does not hand back the same address, so every next() call failed the brand
+  // check and threw.
+  napi_value brandVal = nullptr;
+  void* brand = nullptr;
+  if (napi_get_named_property(env, jsThis, ITER_BRAND_KEY, &brandVal) !=
+          napi_ok ||
+      napi_util::is_null_or_undefined(env, brandVal) ||
+      napi_get_value_external(env, brandVal, &brand) != napi_ok ||
+      brand == nullptr) {
+    ThrowTypeError(env, "Illegal invocation");
+    return nullptr;
+  }
+  auto* st = static_cast<IterState*>(brand);
+
+  napi_value result;
+  napi_create_object(env, &result);
+
+  napi_value srcObj;
+  URLSearchParams* self = nullptr;
+  if (napi_get_named_property(env, jsThis, ITER_SOURCE_KEY, &srcObj) !=
+          napi_ok ||
+      napi_unwrap(env, srcObj, reinterpret_cast<void**>(&self)) != napi_ok ||
+      self == nullptr) {
+    napi_set_named_property(env, result, "value", napi_util::undefined(env));
+    napi_set_named_property(env, result, "done", napi_util::get_true(env));
+    return result;
+  }
+
+  auto* p = self->GetURLSearchParams();
+  if (st->idx >= p->size()) {
+    napi_set_named_property(env, result, "value", napi_util::undefined(env));
+    napi_set_named_property(env, result, "done", napi_util::get_true(env));
+    return result;
+  }
+
+  auto pair = (*p)[st->idx++];  // live, duplicate-key correct
+  napi_value value;
+  if (st->kind == ITER_KEYS) {
+    value = js_str(env, pair.first);
+  } else if (st->kind == ITER_VALUES) {
+    value = js_str(env, pair.second);
+  } else {
+    napi_create_array_with_length(env, 2, &value);
+    napi_set_element(env, value, 0, js_str(env, pair.first));
+    napi_set_element(env, value, 1, js_str(env, pair.second));
+  }
+  napi_set_named_property(env, result, "value", value);
+  napi_set_named_property(env, result, "done", napi_util::get_false(env));
+  return result;
+}
+
+// iterator[Symbol.iterator]() -> this (iterators are iterable).
+napi_value IteratorSelf(napi_env env, napi_callback_info info) {
+  napi_value jsThis;
+  napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr);
+  return jsThis;
+}
+
+napi_value MakeIterator(napi_env env, napi_value jsThis, int kind) {
+  auto* st = new IterState{0, kind};
+
+  napi_value iterator;
+  napi_create_object(env, &iterator);
+
+  // Attach two non-enumerable internal properties (napi_default => not
+  // enumerable, invisible to JS): the strong source reference kept alive for
+  // `next`, and a napi_external wrapping the IterState* for the brand check.
+  //
+  // The external is the SOLE owner of st and frees it when collected. Do not
+  // also register st with napi_add_finalizer on the iterator: that hands the
+  // same pointer to two independent finalization paths, and on QuickJS (where
+  // this runtime dispatches finalizers through a JS FinalizationRegistry) both
+  // fire, double-freeing IterState. The resulting heap corruption surfaced far
+  // away from here, as a SIGSEGV in an unrelated spec.
+  //
+  // The `next` function below also carries st as its callback data, but only as
+  // a non-owning alias: it is reachable only through the iterator, which holds
+  // the external, so st outlives every call made on it.
+  napi_value brandVal;
+  napi_create_external(
+      env, st,
+      [](napi_env, void* d, void*) { delete static_cast<IterState*>(d); },
+      nullptr, &brandVal);
+  napi_property_descriptor descs[2] = {};
+  descs[0].utf8name = ITER_SOURCE_KEY;
+  descs[0].value = jsThis;
+  descs[0].attributes = napi_default;
+  descs[1].utf8name = ITER_BRAND_KEY;
+  descs[1].value = brandVal;
+  descs[1].attributes = napi_default;
+  napi_define_properties(env, iterator, 2, descs);
+
+  napi_value nextFn;
+  napi_create_function(env, "next", NAPI_AUTO_LENGTH, IteratorNext, st,
+                       &nextFn);
+  napi_set_named_property(env, iterator, "next", nextFn);
+
+  napi_value selfFn;
+  napi_create_function(env, "[Symbol.iterator]", NAPI_AUTO_LENGTH,
+                       IteratorSelf, nullptr, &selfFn);
+  napi_set_property(env, iterator, SymbolIterator(env), selfFn);
+
+  // Symbol.toStringTag = "URLSearchParams Iterator" for spec-correct
+  // Object.prototype.toString output.
+  napi_set_property(env, iterator, WellKnownSymbol(env, "toStringTag"),
+                    js_str(env, "URLSearchParams Iterator"));
+
+  return iterator;
+}
+
+// Drives the ES iterator protocol on `iterable`, invoking fn(itemValue) for
+// each yielded value. Returns false (with a pending exception) on protocol
+// error or if fn returns false.
+template <class F>
+bool ForEachOfIterable(napi_env env, napi_value iterable, F&& fn) {
+  napi_value iterMethod;
+  if (napi_get_property(env, iterable, SymbolIterator(env), &iterMethod) !=
+      napi_ok) {
+    return false;
+  }
+  if (!napi_util::is_of_type(env, iterMethod, napi_function)) {
+    ThrowTypeError(env, "value is not iterable");
+    return false;
+  }
+  napi_value iterObj;
+  if (napi_call_function(env, iterable, iterMethod, 0, nullptr, &iterObj) !=
+      napi_ok) {
+    return false;
+  }
+  if (!napi_util::is_object(env, iterObj)) {
+    ThrowTypeError(env, "iterator result is not an object");
+    return false;
+  }
+
+  napi_value nextFn;
+  if (napi_get_named_property(env, iterObj, "next", &nextFn) != napi_ok ||
+      !napi_util::is_of_type(env, nextFn, napi_function)) {
+    ThrowTypeError(env, "iterator has no next method");
+    return false;
+  }
+
+  for (;;) {
+    napi_value step;
+    if (napi_call_function(env, iterObj, nextFn, 0, nullptr, &step) !=
+        napi_ok) {
+      return false;
+    }
+    if (!napi_util::is_object(env, step)) {
+      ThrowTypeError(env, "iterator result is not an object");
+      return false;
+    }
+    napi_value doneVal;
+    bool done = false;
+    if (napi_get_named_property(env, step, "done", &doneVal) != napi_ok) {
+      return false;
+    }
+    napi_coerce_to_bool(env, doneVal, &doneVal);
+    napi_get_value_bool(env, doneVal, &done);
+    if (done) return true;
+
+    napi_value value;
+    if (napi_get_named_property(env, step, "value", &value) != napi_ok) {
+      return false;
+    }
+    if (!fn(value)) {
+      IteratorClose(env, iterObj);
+      return false;
+    }
+  }
+}
+
+// sequence<sequence<USVString>> form: [[k, v], [k, v], ...].
+bool BuildFromSequence(napi_env env, napi_value iterable,
+                       url_search_params& params) {
+  return ForEachOfIterable(env, iterable, [&](napi_value entry) -> bool {
+    if (!napi_util::is_object(env, entry)) {
+      ThrowTypeError(env, "URLSearchParams init sequence entry is not iterable");
+      return false;
+    }
+    // Collect the whole entry before validating its length: aborting early on
+    // the third element would skip the "exactly two elements" TypeError.
+    std::vector<std::string> pair;
+    bool ok = ForEachOfIterable(env, entry, [&](napi_value item) -> bool {
+      std::string s;
+      if (!ValueToString(env, item, s)) {
+        return false;
+      }
+      pair.push_back(std::move(s));
+      return true;
+    });
+    if (!ok) {
+      return false;
+    }
+    if (pair.size() != 2) {
+      ThrowTypeError(env,
+                     "URLSearchParams init sequence entry does not contain "
+                     "exactly two elements");
+      return false;
+    }
+    params.append(pair[0], pair[1]);
+    return true;
+  });
+}
+
+// record<USVString, USVString> form.
+bool BuildFromRecord(napi_env env, napi_value object,
+                     url_search_params& params) {
+  napi_value keys;
+  if (napi_get_all_property_names(env, object, napi_key_own_only,
+                                  napi_key_enumerable,
+                                  napi_key_numbers_to_strings,
+                                  &keys) != napi_ok) {
+    return false;
+  }
+  uint32_t len = 0;
+  napi_get_array_length(env, keys, &len);
+  for (uint32_t i = 0; i < len; i++) {
+    napi_value key, value;
+    napi_get_element(env, keys, i, &key);
+    napi_get_property(env, object, key, &value);
+    std::string k, v;
+    if (!ValueToString(env, key, k) || !ValueToString(env, value, v)) {
+      return false;  // e.g. Symbol key
+    }
+    params.append(k, v);
+  }
+  return true;
 }
 }  // namespace
 
@@ -129,25 +477,46 @@ napi_value URLSearchParams::New(napi_env env, napi_callback_info info) {
 
   url_search_params params;
 
-  if (argc > 0) {
-    napi_value stringValue;
-    NAPI_GUARD(napi_coerce_to_string(env, argv[0], &stringValue)) {
-      return nullptr;
+  // Per spec the init argument is one of:
+  //   USVString                      - query string
+  //   sequence<sequence<USVString>>  - [[k, v], ...]   (has Symbol.iterator)
+  //   record<USVString, USVString>   - plain object     (no Symbol.iterator)
+  // Only undefined means "no init"; null and other primitives are coerced to a
+  // USVString, so new URLSearchParams(null) parses as the string "null".
+  if (argc > 0 && !napi_util::is_undefined(env, argv[0])) {
+    if (napi_util::is_of_type(env, argv[0], napi_string)) {
+      std::string init;
+      if (!ValueToString(env, argv[0], init)) {
+        return nullptr;
+      }
+      params = url_search_params(init);
+    } else if (napi_util::is_object(env, argv[0])) {
+      napi_value iterMethod;
+      NAPI_GUARD(
+          napi_get_property(env, argv[0], SymbolIterator(env), &iterMethod)) {
+        return nullptr;
+      }
+      if (napi_util::is_null_or_undefined(env, iterMethod)) {
+        if (!BuildFromRecord(env, argv[0], params)) {
+          return nullptr;
+        }
+      } else if (napi_util::is_of_type(env, iterMethod, napi_function)) {
+        if (!BuildFromSequence(env, argv[0], params)) {
+          return nullptr;
+        }
+      } else {
+        ThrowTypeError(
+            env, "URLSearchParams init Symbol.iterator is not a function");
+        return nullptr;
+      }
+    } else {
+      // number / boolean / bigint / null / symbol -> USVString
+      std::string init;
+      if (!ValueToString(env, argv[0], init)) {
+        return nullptr;
+      }
+      params = url_search_params(init);
     }
-
-    size_t str_size;
-    NAPI_GUARD(
-        napi_get_value_string_utf8(env, stringValue, nullptr, 0, &str_size)) {
-      return nullptr;
-    }
-
-    std::vector<char> buffer(str_size + 1);
-    NAPI_GUARD(napi_get_value_string_utf8(env, stringValue, buffer.data(),
-                                          str_size + 1, nullptr)) {
-      return nullptr;
-    }
-
-    params = url_search_params(std::string_view(buffer.data(), str_size));
   }
 
   URLSearchParams* searchParams = new URLSearchParams(std::move(params));
@@ -176,59 +545,50 @@ napi_value URLSearchParams::Append(napi_env env, napi_callback_info info) {
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 2) return nullptr;
-
-  size_t key_size, value_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &key_size)) {
-    return nullptr;
-  }
-  NAPI_GUARD(
-      napi_get_value_string_utf8(env, argv[1], nullptr, 0, &value_size)) {
+  if (argc < 2) {
+    ThrowTypeError(env, "URLSearchParams.append requires 2 arguments");
     return nullptr;
   }
 
-  std::vector<char> key_buffer(key_size + 1);
-  std::vector<char> value_buffer(value_size + 1);
-
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], key_buffer.data(),
-                                        key_size + 1, nullptr)) {
-    return nullptr;
-  }
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[1], value_buffer.data(),
-                                        value_size + 1, nullptr)) {
+  std::string key, value;
+  if (!ValueToString(env, argv[0], key) ||
+      !ValueToString(env, argv[1], value)) {
     return nullptr;
   }
 
-  instance->GetURLSearchParams()->append(key_buffer.data(),
-                                         value_buffer.data());
+  instance->GetURLSearchParams()->append(key, value);
   instance->SyncParent();
   return nullptr;
 }
 
 napi_value URLSearchParams::Has(napi_env env, napi_callback_info info) {
-  NAPI_CALLBACK_BEGIN(1)
+  NAPI_CALLBACK_BEGIN(2)
 
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 1) return nullptr;
+  if (argc < 1) return napi_util::get_false(env);
 
-  size_t str_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &str_size)) {
+  std::string key;
+  if (!ValueToString(env, argv[0], key)) {
     return nullptr;
   }
 
-  std::vector<char> buffer(str_size + 1);
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], buffer.data(),
-                                        str_size + 1, nullptr)) {
-    return nullptr;
+  // The 2-argument form matches on name *and* value; an explicit undefined
+  // second argument is treated as omitted.
+  bool has;
+  if (argc > 1 && !napi_util::is_undefined(env, argv[1])) {
+    std::string value;
+    if (!ValueToString(env, argv[1], value)) {
+      return nullptr;
+    }
+    has = instance->GetURLSearchParams()->has(key, value);
+  } else {
+    has = instance->GetURLSearchParams()->has(key);
   }
-
-  bool has = instance->GetURLSearchParams()->has(buffer.data());
 
   napi_value result;
-  NAPI_GUARD(napi_get_boolean(env, has, &result)) { return nullptr; }
-
+  napi_get_boolean(env, has, &result);
   return result;
 }
 
@@ -238,55 +598,48 @@ napi_value URLSearchParams::Get(napi_env env, napi_callback_info info) {
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 1) return nullptr;
+  if (argc < 1) return napi_util::null(env);
 
-  size_t str_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &str_size)) {
+  std::string key;
+  if (!ValueToString(env, argv[0], key)) {
     return nullptr;
   }
 
-  std::vector<char> buffer(str_size + 1);
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], buffer.data(),
-                                        str_size + 1, nullptr)) {
-    return nullptr;
-  }
-
-  auto value = instance->GetURLSearchParams()->get(buffer.data());
+  auto value = instance->GetURLSearchParams()->get(key);
   if (!value.has_value()) {
-    napi_value undefined;
-    NAPI_GUARD(napi_get_undefined(env, &undefined)) { return nullptr; }
-    return undefined;
+    // Per spec, a missing name returns null (not undefined).
+    return napi_util::null(env);
   }
 
-  napi_value result;
-  NAPI_GUARD(napi_create_string_utf8(env, value.value().data(),
-                                     value.value().length(), &result)) {
-    return nullptr;
-  }
-
-  return result;
+  return js_str(env, value.value());
 }
 
 napi_value URLSearchParams::Delete(napi_env env, napi_callback_info info) {
-  NAPI_CALLBACK_BEGIN(1)
+  NAPI_CALLBACK_BEGIN(2)
 
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 1) return nullptr;
-
-  size_t str_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &str_size)) {
+  if (argc < 1) {
+    ThrowTypeError(env, "URLSearchParams.delete requires 1 argument");
     return nullptr;
   }
 
-  std::vector<char> buffer(str_size + 1);
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], buffer.data(),
-                                        str_size + 1, nullptr)) {
+  std::string key;
+  if (!ValueToString(env, argv[0], key)) {
     return nullptr;
   }
 
-  instance->GetURLSearchParams()->remove(buffer.data());
+  // The 2-argument form removes only pairs matching name *and* value.
+  if (argc > 1 && !napi_util::is_undefined(env, argv[1])) {
+    std::string value;
+    if (!ValueToString(env, argv[1], value)) {
+      return nullptr;
+    }
+    instance->GetURLSearchParams()->remove(key, value);
+  } else {
+    instance->GetURLSearchParams()->remove(key);
+  }
   instance->SyncParent();
   return nullptr;
 }
@@ -297,35 +650,24 @@ napi_value URLSearchParams::GetAll(napi_env env, napi_callback_info info) {
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 1) return nullptr;
-
-  size_t str_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &str_size)) {
+  if (argc < 1) {
+    ThrowTypeError(env, "URLSearchParams.getAll requires 1 argument");
     return nullptr;
   }
 
-  std::vector<char> buffer(str_size + 1);
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], buffer.data(),
-                                        str_size + 1, nullptr)) {
+  std::string key;
+  if (!ValueToString(env, argv[0], key)) {
     return nullptr;
   }
 
-  auto values = instance->GetURLSearchParams()->get_all(buffer.data());
+  auto values = instance->GetURLSearchParams()->get_all(key);
 
   napi_value result;
-  NAPI_GUARD(napi_create_array_with_length(env, values.size(), &result)) {
-    return nullptr;
+  napi_create_array_with_length(env, values.size(), &result);
+  // napi_set_element takes a uint32_t index; iterate as one to avoid narrowing.
+  for (uint32_t i = 0; i < values.size(); i++) {
+    napi_set_element(env, result, i, js_str(env, values[i]));
   }
-
-  for (size_t i = 0; i < values.size(); i++) {
-    napi_value item;
-    NAPI_GUARD(napi_create_string_utf8(env, values[i].data(),
-                                       values[i].length(), &item)) {
-      return nullptr;
-    }
-    NAPI_GUARD(napi_set_element(env, result, i, item)) { return nullptr; }
-  }
-
   return result;
 }
 
@@ -335,30 +677,18 @@ napi_value URLSearchParams::Set(napi_env env, napi_callback_info info) {
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 2) return nullptr;
-
-  size_t key_size, value_size;
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], nullptr, 0, &key_size)) {
-    return nullptr;
-  }
-  NAPI_GUARD(
-      napi_get_value_string_utf8(env, argv[1], nullptr, 0, &value_size)) {
+  if (argc < 2) {
+    ThrowTypeError(env, "URLSearchParams.set requires 2 arguments");
     return nullptr;
   }
 
-  std::vector<char> key_buffer(key_size + 1);
-  std::vector<char> value_buffer(value_size + 1);
-
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[0], key_buffer.data(),
-                                        key_size + 1, nullptr)) {
-    return nullptr;
-  }
-  NAPI_GUARD(napi_get_value_string_utf8(env, argv[1], value_buffer.data(),
-                                        value_size + 1, nullptr)) {
+  std::string key, value;
+  if (!ValueToString(env, argv[0], key) ||
+      !ValueToString(env, argv[1], value)) {
     return nullptr;
   }
 
-  instance->GetURLSearchParams()->set(key_buffer.data(), value_buffer.data());
+  instance->GetURLSearchParams()->set(key, value);
   instance->SyncParent();
   return nullptr;
 }
@@ -405,112 +735,45 @@ napi_value URLSearchParams::ToString(napi_env env, napi_callback_info info) {
 }
 
 napi_value URLSearchParams::Keys(napi_env env, napi_callback_info info) {
-  NS_NAPI_PREAMBLE
-  URLSearchParams* instance = GetInstance(env, info);
-  if (!instance) return nullptr;
-
-  auto keys = instance->GetURLSearchParams()->get_keys();
-  std::vector<std::string_view> key_list;
-
-  while (keys.has_next()) {
-    if (auto key = keys.next()) {
-      key_list.push_back(key.value());
-    }
-  }
-
-  napi_value result;
-  NAPI_GUARD(napi_create_array_with_length(env, key_list.size(), &result)) {
+  // Read the callback info once: PrimJS does not return the receiver from a
+  // second napi_get_cb_info call for the same napi_callback_info, so calling it
+  // again inside GetInstance made the unwrap fail and every iterator accessor
+  // throw "Illegal invocation".
+  napi_value jsThis;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr) !=
+      napi_ok) {
     return nullptr;
   }
-
-  for (size_t i = 0; i < key_list.size(); i++) {
-    napi_value item;
-    NAPI_GUARD(napi_create_string_utf8(env, key_list[i].data(),
-                                       key_list[i].length(), &item)) {
-      return nullptr;
-    }
-    NAPI_GUARD(napi_set_element(env, result, i, item)) { return nullptr; }
-  }
-
-  return result;
+  if (!GetInstanceOf(env, jsThis)) return nullptr;
+  return MakeIterator(env, jsThis, ITER_KEYS);
 }
 
 napi_value URLSearchParams::Values(napi_env env, napi_callback_info info) {
-  NS_NAPI_PREAMBLE
-  URLSearchParams* instance = GetInstance(env, info);
-  if (!instance) return nullptr;
-
-  auto keys = instance->GetURLSearchParams()->get_keys();
-  std::vector<std::string_view> value_list;
-
-  while (keys.has_next()) {
-    if (auto key = keys.next()) {
-      if (auto value = instance->GetURLSearchParams()->get(key.value())) {
-        value_list.push_back(value.value());
-      }
-    }
-  }
-
-  napi_value result;
-  NAPI_GUARD(napi_create_array_with_length(env, value_list.size(), &result)) {
+  // Read the callback info once: PrimJS does not return the receiver from a
+  // second napi_get_cb_info call for the same napi_callback_info, so calling it
+  // again inside GetInstance made the unwrap fail and every iterator accessor
+  // throw "Illegal invocation".
+  napi_value jsThis;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr) !=
+      napi_ok) {
     return nullptr;
   }
-
-  for (size_t i = 0; i < value_list.size(); i++) {
-    napi_value item;
-    NAPI_GUARD(napi_create_string_utf8(env, value_list[i].data(),
-                                       value_list[i].length(), &item)) {
-      return nullptr;
-    }
-    NAPI_GUARD(napi_set_element(env, result, i, item)) { return nullptr; }
-  }
-
-  return result;
+  if (!GetInstanceOf(env, jsThis)) return nullptr;
+  return MakeIterator(env, jsThis, ITER_VALUES);
 }
 
 napi_value URLSearchParams::Entries(napi_env env, napi_callback_info info) {
-  NS_NAPI_PREAMBLE
-  URLSearchParams* instance = GetInstance(env, info);
-  if (!instance) return nullptr;
-
-  auto keys = instance->GetURLSearchParams()->get_keys();
-  std::vector<std::pair<std::string_view, std::string_view>> entries;
-
-  while (keys.has_next()) {
-    if (auto key = keys.next()) {
-      if (auto value = instance->GetURLSearchParams()->get(key.value())) {
-        entries.emplace_back(key.value(), value.value());
-      }
-    }
-  }
-
-  napi_value result;
-  NAPI_GUARD(napi_create_array_with_length(env, entries.size(), &result)) {
+  // Read the callback info once: PrimJS does not return the receiver from a
+  // second napi_get_cb_info call for the same napi_callback_info, so calling it
+  // again inside GetInstance made the unwrap fail and every iterator accessor
+  // throw "Illegal invocation".
+  napi_value jsThis;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, nullptr) !=
+      napi_ok) {
     return nullptr;
   }
-
-  for (size_t i = 0; i < entries.size(); i++) {
-    napi_value entry;
-    NAPI_GUARD(napi_create_array_with_length(env, 2, &entry)) {
-      return nullptr;
-    }
-
-    napi_value key, value;
-    NAPI_GUARD(napi_create_string_utf8(env, entries[i].first.data(),
-                                       entries[i].first.length(), &key)) {
-      return nullptr;
-    }
-    NAPI_GUARD(napi_create_string_utf8(env, entries[i].second.data(),
-                                       entries[i].second.length(), &value)) {
-      return nullptr;
-    }
-
-    NAPI_GUARD(napi_set_element(env, entry, 0, key)) { return nullptr; }
-    NAPI_GUARD(napi_set_element(env, entry, 1, value)) { return nullptr; }
-    NAPI_GUARD(napi_set_element(env, result, i, entry)) { return nullptr; }
-  }
-
-  return result;
+  if (!GetInstanceOf(env, jsThis)) return nullptr;
+  return MakeIterator(env, jsThis, ITER_ENTRIES);
 }
 
 napi_value URLSearchParams::ForEach(napi_env env, napi_callback_info info) {
@@ -519,34 +782,31 @@ napi_value URLSearchParams::ForEach(napi_env env, napi_callback_info info) {
   URLSearchParams* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
-  if (argc < 1) return nullptr;
+  if (argc < 1 || !napi_util::is_of_type(env, argv[0], napi_function)) {
+    ThrowTypeError(env,
+                   "URLSearchParams.forEach requires a callback function");
+    return nullptr;
+  }
 
   napi_value callback = argv[0];
   napi_value thisArg = argc >= 2 ? argv[1] : nullptr;
 
-  auto keys = instance->GetURLSearchParams()->get_keys();
-  while (keys.has_next()) {
-    if (auto key = keys.next()) {
-      if (auto value = instance->GetURLSearchParams()->get(key.value())) {
-        napi_value args[3];
-        NAPI_GUARD(napi_create_string_utf8(env, value.value().data(),
-                                           value.value().length(), &args[0])) {
-          return nullptr;
-        }
-        NAPI_GUARD(napi_create_string_utf8(env, key.value().data(),
-                                           key.value().length(), &args[1])) {
-          return nullptr;
-        }
-        args[2] = jsThis;
+  napi_value global;
+  napi_get_global(env, &global);
 
-        napi_value global;
-        NAPI_GUARD(napi_get_global(env, &global)) { return nullptr; }
-
-        napi_value result;
-        NAPI_GUARD(napi_call_function(env, thisArg ? thisArg : global, callback,
-                                      3, args, &result)) {
-          return nullptr;
-        }
+  // Use get_entries() so duplicate keys (e.g. ?a=1&a=2) each yield their own
+  // value; get(key) would return the first value for every occurrence.
+  auto entries = instance->GetURLSearchParams()->get_entries();
+  while (entries.has_next()) {
+    if (auto entry = entries.next()) {
+      auto& [key, value] = entry.value();
+      // Per spec, forEach callback receives (value, key, searchParams).
+      napi_value args[3] = {js_str(env, value), js_str(env, key), jsThis};
+      napi_value result;
+      if (napi_call_function(env, thisArg ? thisArg : global, callback, 3,
+                             args, &result) != napi_ok) {
+        // If the callback throws, stop iteration.
+        return nullptr;
       }
     }
   }
@@ -589,6 +849,14 @@ void URLSearchParams::Init(napi_env env, napi_value global) {
   NAPI_GUARD(napi_define_class(env, "URLSearchParams", NAPI_AUTO_LENGTH, New,
                                nullptr, prop_count, properties, &ctor)) {
     return;
+  }
+
+  // Per spec, URLSearchParams.prototype[Symbol.iterator] === prototype.entries,
+  // so `for (const [k, v] of params)` works.
+  napi_value proto, entriesFn;
+  if (napi_get_named_property(env, ctor, "prototype", &proto) == napi_ok &&
+      napi_get_named_property(env, proto, "entries", &entriesFn) == napi_ok) {
+    napi_set_property(env, proto, SymbolIterator(env), entriesFn);
   }
 
   NAPI_GUARD(napi_set_named_property(env, global, "URLSearchParams", ctor)) {

@@ -117,7 +117,16 @@ check_no_backend_dependency() {
     if [ -n "$pattern" ]; then
       pattern="$pattern|"
     fi
-    pattern="${pattern}(ffi/objc/${backend}/|\"${backend}/)"
+    # The bare "<backend>/ form matches a file sitting directly in that
+    # backend's directory, which is how ffi/objc/<backend> is laid out -- they
+    # are flat. Requiring no further path segment is what keeps this from also
+    # matching the engine tree at NativeScript/napi/<engine>/, which collides in
+    # include space with the ffi/objc/napi backend but is a different thing
+    # entirely: ffi/objc/hermes including "napi/hermes/jsr.h" is that backend
+    # reaching for its own engine's JSR, not a dependency on another backend.
+    # The fully qualified ffi/objc/<backend>/ form below still catches any
+    # depth, so nothing is lost.
+    pattern="${pattern}(ffi/objc/${backend}/|\"${backend}/[^/]*\")"
   done
 
   if [ -n "$pattern" ] && search_sources "$pattern" "$owner_dir"; then

@@ -5,6 +5,8 @@
 #include <csignal>
 #include <sstream>
 #include <mutex>
+#include <cstdlib>
+#include <exception>
 #include <dlfcn.h>
 #include "zipconf.h"
 #include "NativeScriptException.h"
@@ -26,9 +28,6 @@
 #include "ManualInstrumentation.h"
 #include "GlobalHelpers.h"
 #include "Timers.h"
-#ifdef __JSC__
-#include "WeakRef.h"
-#endif
 
 #ifdef APPLICATION_IN_DEBUG
 // #include "NetworkDomainCallbackHandlers.h"
@@ -36,9 +35,68 @@
 #endif
 
 #include "AndroidRuntimeModules.h"
+#include "LooperTasks.h"
 
 using namespace tns;
 using namespace std;
+
+namespace {
+    // std::terminate handler: log an uncaught native exception (with its message
+    // where available) before aborting, so the crash is diagnosable instead of a
+    // bare abort.
+    void LogAndAbortUncaught() {
+        try {
+            throw;  // rethrow the current in-flight exception
+        } catch (const tns::NativeScriptException &e) {
+            __android_log_print(ANDROID_LOG_FATAL, "TNS.Native",
+                                "Uncaught NativeScriptException: %s", e.what());
+        } catch (const std::exception &e) {
+            __android_log_print(ANDROID_LOG_FATAL, "TNS.Native",
+                                "Uncaught std::exception: %s", e.what());
+        } catch (...) {
+            __android_log_print(ANDROID_LOG_FATAL, "TNS.Native",
+                                "Uncaught unknown native exception");
+        }
+
+        // Preserve default abort behavior so crashes are visible to tooling.
+        std::_Exit(EXIT_FAILURE);
+    }
+
+    // queueMicrotask(callback) per spec:
+    // https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask
+    // Implemented via Promise.resolve().then(callback) so it schedules a real
+    // microtask on every engine the napi runtime targets (V8, QuickJS, Hermes,
+    // JSC). This preserves ordering with Promise microtasks and runs before timers.
+    napi_value QueueMicrotaskCallback(napi_env env, napi_callback_info info) {
+        napi_status status;
+        size_t argc = 1;
+        napi_value argv[1];
+        NAPI_GUARD(napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr)) {
+            return nullptr;
+        }
+
+        napi_valuetype type = napi_undefined;
+        if (argc >= 1) {
+            NAPI_GUARD(napi_typeof(env, argv[0], &type)) {}
+        }
+        if (argc < 1 || type != napi_function) {
+            NAPI_GUARD(napi_throw_type_error(env, nullptr,
+                                  "queueMicrotask: callback must be a function")) {}
+            return nullptr;
+        }
+
+        napi_value global, promiseCtor, resolveFn, resolved, thenFn;
+        NAPI_GUARD(napi_get_global(env, &global)) { return nullptr; }
+        NAPI_GUARD(napi_get_named_property(env, global, "Promise", &promiseCtor)) { return nullptr; }
+        NAPI_GUARD(napi_get_named_property(env, promiseCtor, "resolve", &resolveFn)) { return nullptr; }
+        NAPI_GUARD(napi_call_function(env, promiseCtor, resolveFn, 0, nullptr, &resolved)) { return nullptr; }
+        NAPI_GUARD(napi_get_named_property(env, resolved, "then", &thenFn)) { return nullptr; }
+        napi_value thenArgs[1] = {argv[0]};
+        NAPI_GUARD(napi_call_function(env, resolved, thenFn, 1, thenArgs, nullptr)) {}
+
+        return nullptr;
+    }
+}
 
 bool tns::LogEnabled = false;
 
@@ -56,11 +114,26 @@ void Runtime::Init(JavaVM *vm) {
 
     // handle SIGABRT/SIGSEGV only on API level > 20 as the handling is not so efficient in older versions
     if (m_androidVersion > 20) {
-        struct sigaction action;
+        struct sigaction action = {};
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
         action.sa_handler = SIGHandler;
         sigaction(SIGABRT, &action, NULL);
+#ifndef __JSC__
+        // JavaScriptCore installs and relies on its OWN SIGSEGV handler for normal,
+        // non-fatal operation (concurrent GC / JIT). Overwriting it with a handler
+        // that unconditionally throws a C++ exception hijacks those legitimate
+        // faults and manufactures a crash — reliably reproduced under multithreaded
+        // JNI access (testConcurrentAccess). No active test relies on converting a
+        // SIGSEGV to a JS exception (the only such spec is disabled via xit), so on
+        // JSC we leave SIGSEGV to the engine. SIGABRT (which JSC does not use) is
+        // still converted. On every other engine both are converted as before.
         sigaction(SIGSEGV, &action, NULL);
+#endif
     }
+
+    // Log uncaught native exceptions before aborting.
+    std::set_terminate(LogAndAbortUncaught);
 }
 /**
  * Returns the runtime based on the current thread id
@@ -132,8 +205,9 @@ Runtime::Init(JNIEnv *_env, jobject obj, int runtimeId, jstring filesPath, jstri
 }
 
 napi_value Runtime::GlobalAccessorCallback(napi_env env, napi_callback_info  info) {
+    napi_status status;
     napi_value global;
-    napi_get_global(env, &global);
+    NAPI_GUARD(napi_get_global(env, &global)) { return nullptr; }
     return global;
 }
 
@@ -172,19 +246,19 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
     v8::Isolate::Scope isolate_scope(env->isolate);
     v8::Context::Scope context_scope(env->context());
 #endif
-    napi_open_handle_scope(env, &global_scope);
+    napi_status status;
+    NAPI_GUARD(napi_open_handle_scope(env, &global_scope)) {}
 
     napi_handle_scope handleScope;
-    napi_open_handle_scope(env, &handleScope);
+    NAPI_GUARD(napi_open_handle_scope(env, &handleScope)) {}
 
     env_to_runtime_cache.Insert(env, this);
 
     napi_value global;
-    napi_get_global(env, &global);
+    NAPI_GUARD(napi_get_global(env, &global)) {}
 
-#ifdef __JSC__
-    tns::WeakRef::Init(env);
-#endif
+    // Newer JSC ships a native `WeakRef` global, so the old polyfill (which was
+    // actually a strong reference and leaked) is no longer needed.
 
 #ifdef APPLICATION_IN_DEBUG
     Console::createConsole(env, JsV8InspectorClient::consoleLogCallback, maxLogcatObjectSize, forceLog);
@@ -193,6 +267,10 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
 #endif
 
     Timers::InitStatic(env, global);
+
+    // Bound to this (runtime) thread's Looper; drains deferred finalizers posted
+    // via Runtime::PostFinalizer at a safe point off the GC sweep.
+    m_finalizerQueue = new FinalizerQueue(env);
 
     napi_util::napi_set_function(env, global, "__log", CallbackHandlers::LogMethodCallback);
     napi_util::napi_set_function(env, global, "__dumpReferenceTables",
@@ -206,24 +284,18 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
     napi_util::napi_set_function(env, global, "__exit", CallbackHandlers::ExitMethodCallback);
 
     napi_value rt_version;
-    napi_create_string_utf8(env, NATIVE_SCRIPT_RUNTIME_VERSION, NAPI_AUTO_LENGTH, &rt_version);
-    napi_set_named_property(env, global, "__runtimeVersion", rt_version);
+    NAPI_GUARD(napi_create_string_utf8(env, NATIVE_SCRIPT_RUNTIME_VERSION, NAPI_AUTO_LENGTH, &rt_version)) {}
+    NAPI_GUARD(napi_set_named_property(env, global, "__runtimeVersion", rt_version)) {}
 
     napi_value engine;
     js_get_runtime_version(env, &engine);
-    napi_set_named_property(env, global, "__engine", engine);
+    NAPI_GUARD(napi_set_named_property(env, global, "__engine", engine)) {}
 
     const char* engineVariant = "UNKNOWN";
 #if defined(__HERMES__)
     engineVariant = "HERMES";
 #elif defined(__JSC__)
     engineVariant = "JSC";
-#elif defined(__V8_13__)
-    engineVariant = "V8-13";
-#elif defined(__V8_11__)
-    engineVariant = "V8-11";
-#elif defined(__V8_10__)
-    engineVariant = "V8-10";
 #elif defined(__V8__)
     engineVariant = "V8";
 #elif defined(__PRIMJS__)
@@ -246,8 +318,9 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
                                  CallbackHandlers::RemoveFrameCallback);
     napi_util::napi_set_function(env, global, "__markingMode",
                                  [](napi_env _env, napi_callback_info) -> napi_value {
+                                     napi_status status;
                                      napi_value mode;
-                                     napi_create_int32(_env, 0, &mode);
+                                     NAPI_GUARD(napi_create_int32(_env, 0, &mode)) { return nullptr; }
                                      return mode;
                                  });
 
@@ -269,10 +342,7 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
     m_objectManager->Init(env);
 
     m_module.Init(env, ArgConverter::jstringToString(callingDir));
-    /*
-     * Attach `Worker` object constructor only to the main thread (isolate)'s global object
-     * Workers should not be created from within other Workers, for now
-     */
+
     if (!s_mainThreadInitialized) {
         m_isMainThread = true;
 
@@ -299,23 +369,11 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
 
         ALooper_addFd(m_mainLooper, m_mainLooper_fd[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
                       CallbackHandlers::RunOnMainThreadFdCallback, nullptr);
-
-        napi_value worker;
-        napi_define_class(env, "Worker", strlen("Worker"), CallbackHandlers::NewThreadCallback,
-                          nullptr, 0, nullptr, &worker);
-        napi_value prototype = napi_util::get_prototype(env, worker);
-        napi_util::napi_set_function(env, prototype, "postMessage",
-                                     CallbackHandlers::WorkerObjectPostMessageCallback, nullptr);
-        napi_util::napi_set_function(env, prototype, "terminate",
-                                     CallbackHandlers::WorkerObjectTerminateCallback, nullptr);
-        napi_util::napi_set_function(env, prototype, "close",
-                                     CallbackHandlers::WorkerGlobalCloseCallback, nullptr);
-
-        napi_set_named_property(env, global, "Worker", worker);
     }
         /*
          * Emulate a `WorkerGlobalScope`
-         * Attach 'postMessage', 'close' to the global object
+         * Attach 'postMessage', 'close' to the global object of every non-main
+         * (worker) env.
          */
     else {
         m_isMainThread = false;
@@ -326,6 +384,22 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
         napi_util::napi_set_function(env, global, "terminate",
                                      CallbackHandlers::WorkerGlobalCloseCallback, nullptr);
         napi_util::define_property(env, global, "__ns__worker", napi_util::get_true(env));
+    }
+
+    /*
+     * Attach the `Worker` object constructor to EVERY env's global object so
+     * that nested workers (a worker spawning its own workers) are supported.
+     */
+    {
+        napi_value worker;
+        NAPI_GUARD(napi_define_class(env, "Worker", strlen("Worker"), CallbackHandlers::NewThreadCallback,
+                          nullptr, 0, nullptr, &worker)) {}
+        napi_value prototype = napi_util::get_prototype(env, worker);
+        napi_util::napi_set_function(env, prototype, "postMessage",
+                                     CallbackHandlers::WorkerObjectPostMessageCallback, nullptr);
+        napi_util::napi_set_function(env, prototype, "terminate",
+                                     CallbackHandlers::WorkerObjectTerminateCallback, nullptr);
+        NAPI_GUARD(napi_set_named_property(env, global, "Worker", worker)) {}
     }
 
     napi_util::define_property(env, global, "global", nullptr, GlobalAccessorCallback);
@@ -343,13 +417,22 @@ void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
 
     Performance::createPerformance(env, global);
 
+    napi_util::napi_set_function(env, global, "queueMicrotask", QueueMicrotaskCallback);
+
     m_arrayBufferHelper.CreateConvertFunctions(env, global, m_objectManager);
 
     m_loopTimer->Init(env);
 
+    // Per-runtime task queue bound to this thread's looper. Child workers post
+    // their outbound messages/errors/cleanup onto their parent runtime's queue.
+    // Looper.prepare() has already run for worker threads (initWorkerRuntime),
+    // so ALooper_forThread() returns the looper that runWorkerLoop() will pump.
+    m_looperTasks = std::make_shared<LooperTasks>();
+    m_looperTasks->Initialize(ALooper_forThread());
+
     s_mainThreadInitialized = true;
 
-    napi_close_handle_scope(env, handleScope);
+    NAPI_GUARD(napi_close_handle_scope(env, handleScope)) {}
 
     DEBUG_WRITE("%s", "NativeScript Runtime Loaded!");
 }
@@ -419,6 +502,10 @@ void Runtime::DestroyRuntime() {
     is_destroying = true;
     delete m_loopTimer;
     m_loopTimer = nullptr;
+    napi_status status;
+    if (m_looperTasks != nullptr) {
+        m_looperTasks->Terminate();
+    }
     MetadataNode::onDisposeEnv(env);
     ArgConverter::onDisposeEnv(env);
     tns::GlobalHelpers::onDisposeEnv(env);
@@ -432,7 +519,15 @@ void Runtime::DestroyRuntime() {
         napi_delete_reference(env, m_gcFunc);
         m_gcFunc = nullptr;
     }
-    napi_close_handle_scope(env, this->global_scope);
+    // Release the finalizer handler and flush any still-queued cleanup while the
+    // env is still valid; finalizers firing during the js_free_napi_env teardown
+    // below then run inline (Runtime::PostFinalizer's fallback).
+    if (m_finalizerQueue != nullptr) {
+        m_finalizerQueue->Destroy();
+        delete m_finalizerQueue;
+        m_finalizerQueue = nullptr;
+    }
+    NAPI_GUARD(napi_close_handle_scope(env, this->global_scope)) {}
     Runtime::thread_id_to_rt_cache.Remove(this->my_thread_id);
     id_to_runtime_cache.Remove(m_id);
     env_to_runtime_cache.Remove(env);
@@ -468,20 +563,21 @@ void Runtime::AdjustAmountOfExternalAllocatedMemory() {
 
 bool Runtime::TryCallGC() {
     if (this->is_destroying) return true;
+    napi_status status;
     napi_value global;
-    napi_get_global(env, &global);
+    NAPI_GUARD(napi_get_global(env, &global)) { return false; }
     if (!m_gcFunc) {
         napi_value gc;
-        napi_get_named_property(env, global, "gc", &gc);
+        NAPI_GUARD(napi_get_named_property(env, global, "gc", &gc)) { return false; }
         if (napi_util::is_null_or_undefined(env, gc)) return true;
-        napi_create_reference(env, gc, 1, &m_gcFunc);
+        NAPI_GUARD(napi_create_reference(env, gc, 1, &m_gcFunc)) { return false; }
     }
 
     bool success = __sync_bool_compare_and_swap(&m_runGC, true, false);
 
     if (success) {
         napi_value result;
-        napi_call_function(env, global, napi_util::get_ref_value(env, m_gcFunc), 0, nullptr, &result);
+        NAPI_GUARD(napi_call_function(env, global, napi_util::get_ref_value(env, m_gcFunc), 0, nullptr, &result)) {}
     }
 
     return success;
@@ -491,11 +587,12 @@ void Runtime::RunModule(JNIEnv *_jEnv, jobject obj, jstring scriptFile) {
     JEnv jEnv(_jEnv);
     string filePath = ArgConverter::jstringToString(scriptFile);
     m_module.Load(env, filePath);
+    napi_status status;
     bool pendingException;
-    napi_is_exception_pending(env, &pendingException);
+    NAPI_GUARD(napi_is_exception_pending(env, &pendingException)) { return; }
     if (pendingException) {
         napi_value error = nullptr;
-        napi_get_and_clear_last_exception(env, &error);
+        NAPI_GUARD(napi_get_and_clear_last_exception(env, &error)) {}
         throw NativeScriptException(env, error, string("Error running module at path: ") + filePath);
     }
 }
@@ -504,29 +601,48 @@ void Runtime::RunModule(const char *moduleName) {
     m_module.Load(env, moduleName);
 }
 
-void Runtime::RunWorker(jstring scriptFile) {
-    string filePath = ArgConverter::jstringToString(scriptFile);
+void Runtime::RunWorker(const std::string &filePath) {
     m_module.LoadWorker(env, filePath);
+}
+
+void Runtime::DisposeWorkerRuntime(Runtime *runtime) {
+    // `env` is referenced by the (engine-specific) JSEnterScope macro below.
+    napi_env env = runtime->env;
+    {
+        JSEnterScope
+        runtime->DestroyRuntime();
+    }
+    // ~Runtime frees the underlying engine runtime (js_free_runtime under V8).
+    delete runtime;
 }
 
 jobject Runtime::RunScript(JNIEnv *_env, jobject obj, jstring scriptFile) {
     int status;
     auto filename = ArgConverter::jstringToString(scriptFile);
-    auto src = ReadFileText(filename);
-
-    napi_value soureCode;
-    napi_create_string_utf8(env, src.c_str(), src.length(), &soureCode);
+    auto sourceUrl = ModuleInternal::EnsureFileProtocol(filename);
 
     napi_value result;
     DEBUG_WRITE("%s", filename.c_str());
-    status = js_execute_script(env, soureCode, ModuleInternal::EnsureFileProtocol(filename).c_str(), &result);
+
+    // Raw scripts (e.g. internal/ts_helpers.js) are compiled unwrapped, so the
+    // build stores their bytecode as-is. Run it directly when present; only read
+    // the source as text on a miss.
+    status = js_run_bytecode_file(env, sourceUrl.c_str(), &result);
+    if (status == napi_cannot_run_js) {
+        auto src = ReadFileText(filename);
+
+        napi_value soureCode;
+        NAPI_GUARD(napi_create_string_utf8(env, src.c_str(), src.length(), &soureCode)) { return nullptr; }
+
+        status = js_execute_script(env, soureCode, sourceUrl.c_str(), &result);
+    }
 
     bool pendingException;
     napi_is_exception_pending(env, &pendingException);
     if (status != napi_ok || pendingException) {
         napi_value error = nullptr;
         if (pendingException) {
-            napi_get_and_clear_last_exception(env, &error);
+            NAPI_GUARD(napi_get_and_clear_last_exception(env, &error)) {}
         }
         if (error) {
             throw NativeScriptException(env, error, "Error running script " + filename);
@@ -544,7 +660,7 @@ napi_env Runtime::GetNapiEnv() {
     return env;
 }
 
-napi_runtime Runtime::GetNapiRuntime() {
+jsr_ns_runtime Runtime::GetNapiRuntime() {
     return rt;
 }
 
@@ -608,7 +724,8 @@ Runtime::CreateJSInstanceNative(JNIEnv *_jEnv, jobject obj, jobject javaObject, 
 
     DEBUG_WRITE("createJSInstanceNative class %s", proxyClassName.c_str());
 
-    jsInstance = MetadataNode::CreateExtendedJSWrapper(env, m_objectManager, proxyClassName, javaObjectID);
+    MetadataNode *extNode = nullptr;
+    jsInstance = MetadataNode::CreateExtendedJSWrapper(env, m_objectManager, proxyClassName, javaObjectID, &extNode);
 
     if (napi_util::is_null_or_undefined(env, jsInstance)) {
         throw NativeScriptException(
@@ -625,7 +742,7 @@ Runtime::CreateJSInstanceNative(JNIEnv *_jEnv, jobject obj, jobject javaObject, 
 
     DEBUG_WRITE("createJSInstanceNative: implementationObject");
 
-    m_objectManager->Link(jsInstance, javaObjectID);
+    m_objectManager->Link(jsInstance, javaObjectID, nullptr, extNode);
 }
 
 jint Runtime::GenerateNewObjectId(JNIEnv *jEnv, jobject obj) {
@@ -650,13 +767,14 @@ Runtime::PassExceptionToJsNative(JNIEnv *jEnv, jobject obj, jthrowable exception
                                  jstring fullStackTrace, jstring jsStackTrace,
                                  jboolean isDiscarded, jboolean isPendingError) {
     napi_env napiEnv = env;
+    napi_status status;
 
     std::string errMsg = ArgConverter::jstringToString(message);
 
     napi_value errObj;
     napi_value errMsgNapi;
-    napi_create_string_utf8(napiEnv, errMsg.c_str(), NAPI_AUTO_LENGTH, &errMsgNapi);
-    napi_create_error(napiEnv, nullptr, errMsgNapi, &errObj);
+    NAPI_GUARD(napi_create_string_utf8(napiEnv, errMsg.c_str(), NAPI_AUTO_LENGTH, &errMsgNapi)) {}
+    NAPI_GUARD(napi_create_error(napiEnv, nullptr, errMsgNapi, &errObj)) {}
 
     // Create a new native exception js object
     jint javaObjectID = m_objectManager->GetOrCreateObjectId((jobject) exception);
@@ -667,21 +785,21 @@ Runtime::PassExceptionToJsNative(JNIEnv *jEnv, jobject obj, jthrowable exception
         // Create proxy object that wraps the java err
         nativeExceptionObject = m_objectManager->CreateJSWrapper(javaObjectID, className);
         if (nativeExceptionObject == nullptr) {
-            napi_create_object(napiEnv, &nativeExceptionObject);
+            NAPI_GUARD(napi_create_object(napiEnv, &nativeExceptionObject)) {}
         }
     }
 
     // Create a JS error object
     napi_value fullStackTraceNapi;
-    napi_create_string_utf8(napiEnv, ArgConverter::jstringToString(fullStackTrace).c_str(),
-                            NAPI_AUTO_LENGTH, &fullStackTraceNapi);
-    napi_set_named_property(napiEnv, errObj, "nativeException", nativeExceptionObject);
-    napi_set_named_property(napiEnv, errObj, "stackTrace", fullStackTraceNapi);
+    NAPI_GUARD(napi_create_string_utf8(napiEnv, ArgConverter::jstringToString(fullStackTrace).c_str(),
+                            NAPI_AUTO_LENGTH, &fullStackTraceNapi)) {}
+    NAPI_GUARD(napi_set_named_property(napiEnv, errObj, "nativeException", nativeExceptionObject)) {}
+    NAPI_GUARD(napi_set_named_property(napiEnv, errObj, "stackTrace", fullStackTraceNapi)) {}
     if (jsStackTrace != nullptr) {
         napi_value jsStackTraceNapi;
-        napi_create_string_utf8(napiEnv, ArgConverter::jstringToString(jsStackTrace).c_str(),
-                                NAPI_AUTO_LENGTH, &jsStackTraceNapi);
-        napi_set_named_property(napiEnv, errObj, "stack", jsStackTraceNapi);
+        NAPI_GUARD(napi_create_string_utf8(napiEnv, ArgConverter::jstringToString(jsStackTrace).c_str(),
+                                NAPI_AUTO_LENGTH, &jsStackTraceNapi)) {}
+        NAPI_GUARD(napi_set_named_property(napiEnv, errObj, "stack", jsStackTraceNapi)) {}
     }
 
     // Pass err to JS

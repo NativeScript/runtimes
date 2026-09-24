@@ -372,7 +372,7 @@ class Value {
   }
   bool isObject() const { return isQuickJS() && JS_IsObject(jsValue()); }
   bool isString() const { return isQuickJS() && JS_IsString(jsValue()); }
-  bool isBigInt() const { return isQuickJS() && JS_IsBigInt(jsContext(), jsValue()); }
+  bool isBigInt() const { return isQuickJS() && JS_IsBigInt(jsValue()); }
   bool isSymbol() const { return isQuickJS() && JS_IsSymbol(jsValue()); }
 
   Object asObject(Runtime& runtime) const;
@@ -555,7 +555,7 @@ class Object {
   }
   bool isArray(Runtime& runtime) const {
     JSValue object = local(runtime);
-    int result = JS_IsArray(runtime.context(), object);
+    int result = JS_IsArray(object);
     JS_FreeValue(runtime.context(), object);
     return result > 0;
   }

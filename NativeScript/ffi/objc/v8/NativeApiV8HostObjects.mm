@@ -24,7 +24,7 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
               v8::Local<v8::Object> self = info.This();
               if (self.IsEmpty() || self->InternalFieldCount() < 1) return;
               auto* holder = static_cast<HostObjectHolder*>(
-                  self->GetAlignedPointerFromInternalField(0));
+                  self->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
               if (holder == nullptr || holder->hostObject == nullptr) return;
               Runtime rt(holder->state);
               try {
@@ -47,7 +47,7 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
         [](v8::Local<v8::Name> property,
            const v8::PropertyCallbackInfo<v8::Value>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -74,10 +74,13 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
           }
           return v8::Intercepted::kNo;
         },
-        [](v8::Local<v8::Name> property, v8::Local<v8::Value> value,
+        // Unary + forces the lambda to decay to a function pointer. V8 14.9
+        // constrains the setter parameter with requires(is_same_v<TSetter, ...>),
+        // which a closure type fails even though it converts implicitly.
+        +[](v8::Local<v8::Name> property, v8::Local<v8::Value> value,
            const v8::PropertyCallbackInfo<void>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -95,7 +98,7 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
         nullptr, nullptr,
         [](const v8::PropertyCallbackInfo<v8::Array>& info) {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return;
           }
@@ -120,7 +123,7 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
     objectTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(
         [](uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -137,10 +140,13 @@ v8::Local<v8::ObjectTemplate> hostObjectTemplate(Runtime& runtime) {
           }
           return v8::Intercepted::kNo;
         },
-        [](uint32_t index, v8::Local<v8::Value> value,
+        // Unary + forces the lambda to decay to a function pointer. V8 14.9
+        // constrains the setter parameter with requires(is_same_v<TSetter, ...>),
+        // which a closure type fails even though it converts implicitly.
+        +[](uint32_t index, v8::Local<v8::Value> value,
            const v8::PropertyCallbackInfo<void>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -177,7 +183,7 @@ v8::Local<v8::ObjectTemplate> nativeObjectTemplate(Runtime& runtime) {
               v8::Local<v8::Object> self = info.This();
               if (self.IsEmpty() || self->InternalFieldCount() < 1) return;
               auto* holder = static_cast<HostObjectHolder*>(
-                  self->GetAlignedPointerFromInternalField(0));
+                  self->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
               if (holder == nullptr || holder->hostObject == nullptr) return;
               Runtime rt(holder->state);
               try {
@@ -200,7 +206,7 @@ v8::Local<v8::ObjectTemplate> nativeObjectTemplate(Runtime& runtime) {
         [](v8::Local<v8::Name> property,
            const v8::PropertyCallbackInfo<v8::Value>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -226,10 +232,13 @@ v8::Local<v8::ObjectTemplate> nativeObjectTemplate(Runtime& runtime) {
           }
           return v8::Intercepted::kNo;
         },
-        [](v8::Local<v8::Name> property, v8::Local<v8::Value> value,
+        // Unary + forces the lambda to decay to a function pointer. V8 14.9
+        // constrains the setter parameter with requires(is_same_v<TSetter, ...>),
+        // which a closure type fails even though it converts implicitly.
+        +[](v8::Local<v8::Name> property, v8::Local<v8::Value> value,
            const v8::PropertyCallbackInfo<void>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -257,7 +266,7 @@ v8::Local<v8::ObjectTemplate> nativeObjectTemplate(Runtime& runtime) {
     objectTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(
         [](uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -274,10 +283,13 @@ v8::Local<v8::ObjectTemplate> nativeObjectTemplate(Runtime& runtime) {
           }
           return v8::Intercepted::kNo;
         },
-        [](uint32_t index, v8::Local<v8::Value> value,
+        // Unary + forces the lambda to decay to a function pointer. V8 14.9
+        // constrains the setter parameter with requires(is_same_v<TSetter, ...>),
+        // which a closure type fails even though it converts implicitly.
+        +[](uint32_t index, v8::Local<v8::Value> value,
            const v8::PropertyCallbackInfo<void>& info) -> v8::Intercepted {
           auto* holder =
-              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0));
+              static_cast<HostObjectHolder*>(info.Holder()->GetAlignedPointerFromInternalField(0, v8::kEmbedderDataTypeTagDefault));
           if (holder == nullptr || holder->hostObject == nullptr) {
             return v8::Intercepted::kNo;
           }
@@ -316,7 +328,8 @@ Object Object::createFromHostObjectWithToken(Runtime& runtime, std::shared_ptr<H
       v8engine::hostObjectTemplate(runtime)->NewInstance(runtime.context()).ToLocalChecked();
   auto* holder = new v8engine::HostObjectHolder(runtime.state(), std::move(host), typeToken);
   v8engine::trackRuntimeAllocation(runtime.isolate(), holder);
-  object->SetAlignedPointerInInternalField(0, holder);
+  object->SetAlignedPointerInInternalField(
+      0, holder, v8::kEmbedderDataTypeTagDefault);
   holder->object.Reset(runtime.isolate(), object);
   holder->object.SetWeak(holder, v8engine::hostObjectWeakCallback,
                          v8::WeakCallbackType::kParameter);
@@ -331,7 +344,8 @@ Object Object::createNativeInstanceWithToken(Runtime& runtime, std::shared_ptr<H
           .ToLocalChecked();
   auto* holder = new v8engine::HostObjectHolder(runtime.state(), std::move(host), typeToken);
   v8engine::trackRuntimeAllocation(runtime.isolate(), holder);
-  object->SetAlignedPointerInInternalField(0, holder);
+  object->SetAlignedPointerInInternalField(
+      0, holder, v8::kEmbedderDataTypeTagDefault);
   holder->object.Reset(runtime.isolate(), object);
   holder->object.SetWeak(holder, v8engine::hostObjectWeakCallback,
                          v8::WeakCallbackType::kParameter);
@@ -342,12 +356,13 @@ Function Function::createFromHostFunction(Runtime& runtime, const PropNameID& na
                                           HostFunctionType callback) {
   auto* holder = new v8engine::FunctionHolder(runtime.state(), std::move(callback));
   v8engine::trackRuntimeAllocation(runtime.isolate(), holder);
-  v8::Local<v8::External> data = v8::External::New(runtime.isolate(), holder);
+  v8::Local<v8::External> data = v8::External::New(
+      runtime.isolate(), holder, v8::kExternalPointerTypeTagDefault);
   v8::Local<v8::FunctionTemplate> functionTemplate = v8::FunctionTemplate::New(
       runtime.isolate(),
       [](const v8::FunctionCallbackInfo<v8::Value>& info) {
         auto* holder =
-            static_cast<v8engine::FunctionHolder*>(info.Data().As<v8::External>()->Value());
+            static_cast<v8engine::FunctionHolder*>(info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
         Runtime runtime(holder->state);
         StackValueArray<Value, 8> args(static_cast<size_t>(info.Length()));
         for (int i = 0; i < info.Length(); i++) {

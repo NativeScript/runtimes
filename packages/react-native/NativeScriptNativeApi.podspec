@@ -33,7 +33,11 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",
     "CLANG_CXX_LIBRARY" => "libc++",
-    "GCC_PREPROCESSOR_DEFINITIONS" => "$(inherited) TARGET_ENGINE_HERMES=1 NS_GSD_BACKEND_HERMES=1",
+    # NATIVESCRIPT_REACT_NATIVE tells the shared bridge sources that they are
+    # being compiled against a React Native-owned jsi::Runtime rather than the
+    # standalone runtime, so the parts that reach into napi/ (which this package
+    # does not ship) compile out. See NativeApiJsi.mm.
+    "GCC_PREPROCESSOR_DEFINITIONS" => "$(inherited) TARGET_ENGINE_HERMES=1 NS_GSD_BACKEND_HERMES=1 NATIVESCRIPT_REACT_NATIVE=1",
     "HEADER_SEARCH_PATHS" => [
       "\"$(PODS_TARGET_SRCROOT)/ios\"",
       "\"$(PODS_TARGET_SRCROOT)/native-api\"",

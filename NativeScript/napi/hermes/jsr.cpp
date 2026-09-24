@@ -1,9 +1,28 @@
 #include "jsr.h"
 
-#include "jsr_common.h"
-#include "js_runtime.h"
-
 #include <functional>
+
+#include "jsr_common.h"
+
+// Node-API surface exported by the prebuilt Hermes. Included here rather than
+// in jsr.h on purpose: it drags in Hermes' own node_api_types.h, whose
+// napi_threadsafe_function (struct pointer) and napi_tsfn_* enums collide with
+// NativeScript's authoritative definitions in napi/common/js_native_tsfn.h.
+// Keeping it out of the header confines it to this file, so translation units
+// that include jsr.h -- notably runtime/apple/ThreadSafeFunction.mm -- never
+// see it. jsr.h needs nothing from it.
+#include "napi/hermes_napi.h"
+
+#ifdef __ANDROID__
+#include <cstdio>
+#include <cstring>
+
+#include "File.h"
+#include "NativeScriptAssert.h"
+#include "bytecode_container.h"
+#else
+#include "js_runtime.h"
+#endif
 
 using namespace facebook::jsi;
 std::unordered_map<napi_env, JSR*> JSR::env_to_jsr_cache;
@@ -35,9 +54,7 @@ class RuntimeLockGuard {
     runtime_->lock();
   }
 
-  ~RuntimeLockGuard() {
-    runtime_->unlock();
-  }
+  ~RuntimeLockGuard() { runtime_->unlock(); }
 
  private:
   JSR* runtime_;
@@ -95,14 +112,29 @@ void JSR::UnregisterEnv(napi_env env) {
 }
 
 JSR::JSR() {
+#ifdef __ANDROID__
+  hermes::vm::RuntimeConfig config = hermes::vm::RuntimeConfig::Builder()
+                                         .withMicrotaskQueue(true)
+                                         .withES6BlockScoping(true)
+                                         .withEnableAsyncGenerators(true)
+                                         .withAsyncBreakCheckInEval(true)
+                                         .build();
+  runtime = facebook::hermes::makeThreadSafeHermesRuntime(config);
+  rt = static_cast<facebook::hermes::HermesRuntime*>(
+      &runtime->getUnsafeRuntime());
+#else
   hermes::vm::RuntimeConfig config = hermes::vm::RuntimeConfig::Builder()
                                          .withMicrotaskQueue(true)
                                          .withEnableEval(true)
                                          .build();
   runtime = facebook::hermes::makeThreadSafeHermesRuntime(config);
-  rt = &runtime->getUnsafeRuntime();
+  rt = static_cast<facebook::hermes::HermesRuntime*>(
+      &runtime->getUnsafeRuntime());
+#endif
+#ifndef __ANDROID__
   std::lock_guard<std::mutex> guard(UnsafeRuntimeMapMutex());
   UnsafeRuntimeMap()[rt] = this;
+#endif
 }
 
 extern "C" void* js_lock_unsafe_jsi_runtime(
@@ -128,9 +160,9 @@ extern "C" void js_unlock_unsafe_jsi_runtime(void* lockToken) {
   }
 }
 
-napi_status js_create_runtime(napi_runtime* runtime) {
+napi_status js_create_runtime(jsr_ns_runtime* runtime) {
   if (runtime == nullptr) return napi_invalid_arg;
-  *runtime = new napi_runtime__();
+  *runtime = new jsr_ns_runtime__();
   (*runtime)->hermes = new JSR();
 
   return napi_ok;
@@ -156,10 +188,28 @@ napi_status js_unlock_env(napi_env env) {
   return napi_ok;
 }
 
-napi_status js_create_napi_env(napi_env* env, napi_runtime runtime) {
+napi_status js_create_napi_env(napi_env* env, jsr_ns_runtime runtime) {
   if (env == nullptr) return napi_invalid_arg;
   RuntimeLockGuard lock(runtime->hermes);
-  *env = (napi_env)runtime->hermes->rt->createNodeApiEnv(9);
+  // Extract the underlying hermes::vm::Runtime from the JSI HermesRuntime via
+  // the IHermes interface, then create the Node-API env on top of it. This is
+  // the same path Hermes' own tools (repl, test-runner, napi-runner) use and
+  // relies only on symbols the prebuilt Hermes exports.
+  //
+  // Apple used to take a different route through a NativeScript-local
+  // jsi::Runtime::createNodeApiEnv hook. That hook no longer exists upstream,
+  // and both platforms now build against the same headers, so there is one path.
+  auto hermesInterface =
+      facebook::jsi::castInterface<facebook::hermes::IHermes>(
+          runtime->hermes->rt);
+  if (!hermesInterface) {
+    // The linked Hermes does not expose IHermes, so there is no way to reach
+    // the VM runtime. Fail here rather than dereferencing null.
+    return napi_generic_failure;
+  }
+  void* vmRuntime = hermesInterface->getVMRuntimeUnsafe();
+  if (vmRuntime == nullptr) return napi_generic_failure;
+  *env = hermes_napi_create_env(vmRuntime);
   if (*env == nullptr) return napi_generic_failure;
   JSR::RegisterEnv(*env, runtime->hermes);
 
@@ -197,7 +247,7 @@ napi_status js_free_napi_env(napi_env env) {
   return napi_ok;
 }
 
-napi_status js_free_runtime(napi_runtime runtime) {
+napi_status js_free_runtime(jsr_ns_runtime runtime) {
   if (runtime == nullptr) return napi_invalid_arg;
   {
     std::lock_guard<std::mutex> guard(UnsafeRuntimeMapMutex());
@@ -213,12 +263,104 @@ napi_status js_free_runtime(napi_runtime runtime) {
 
 napi_status js_execute_script(napi_env env, napi_value script, const char* file,
                               napi_value* result) {
+#ifdef __ANDROID__
+  // Pull the UTF-8 source out of the napi string value and compile+run it via
+  // the Hermes NAPI entry point so we can attach the source URL for stack
+  // traces.
+  size_t len = 0;
+  napi_status status =
+      napi_get_value_string_utf8(env, script, nullptr, 0, &len);
+  if (status != napi_ok) return status;
+
+  DEBUG_WRITE("[script] loading script: %s", file);
+
+  uint8_t* source = new uint8_t[len + 1];
+  status = napi_get_value_string_utf8(
+      env, script, reinterpret_cast<char*>(source), len + 1, &len);
+  if (status != napi_ok) {
+    delete[] source;
+    return status;
+  }
+
+  hermes_run_script_flags flags{};
+  flags.struct_size = sizeof(flags);
+  // Pass size = len + 1 so the trailing '\0' lets Hermes run the source
+  // zero-copy. Hermes takes ownership of the buffer and frees it via the
+  // finalizer below.
+  return hermes_run_script(
+      env, source, len + 1,
+      [](const uint8_t* data, size_t, void*) {
+        delete[] const_cast<uint8_t*>(data);
+      },
+      nullptr, file, &flags, result);
+#else
   return napi_run_script_source(env, script, file, result);
+#endif
 }
 
+#ifdef __ANDROID__
+// Hermes bytecode (HBC) magic, first 8 bytes little-endian
+// (0x1F1903C103BC1FC6). Hermes stores raw HBC (no NativeScript container), so
+// the whole file is the bytecode buffer.
+static const uint8_t kHermesMagic[8] = {0xc6, 0x1f, 0xbc, 0x03,
+                                        0xc1, 0x03, 0x19, 0x1f};
+
+napi_status js_run_bytecode_file(napi_env env, const char* file,
+                                 napi_value* result) {
+  std::string path;
+  if (!nsbc::ResolvePath(file, path)) {
+    DEBUG_WRITE("[bytecode] Unable to resolve file: %s", path.c_str());
+    return napi_cannot_run_js;
+  }
+  if (!nsbc::HasMagic(path, reinterpret_cast<const char*>(kHermesMagic))) {
+    DEBUG_WRITE("[bytecode] Unable to find hermes header: %s", path.c_str());
+    return napi_cannot_run_js;
+  }
+
+  int length = 0;
+  auto data = tns::File::ReadBinary(path, length);
+  if (!data) return napi_cannot_run_js;
+
+  DEBUG_WRITE("[bytecode] loading Hermes HBC bytecode: %s (%d bytes)", file,
+              length);
+
+  hermes_bytecode_flags flags{};
+  flags.struct_size = sizeof(flags);
+  // App modules live for the whole runtime lifetime, so keep the bytecode
+  // resident and let Hermes reference it zero-copy for faster loads.
+  flags.persistent = true;
+  // Hermes takes ownership of the buffer and frees it via the finalizer.
+  return hermes_run_bytecode(
+      env, static_cast<const uint8_t*>(data), static_cast<size_t>(length),
+      [](const uint8_t* d, size_t, void*) { delete[] const_cast<uint8_t*>(d); },
+      nullptr, file, &flags, result);
+}
+#else
+napi_status js_run_bytecode_file(napi_env env, const char* file,
+                                 napi_value* result) {
+  // The Apple Hermes build does not expose the bytecode entry points.
+  return napi_cannot_run_js;
+}
+#endif
+
 napi_status js_execute_pending_jobs(napi_env env) {
+#ifdef __ANDROID__
+  JSR* runtime = JSR::ForEnv(env);
+  if (runtime == nullptr) {
+    return napi_invalid_arg;
+  }
+  try {
+    runtime->rt->drainMicrotasks();
+  } catch (const facebook::jsi::JSError&) {
+    return napi_pending_exception;
+  } catch (const facebook::jsi::JSIException&) {
+    return napi_generic_failure;
+  }
+  return napi_ok;
+#else
   bool result;
   return jsr_drain_microtasks(env, -1, &result);
+#endif
 }
 
 napi_status js_get_engine_ptr(napi_env env, int64_t* engine_ptr) {
@@ -239,7 +381,24 @@ napi_status js_cache_script(napi_env env, const char* source,
 napi_status js_run_cached_script(napi_env env, const char* file,
                                  napi_value script, void* cache,
                                  napi_value* result) {
+#ifdef __ANDROID__
+  int length = 0;
+  // tns::File::ReadBinary allocates with new uint8_t[length].
+  auto data = tns::File::ReadBinary(file, length);
+  if (!data) {
+    return napi_cannot_run_js;
+  }
+
+  hermes_bytecode_flags flags{};
+  flags.struct_size = sizeof(flags);
+  // Hermes takes ownership of the buffer and frees it via the finalizer.
+  return hermes_run_bytecode(
+      env, static_cast<const uint8_t*>(data), static_cast<size_t>(length),
+      [](const uint8_t* d, size_t, void*) { delete[] const_cast<uint8_t*>(d); },
+      nullptr, file, &flags, result);
+#else
   return napi_ok;
+#endif
 }
 
 napi_status js_get_runtime_version(napi_env env, napi_value* version) {
@@ -269,6 +428,25 @@ extern "C" napi_status jsr_drain_microtasks(napi_env env,
   }
 
   NapiScope scope(env, false);
-  *result = runtime->rt->drainMicrotasks(max_count_hint);
+  *result = false;
+
+  // drainMicrotasks() is JSI, so it reports a failed job by *throwing* a C++
+  // jsi::JSError (HermesRuntimeImpl::checkStatus -> throwPendingError). Callers
+  // here are C and Objective-C block contexts -- notably the CFRunLoop block in
+  // runtime/apple/Runtime.cpp -- and letting a C++ exception unwind through
+  // those aborts the process. Worse, building the JSError runs
+  // JSError::recordStackTrace against a runtime that is already in a thrown
+  // state, which is where this used to die.
+  //
+  // Catching converts the failure into a napi status, and consuming the
+  // exception is what returns the runtime to a usable state.
+  try {
+    *result = runtime->rt->drainMicrotasks(max_count_hint);
+  } catch (const facebook::jsi::JSError&) {
+    return napi_pending_exception;
+  } catch (const facebook::jsi::JSIException&) {
+    return napi_generic_failure;
+  }
+
   return napi_ok;
 }

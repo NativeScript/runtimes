@@ -1,0 +1,304 @@
+diff --git a/VERSION b/VERSION
+deleted file mode 100644
+index ba2d8bc..0000000
+--- a/VERSION
++++ /dev/null
+@@ -1 +0,0 @@
+-2026-06-04
+diff --git a/quickjs.c b/quickjs.c
+index e3716a4..f017812 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -341,6 +341,7 @@ struct JSRuntime {
+     JSGCPhaseEnum gc_phase : 8;
+     size_t malloc_gc_threshold;
+     struct list_head weakref_list; /* list of JSWeakRefHeader.link */
++    struct list_head weakref_keepalive_list; /* strong refs kept until the current host job completes */
+ #ifdef DUMP_LEAKS
+     struct list_head string_list; /* list of JSString.link */
+ #endif
+@@ -419,6 +420,11 @@ typedef struct JSStackFrame {
+     JSValue *cur_sp;
+ } JSStackFrame;
+ 
++typedef struct JSWeakRefKeepAliveEntry {
++    struct list_head link;
++    JSValue value;
++} JSWeakRefKeepAliveEntry;
++
+ typedef enum {
+     JS_GC_OBJ_TYPE_JS_OBJECT,
+     JS_GC_OBJ_TYPE_FUNCTION_BYTECODE,
+@@ -2087,6 +2093,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+     init_list_head(&rt->gc_zero_ref_count_list);
+     rt->gc_phase = JS_GC_PHASE_NONE;
+     init_list_head(&rt->weakref_list);
++    init_list_head(&rt->weakref_keepalive_list);
+ 
+ #ifdef DUMP_LEAKS
+     init_list_head(&rt->string_list);
+@@ -2417,6 +2424,7 @@ void JS_FreeRuntime(JSRuntime *rt)
+         js_free_rt(rt, e);
+     }
+     init_list_head(&rt->job_list);
++    JS_ClearWeakRefKeepAlives(rt);
+ 
+     /* don't remove the weak objects to avoid create new jobs with
+        FinalizationRegistry */
+@@ -7223,7 +7231,7 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
+ 
+ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
+ {
+-    fprintf(fp, "QuickJS memory usage -- " CONFIG_VERSION " version, %d-bit, malloc limit: %"PRId64"\n\n",
++    fprintf(fp, "QuickJS memory usage -- version, %d-bit, malloc limit: %"PRId64"\n\n",
+             (int)sizeof(void *) * 8, s->malloc_limit);
+ #if 1
+     if (rt) {
+@@ -7632,7 +7640,9 @@ static BOOL is_backtrace_needed(JSContext *ctx, JSValueConst obj)
+ 
+ JSValue JS_NewError(JSContext *ctx)
+ {
+-    return JS_NewObjectClass(ctx, JS_CLASS_ERROR);
++    JSValue error = JS_NewObjectClass(ctx, JS_CLASS_ERROR);
++    build_backtrace(ctx, error, NULL, 0, 0, 0);
++    return  error;
+ }
+ 
+ static JSValue JS_ThrowError2(JSContext *ctx, JSErrorEnum error_num,
+@@ -8207,6 +8217,13 @@ static int JS_AutoInitProperty(JSContext *ctx, JSObject *p, JSAtom prop,
+     return 0;
+ }
+ 
++#ifdef USE_HOST_OBJECT
++/* NativeScript host-object exotic methods (defined in quickjs-api.c). Compared
++   by address below so the get_property handler can be treated as a non-masking
++   fallback for host objects only, leaving Proxy (js_proxy_get) authoritative. */
++extern JSClassExoticMethods NapiHostObjectExoticMethods;
++#endif
++
+ JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
+                                JSAtom prop, JSValueConst this_obj,
+                                BOOL throw_ref_error)
+@@ -8215,6 +8232,11 @@ JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
+     JSProperty *pr;
+     JSShapeProperty *prs;
+     uint32_t tag;
++#ifdef USE_HOST_OBJECT
++    /* A host object whose get_property we deferred: the prototype chain is
++       consulted first, and this is called only if nothing was found. */
++    JSObject *deferred_host = NULL;
++#endif
+ 
+     tag = JS_VALUE_GET_TAG(obj);
+     if (unlikely(tag != JS_TAG_OBJECT)) {
+@@ -8319,14 +8341,27 @@ JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
+                 const JSClassExoticMethods *em = ctx->rt->class_array[p->class_id].exotic;
+                 if (em) {
+                     if (em->get_property) {
+-                        JSValue obj1, retval;
+-                        /* XXX: should pass throw_ref_error */
+-                        /* Note: if 'p' is a prototype, it can be
+-                           freed in the called function */
+-                        obj1 = JS_DupValue(ctx, JS_MKPTR(JS_TAG_OBJECT, p));
+-                        retval = em->get_property(ctx, obj1, prop, this_obj);
+-                        JS_FreeValue(ctx, obj1);
+-                        return retval;
++#ifdef USE_HOST_OBJECT
++                        /* NativeScript host objects use get_property as a
++                           NON-masking fallback: defer it so the prototype chain
++                           (native methods / field accessors) is consulted first,
++                           and call it only if nothing is found (see after loop).
++                           Proxy and other exotics stay authoritative. */
++                        if (em == &NapiHostObjectExoticMethods) {
++                            if (!deferred_host)
++                                deferred_host = p;
++                        } else
++#endif
++                        {
++                            JSValue obj1, retval;
++                            /* XXX: should pass throw_ref_error */
++                            /* Note: if 'p' is a prototype, it can be
++                               freed in the called function */
++                            obj1 = JS_DupValue(ctx, JS_MKPTR(JS_TAG_OBJECT, p));
++                            retval = em->get_property(ctx, obj1, prop, this_obj);
++                            JS_FreeValue(ctx, obj1);
++                            return retval;
++                        }
+                     }
+                     if (em->get_own_property) {
+                         JSPropertyDescriptor desc;
+@@ -8356,6 +8391,17 @@ JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
+         if (!p)
+             break;
+     }
++#ifdef USE_HOST_OBJECT
++    /* Nothing found on the prototype chain: now consult the deferred host
++       object's get_property (expandos, numeric indices, dynamic members). */
++    if (deferred_host) {
++        JSValue obj1, retval;
++        obj1 = JS_DupValue(ctx, JS_MKPTR(JS_TAG_OBJECT, deferred_host));
++        retval = NapiHostObjectExoticMethods.get_property(ctx, obj1, prop, this_obj);
++        JS_FreeValue(ctx, obj1);
++        return retval;
++    }
++#endif
+     if (unlikely(throw_ref_error)) {
+         return JS_ThrowReferenceErrorNotDefined(ctx, prop);
+     } else {
+@@ -61179,6 +61225,7 @@ static JSValue js_weakref_constructor(JSContext *ctx, JSValueConst new_target,
+     wrd->target = js_weakref_new(ctx, arg);
+     wrd->weakref_header.weakref_type = JS_WEAKREF_TYPE_WEAKREF;
+     list_add_tail(&wrd->weakref_header.link, &ctx->rt->weakref_list);
++    JS_KeepWeakRefTargetAlive(ctx, arg);
+     JS_SetOpaque(obj, wrd);
+     return obj;
+ }
+@@ -61422,3 +61469,112 @@ int JS_AddIntrinsicWeakRef(JSContext *ctx)
+     JS_FreeValue(ctx, obj);
+     return 0;
+ }
++
++/* CUSTOM */
++
++int JS_IsArrayBuffer2(JSContext *ctx, JSValueConst val)
++{
++    JSObject *p;
++    if (JS_VALUE_GET_TAG(val) == JS_TAG_OBJECT) {
++        p = JS_VALUE_GET_OBJ(val);
++        return p->class_id == JS_CLASS_ARRAY_BUFFER || p->class_id == JS_CLASS_SHARED_ARRAY_BUFFER;
++    } else {
++        return false;
++    }
++}
++
++JSValue JS_NewString16(JSContext *ctx, const uint16_t *buf, int len)
++{
++    return js_new_string16_len(ctx, buf, len);
++}
++
++JSValue JS_GetPropertyInt64_2(JSContext *ctx, JSValueConst obj, int64_t idx) {
++    return JS_GetPropertyInt64(ctx, obj, idx);
++}
++
++JSValue JS_WeakRef_Deref(JSContext *ctx, JSValueConst this_val) {
++    return js_weakref_deref(ctx, this_val, 0, NULL);
++}
++
++void JS_KeepWeakRefTargetAlive(JSContext *ctx, JSValueConst value)
++{
++    JSRuntime *rt;
++    JSWeakRefKeepAliveEntry *entry;
++
++    if (!js_weakref_is_target(value))
++        return;
++
++    rt = JS_GetRuntime(ctx);
++    entry = js_malloc(ctx, sizeof(*entry));
++    if (!entry)
++        return;
++
++    entry->value = JS_DupValue(ctx, value);
++    list_add_tail(&entry->link, &rt->weakref_keepalive_list);
++}
++
++void JS_ClearWeakRefKeepAlives(JSRuntime *rt)
++{
++    struct list_head *el, *el1;
++
++    list_for_each_safe(el, el1, &rt->weakref_keepalive_list) {
++        JSWeakRefKeepAliveEntry *entry = list_entry(el, JSWeakRefKeepAliveEntry, link);
++        list_del(&entry->link);
++        JS_FreeValueRT(rt, entry->value);
++        js_free_rt(rt, entry);
++    }
++}
++
++int JS_GetLength(JSContext *ctx, JSValueConst obj, int64_t *pres) {
++    return js_get_length64(ctx, pres, obj);
++}
++
++
++static bool is_typed_array(JSClassID class_id)
++{
++    return class_id >= JS_CLASS_UINT8C_ARRAY && class_id <= JS_CLASS_FLOAT64_ARRAY;
++}
++
++int JS_GetTypedArrayType(JSValueConst obj)
++{
++    JSClassID class_id = JS_GetClassID(obj);
++    if (is_typed_array(class_id))
++        return class_id - JS_CLASS_UINT8C_ARRAY;
++    else
++        return -1;
++}
++
++JS_BOOL JS_IsDataView(JSValueConst val)
++{
++    return JS_CLASS_DATAVIEW == JS_GetClassID(val);
++}
++
++int JS_ToBigUint64(JSContext *ctx, uint64_t *pres, JSValueConst val)
++{
++    return JS_ToBigInt64Free(ctx, (int64_t *)pres, JS_DupValue(ctx, val));
++}
++
++JS_BOOL JS_IsStrictEqual(JSContext *ctx, JSValueConst op1, JSValueConst op2)
++{
++    return js_strict_eq2(ctx, JS_DupValue(ctx, op1), JS_DupValue(ctx,op2), JS_EQ_STRICT);
++}
++
++int JS_SealObject(JSContext *ctx, JSValueConst obj)
++{
++    JSValue value = js_object_seal(ctx, JS_UNDEFINED, 1, &obj, 0);
++    int result = JS_IsException(value) ? -1 : true;
++    JS_FreeValue(ctx, value);
++    return result;
++}
++
++int JS_FreezeObject(JSContext *ctx, JSValueConst obj)
++{
++    JSValue value = js_object_seal(ctx, JS_UNDEFINED, 1, &obj, 1);
++    int result = JS_IsException(value) ? -1 : true;
++    JS_FreeValue(ctx, value);
++    return result;
++}
++
++size_t JS_GetGCThreshold(JSRuntime *rt) {
++    return rt->malloc_gc_threshold;
++}
+diff --git a/quickjs.h b/quickjs.h
+index 476d735..05bc181 100644
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -409,6 +409,8 @@ int JS_AddIntrinsicMapSet(JSContext *ctx);
+ int JS_AddIntrinsicTypedArrays(JSContext *ctx);
+ int JS_AddIntrinsicPromise(JSContext *ctx);
+ int JS_AddIntrinsicWeakRef(JSContext *ctx);
++void JS_KeepWeakRefTargetAlive(JSContext *ctx, JSValueConst value);
++void JS_ClearWeakRefKeepAlives(JSRuntime *rt);
+ 
+ JSValue js_string_codePointRange(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv);
+@@ -1170,6 +1172,22 @@ void JS_PrintValueRT(JSRuntime *rt, JSPrintValueWrite *write_func, void *write_o
+ void JS_PrintValue(JSContext *ctx, JSPrintValueWrite *write_func, void *write_opaque,
+                    JSValueConst val, const JSPrintValueOptions *options);
+ 
++/* CUSTOM */
++
++int JS_IsArrayBuffer2(JSContext *ctx, JSValueConst val);
++JSValue JS_NewString16(JSContext *ctx, const uint16_t *buf, int len);
++JSValue JS_GetPropertyInt64_2(JSContext *ctx, JSValueConst obj, int64_t idx);
++JSValue JS_WeakRef_Deref(JSContext *ctx, JSValueConst this_val);
++int JS_GetLength(JSContext *ctx, JSValueConst obj, int64_t *pres);
++int JS_GetTypedArrayType(JSValueConst obj);
++JS_BOOL JS_IsDataView(JSValueConst val);
++int JS_ToBigUint64(JSContext *ctx, uint64_t *pres, JSValueConst val);
++JS_BOOL JS_IsStrictEqual(JSContext *ctx, JSValueConst op1, JSValueConst op2);
++int JS_SealObject(JSContext *ctx, JSValueConst obj);
++int JS_FreezeObject(JSContext *ctx, JSValueConst obj);
++size_t JS_GetGCThreshold(JSRuntime *rt);
++
++
+ #undef js_unlikely
+ #undef js_force_inline
+ 
