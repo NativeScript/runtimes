@@ -14,10 +14,9 @@ describe("Tests metadata-first return type resolution", function () {
     });
 
     it("returns every primitive category through the metadata fast path", function () {
-        return;
         var instance = new com.tns.tests.ReturnTypeResolutionTest();
         expect(instance.intValue()).toBe(42);
-        expect(instance.longValue()).toBe(long(42000000000));
+        expect(instance.longValue()).toBe(42000000000);
         expect(instance.doubleValue()).toBe(4.25);
         expect(instance.booleanValue()).toBe(true);
         expect(instance.byteValue()).toBe(7);
@@ -27,7 +26,6 @@ describe("Tests metadata-first return type resolution", function () {
     });
 
     it("returns arrays and handles void methods", function () {
-        return;
         var instance = new com.tns.tests.ReturnTypeResolutionTest();
         var values = instance.intArrayValue();
         expect(values.length).toBe(3);
@@ -37,7 +35,6 @@ describe("Tests metadata-first return type resolution", function () {
     });
 
     it("keeps return types correct when overload resolution selects candidates", function () {
-        return;
         var instance = new com.tns.tests.ReturnTypeResolutionTest();
         expect(instance.overloaded(1)).toBe("int-overload");
         expect(instance.overloaded("value")).toBe(7);

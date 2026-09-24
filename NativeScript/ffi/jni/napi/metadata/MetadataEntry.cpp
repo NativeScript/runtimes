@@ -64,16 +64,20 @@ std::string &MetadataEntry::getReturnType() {
 }
 
 MethodReturnType MetadataEntry::getRetType() {
-    if (retTypeParsed) return retType;
-    auto reader = MetadataNode::getMetadataReader();
-
-    if (type == NodeType::Method && !this->getReturnType().empty()) {
-        retType = MetadataReader::GetReturnType(this->returnType);
+    if (retTypeParsed && retType != MethodReturnType::Unknown) {
+        return retType;
     }
 
-    retTypeParsed = true;
+    auto &methodReturnType = this->getReturnType();
+    if (!methodReturnType.empty()) {
+        retType = MetadataReader::GetReturnType(methodReturnType);
+        retTypeParsed = retType != MethodReturnType::Unknown;
+        return retType;
+    }
 
-    return retType;
+    retType = MethodReturnType::Unknown;
+    retTypeParsed = false;
+    return MethodReturnType::Unknown;
 }
 
 std::string &MetadataEntry::getDeclaringType() {
