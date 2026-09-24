@@ -1774,8 +1774,8 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetInstanceMembers
         entry.paramCount = paramCount;
         entry.isStatic = false;
         if (chKind == 'M') {
+            entry.type = NodeType::Method;
             if (entry.name != lastMethodName) {
-                entry.type = NodeType::Method;
                 callbackData = new MethodCallbackData(this);
                 instanceMethodData.push_back(callbackData);
                 instanceMethodsCallbackData.push_back(callbackData);

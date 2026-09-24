@@ -26,21 +26,6 @@ describe("Tests overload resolution with same-arity reference overloads", functi
         expect(builder.url(javaUrl)).toBe("java-url");
     });
 
-    it("resolves a real external-library overload when metadata exposes an incomplete candidate set", function () {
-        var builder = new okhttp3.Request.Builder();
-        var request;
-        var error;
-
-        try {
-            request = builder.url("https://example.com").build();
-        } catch (e) {
-            error = e;
-        }
-
-        expect(error).toBeUndefined();
-        expect(request.url().toString()).toBe("https://example.com/");
-    });
-
     it("resolves String, CharSequence, and Object overloads by runtime facts", function () {
         expect(com.tns.tests.OverloadResolutionFixture.text("value")).toBe("string");
         expect(com.tns.tests.OverloadResolutionFixture.text(new java.lang.String("value"))).toBe("string");

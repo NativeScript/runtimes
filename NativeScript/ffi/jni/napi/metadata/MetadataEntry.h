@@ -56,6 +56,7 @@ namespace tns {
                 sig = other.sig;
                 returnType = other.returnType;
                 retType = other.retType;
+                retTypeParsed = other.retTypeParsed;
                 declaringType = other.declaringType;
                 paramCount = other.paramCount;
                 isFinal = other.isFinal;

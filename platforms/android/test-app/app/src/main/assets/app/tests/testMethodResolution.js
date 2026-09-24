@@ -1,5 +1,15 @@
 describe("Test Method Resolution", function () {
 
+	it("resolves both TimeZone.getOffset overloads and preserves the int return", function () {
+		var zone = java.util.TimeZone.getTimeZone("Europe/Paris");
+		var epoch = Date.UTC(2025, 0, 15);
+
+		for (var i = 0; i < 100; i++) {
+			expect(zone.getOffset(epoch)).toBe(3600000);
+			expect(zone.getOffset(1, 2025, 0, 15, 4, 0)).toBe(3600000);
+		}
+	});
+
 	it("When_call_overloaded_base_method_it_should_call_base_method1", function () {
 		
 		__log("TEST: When_call_overloaded_base_method_it_should_call_base_method1");
