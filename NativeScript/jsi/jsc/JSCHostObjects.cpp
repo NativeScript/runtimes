@@ -1,5 +1,5 @@
-#include "NativeApiJSCRuntime.h"
-#include "../shared/NativeApiStackValueArray.h"
+#include "jsi/jsc/JSCRuntime.h"
+#include "jsi/shared/NativeApiStackValueArray.h"
 
 #ifdef TARGET_ENGINE_JSC
 

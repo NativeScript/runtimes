@@ -69,6 +69,8 @@ mkdir -p \
   "$PACKAGE_DIR/native-api/ffi/objc/shared" \
   "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge" \
   "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/host_objects" \
+  "$PACKAGE_DIR/native-api/jsi/hermes" \
+  "$PACKAGE_DIR/native-api/jsi/shared" \
   "$PACKAGE_DIR/native-api/metadata/include" \
   "$PACKAGE_DIR/metadata" \
   "$PACKAGE_DIR/ios/vendor/libffi/include" \
@@ -86,6 +88,8 @@ cp NativeScript/ffi/objc/shared/bridge/host_objects/*.mm \
 cp NativeScript/ffi/objc/shared/NativeApiBackendConfig.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
 cp NativeScript/ffi/objc/shared/SignatureDispatchCore.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
 cp NativeScript/ffi/objc/shared/PreparedSignatureDispatch.h "$PACKAGE_DIR/native-api/ffi/objc/shared/"
+cp NativeScript/jsi/hermes/*.h "$PACKAGE_DIR/native-api/jsi/hermes/"
+cp NativeScript/jsi/shared/*.h "$PACKAGE_DIR/native-api/jsi/shared/"
 cp "$GENERATED_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/shared/GeneratedSignatureDispatch.inc"
 GENERATED_GSD_SIGNATURE_DISPATCH="$(dirname "$GENERATED_SIGNATURE_DISPATCH")/GeneratedGsdSignatureDispatch.inc"
 if [ -f "$GENERATED_GSD_SIGNATURE_DISPATCH" ]; then

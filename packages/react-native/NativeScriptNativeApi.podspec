@@ -20,6 +20,7 @@ Pod::Spec.new do |s|
     "ios/**/*.{h,mm}",
     "native-api/ffi/objc/hermes/**/*.h",
     "native-api/ffi/objc/shared/**/*.h",
+    "native-api/jsi/**/*.h",
     "native-api/ffi/objc/hermes/NativeApiJsi.mm"
   ]
   s.exclude_files = "ios/Fabric/**/*" unless fabric_enabled

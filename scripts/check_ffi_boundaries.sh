@@ -148,8 +148,13 @@ for dir in "$SHARED_DIR" "$NAPI_DIR" "$V8_DIR" "$JSC_DIR" "$QUICKJS_DIR"; do
   fi
 done
 
+# "JSI" here means facebook::jsi, the Hermes-only API -- not NativeScript/jsi,
+# which is our own platform-neutral engine layer that every backend shares.
+# Hence #include "jsi/hermes/..." rather than a blanket #include "jsi/": the
+# quoted form now names our tree, and only its hermes subdirectory is off
+# limits to the other backends.
 if [ "${#NON_HERMES_JSI_DIRS[@]}" -gt 0 ] &&
-  search_sources '(NativeApiJsi|facebook::jsi|<jsi/|#include[[:space:]]+"jsi/)' \
+  search_sources '(NativeApiJsi|facebook::jsi|<jsi/|#include[[:space:]]+"jsi/hermes/)' \
     "${NON_HERMES_JSI_DIRS[@]}"; then
   echo "JSI is Hermes-only; shared, V8, JSC, and QuickJS FFI code must not reference NativeApiJsi or JSI APIs." >&2
   exit 1
@@ -164,6 +169,9 @@ fi
 if [ -d "$JNI_NAPI_DIR" ] &&
   search_sources '(^|[^[:alnum:]_])(facebook::jsi|v8::|JSContextRef|JSValueRef|JSContext|JSValue|JSRuntime|quickjs)($|[^[:alnum:]_])|(<jsi/|#include[[:space:]]+"jsi/|<v8|JavaScriptCore|quickjs\.h|hermes/)' \
     "$JNI_NAPI_DIR"; then
+  # Note: ffi/jni/napi is the *Node-API* JNI backend, so it must not reach into
+  # the shared engine layer either -- the blanket #include "jsi/ is deliberate
+  # here. The JSI-based JNI backend lands in ffi/jni/jsi, a separate directory.
   echo "ffi/jni/napi must remain a pure Node-API backend until a JNI engine backend is added." >&2
   exit 1
 fi

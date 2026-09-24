@@ -29,6 +29,7 @@
     "build-node-api": "./scripts/build_all_react_native.sh",
     "build-rn-turbomodule": "./scripts/build_react_native_turbomodule.sh",
     "check:ffi-boundaries": "./scripts/check_ffi_boundaries.sh",
+    "check:jsi-neutral": "./scripts/check_jsi_layer_neutral.sh",
     "test-rn-turbomodule": "./scripts/test_react_native_turbomodule.sh",
     "test-rn-ffi": "./scripts/test_react_native_ffi_compat.sh",
     "demo-rn-turbomodule": "./scripts/create_react_native_demo.sh",

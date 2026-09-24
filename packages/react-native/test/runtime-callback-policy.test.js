@@ -85,7 +85,7 @@ assert(
 );
 
 for (const relativePath of [
-  "NativeScript/ffi/objc/shared/NativeApiBackendConfig.h",
+  "NativeScript/jsi/shared/NativeApiBackendConfig.h",
 ]) {
   const source = readRepo(relativePath);
   assert(

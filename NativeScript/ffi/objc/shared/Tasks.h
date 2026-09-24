@@ -1,20 +1,8 @@
-#ifndef Tasks_h
-#define Tasks_h
+#ifndef NATIVESCRIPT_FFI_SHARED_TASKS_FORWARD_H
+#define NATIVESCRIPT_FFI_SHARED_TASKS_FORWARD_H
 
-#include <vector>
-#include <functional>
+// Moved to the shared JSI layer; this forwarding header keeps existing
+// Apple include paths working unchanged.
+#include "jsi/shared/Tasks.h"
 
-namespace nativescript {
-
-class Tasks {
-public:
-    static void Register(std::function<void()> task);
-    static void Drain();
-    static void ClearTasks();
-private:
-    static std::vector<std::function<void()>> tasks_;
-};
-
-}
-
-#endif /* Tasks_h */
+#endif  // NATIVESCRIPT_FFI_SHARED_TASKS_FORWARD_H

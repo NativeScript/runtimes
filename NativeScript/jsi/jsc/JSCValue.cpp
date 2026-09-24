@@ -1,4 +1,4 @@
-#include "NativeApiJSCRuntime.h"
+#include "jsi/jsc/JSCRuntime.h"
 
 #ifdef TARGET_ENGINE_JSC
 

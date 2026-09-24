@@ -1,4 +1,4 @@
-#include "NativeApiQuickJSRuntime.h"
+#include "jsi/quickjs/QuickJSRuntime.h"
 
 #ifdef TARGET_ENGINE_QUICKJS
 

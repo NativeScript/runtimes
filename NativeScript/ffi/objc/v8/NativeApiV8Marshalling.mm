@@ -124,17 +124,19 @@ Class v8NativeClassArgument(Runtime& runtime, v8::Local<v8::Value> value) {
   }
   auto* state = runtime.rawState();
   if (state != nullptr && value->IsObject()) {
-    if (state->nativeClassArgumentLast.nativeClass != Nil &&
+    // The cache holds the Class opaquely so the engine layer stays platform
+    // neutral; cast back on the way out.
+    if (state->nativeClassArgumentLast.nativeClass != nullptr &&
         !state->nativeClassArgumentLast.value.IsEmpty() &&
         state->nativeClassArgumentLast.value.Get(runtime.isolate()) == value) {
-      return state->nativeClassArgumentLast.nativeClass;
+      return (Class)state->nativeClassArgumentLast.nativeClass;
     }
     for (auto& entry : state->nativeClassArgumentCache) {
-      if (entry.nativeClass != Nil && !entry.value.IsEmpty() &&
+      if (entry.nativeClass != nullptr && !entry.value.IsEmpty() &&
           entry.value.Get(runtime.isolate()) == value) {
         state->nativeClassArgumentLast.value.Reset(runtime.isolate(), value);
         state->nativeClassArgumentLast.nativeClass = entry.nativeClass;
-        return entry.nativeClass;
+        return (Class)entry.nativeClass;
       }
     }
   }
@@ -194,13 +196,13 @@ bool readV8EngineSelectorArgument(Runtime& runtime, v8::Local<v8::Value> value,
         !state->nativeSelectorArgumentLast.value.IsEmpty() &&
         state->nativeSelectorArgumentLast.value.Get(runtime.isolate()) ==
             value) {
-      *result = state->nativeSelectorArgumentLast.selector;
+      *result = (SEL)state->nativeSelectorArgumentLast.selector;
       return true;
     }
     for (auto& entry : state->nativeSelectorArgumentCache) {
       if (entry.selector != nullptr && !entry.value.IsEmpty() &&
           entry.value.Get(runtime.isolate()) == value) {
-        *result = entry.selector;
+        *result = (SEL)entry.selector;
         state->nativeSelectorArgumentLast.value.Reset(runtime.isolate(), value);
         state->nativeSelectorArgumentLast.selector = entry.selector;
         return true;
