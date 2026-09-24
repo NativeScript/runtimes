@@ -279,7 +279,7 @@ void FieldAccessor::SetJavaField(napi_env env, napi_value target, napi_value val
             }
             case 'B': { // byte
                 // TODO: validate value is a byte before calling
-                jbyte intValue = !napi_util::is_of_type(env, value, napi_number)
+                jbyte intValue = napi_util::is_of_type(env, value, napi_number)
                                  ? napi_util::get_int32(env, value) : 0;
                 if (isStatic) {
                     jEnv.SetStaticByteField(clazz, fieldId, intValue);
@@ -303,7 +303,7 @@ void FieldAccessor::SetJavaField(napi_env env, napi_value target, napi_value val
             }
             case 'S': { // short
                 // TODO: validate value is a short before calling
-                short shortValue = !napi_util::is_of_type(env, value, napi_number)
+                short shortValue = napi_util::is_of_type(env, value, napi_number)
                                    ? napi_util::get_int32(env, value) : 0;
                 if (isStatic) {
                     jEnv.SetStaticShortField(clazz, fieldId, shortValue);

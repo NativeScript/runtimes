@@ -55,7 +55,11 @@ napi_status js_unlock_env(napi_env env) {
 
 napi_status js_free_napi_env(napi_env env) {
   JSR* jsr = JSR::env_to_jsr_cache.Get(env);
+#ifndef __ANDROID__
+  // Implemented by the Apple thread-safe-function layer; Android does not
+  // provide environment cleanup hooks for this backend.
   js_run_env_cleanup_hooks(env);
+#endif
   JSR::env_to_jsr_cache.Remove(env);
   delete jsr;
   return qjs_free_napi_env(env);

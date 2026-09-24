@@ -66,10 +66,6 @@ struct char_traits<unsigned short> {
 #include <android/log.h>
 #endif
 
-#ifndef NAPI_PREAMBLE
-#define NAPI_PREAMBLE napi_status status;
-#endif
-
 #ifndef NS_NAPI_PREAMBLE
 #define NS_NAPI_PREAMBLE napi_status status;
 #endif

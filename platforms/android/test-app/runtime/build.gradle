@@ -9,12 +9,25 @@ def hasEngine = project.hasProperty("engine")
 if (hasEngine) {
     jsEngine = engine
 }
-def runtimeVersionFile = new File(projectDir, "../../../../NativeScript/runtime/android/version/Version.h")
-
 def hasHostObjects = true //project.hasProperty("useHostObjects")
 def isNapiModule = project.hasProperty("asNapiModule");
 
-printf("Compiling NativeScript with %s.\n", jsEngine)
+// Which runtime to compile. These are two complete parallel implementations,
+// not a runtime plus a shim:
+//   napi - runtime/android/napi + ffi/jni/napi, a Node-API program throughout
+//   jsi  - runtime/android/jsi  + ffi/jni/jsi, written directly against
+//          nativescript::engine, with no Node-API anywhere
+// Both build on NativeScript/jsi/ (the engine:: backends).
+def bindingLayer = project.findProperty("bindingLayer") ?: "napi"
+if (!["napi", "jsi"].contains(bindingLayer)) {
+    throw new GradleException("bindingLayer must be 'napi' or 'jsi', got '${bindingLayer}'")
+}
+
+printf("Compiling NativeScript with %s (runtime: %s).\n", jsEngine, bindingLayer)
+
+// Version.h moved under the per-binding runtime tree when the jsi runtime was
+// added; each implementation carries its own.
+def runtimeVersionFile = new File(projectDir, "../../../../NativeScript/runtime/android/${bindingLayer}/version/Version.h")
 
 def optimized = project.hasProperty("optimized")
 if (optimized) {
@@ -29,6 +42,13 @@ if (optimizedWithInspector) {
 def onlyX86 = project.hasProperty("onlyX86")
 if (onlyX86) {
     println "OnlyX86 build triggered."
+}
+
+// Every physical test device here is arm64, so the other three ABIs are built
+// and never installed. Opt-in, so CI still produces all four.
+def onlyArm64 = project.hasProperty("onlyArm64")
+if (onlyArm64) {
+    println "OnlyArm64 build triggered."
 }
 
 def useCCache = project.hasProperty("useCCache")
@@ -174,6 +194,8 @@ android {
                     arguments.add("-DIS_NAPI_MODULE=true")
                 }
 
+                arguments.add("-DNS_BINDING=${bindingLayer}")
+
                 if (bytecodeStacktraces) {
                     arguments.add("-DNS_BYTECODE=1")
                 }
@@ -219,6 +241,8 @@ android {
                 // The updated JSC only ships 64-bit libraries, so fall back to
                 // x86_64 when a single-ABI (emulator) build is requested.
                 abiFilters jsEngine == "JSC" ? 'x86_64' : 'x86'
+            } else if (onlyArm64) {
+                abiFilters 'arm64-v8a'
             } else if (jsEngine == "JSC") {
                 // The newer JSC engine only provides arm64-v8a and x86_64
                 // prebuilts, so restrict the runtime to those two ABIs.

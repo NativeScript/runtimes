@@ -59,9 +59,8 @@ class JSString {
 
   JSString(const JSChar* string, size_t length = NAPI_AUTO_LENGTH)
       : _string{JSStringCreateWithCharacters(
-            string, length == NAPI_AUTO_LENGTH
-                        ? std::char_traits<JSChar>::length(string)
-                        : length)} {}
+            string, length == NAPI_AUTO_LENGTH ? NullTerminatedLength(string)
+                                               : length)} {}
 
   ~JSString() {
     if (_string != nullptr) {
@@ -118,6 +117,13 @@ class JSString {
   }
 
  private:
+  static size_t NullTerminatedLength(const JSChar* string) {
+    if (string == nullptr) return 0;
+    const JSChar* end = string;
+    while (*end != 0) ++end;
+    return static_cast<size_t>(end - string);
+  }
+
   static JSStringRef CreateUTF8(const char* string, size_t length) {
     if (length == NAPI_AUTO_LENGTH) {
       return JSStringCreateWithUTF8CString(string);

@@ -8,6 +8,17 @@ namespace engine {
 Value HostObject::get(Runtime&, const PropNameID&) { return Value::undefined(); }
 bool HostObject::set(Runtime&, const PropNameID&, const Value&) { return true; }
 std::vector<PropNameID> HostObject::getPropertyNames(Runtime&) { return {}; }
+
+// The defaults reproduce what the engine used to do for an index: stringify it
+// and take the named path. A host object that does not override these is
+// therefore unaffected by the indexed routing.
+Value HostObject::getValueAtIndex(Runtime& runtime, uint32_t index) {
+  return get(runtime, PropNameID(std::to_string(index)));
+}
+
+bool HostObject::setValueAtIndex(Runtime& runtime, uint32_t index, const Value& value) {
+  return set(runtime, PropNameID(std::to_string(index)), value);
+}
 String::String(Runtime& runtime, JSValue value)
     : storage_(std::make_shared<quickjsengine::ValueStorage>(
           quickjsengine::ValueStorage::Kind::QuickJS)) {
@@ -57,10 +68,37 @@ Object Value::asObject(Runtime& runtime) const {
   }
   return Object::fromValueStorage(std::move(s));
 }
+Object Value::asObjectBorrowed(Runtime& runtime) const {
+  return asObject(runtime);
+}
 String Value::asString(Runtime& runtime) const {
   JSValue value = local(runtime);
   String result(runtime, value);
   JS_FreeValue(runtime.context(), value);
+  return result;
+}
+
+std::string Value::utf8(Runtime& runtime) const {
+  // JS_ToCStringLen does not consume its argument, so a refcounted value can be
+  // read in place -- no local(), which dups, and no matching free.
+  if (kind_ == quickjsengine::ValueStorage::Kind::QuickJS ||
+      kind_ == quickjsengine::ValueStorage::Kind::QuickJSBorrowed) {
+    return quickjsengine::valueToUtf8(runtime.context(), jsValue());
+  }
+  JSValue value = local(runtime);
+  std::string result = quickjsengine::valueToUtf8(runtime.context(), value);
+  JS_FreeValue(runtime.context(), value);
+  return result;
+}
+
+Value Value::createStringFromUtf8(Runtime& runtime, const char* data, size_t length) {
+  Value result;
+  result.kind_ = quickjsengine::ValueStorage::Kind::QuickJS;
+  result.storage_ =
+      std::make_shared<quickjsengine::ValueStorage>(quickjsengine::ValueStorage::Kind::QuickJS);
+  result.storage_->context = runtime.context();
+  result.storage_->value =
+      JS_NewStringLen(runtime.context(), data != nullptr ? data : "", length);
   return result;
 }
 BigInt Value::getBigInt(Runtime& runtime) const {
@@ -83,7 +121,7 @@ Array Object::getPropertyNames(Runtime& runtime) const {
                                       JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK | JS_GPN_ENUM_ONLY);
   JS_FreeValue(runtime.context(), object);
   if (status < 0) {
-    throw JSError(runtime, "QuickJS property names failed.");
+    throw quickjsengine::caughtError(runtime, "QuickJS property names failed.");
   }
   Array result(runtime, count);
   for (uint32_t i = 0; i < count; i++) {

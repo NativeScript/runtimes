@@ -29,6 +29,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,10 +51,27 @@ class String;
 class BigInt;
 class ArrayBuffer;
 
+// Mirrors jsi::JSError. See the V8 engine layer for why the thrown value
+// matters: rebuilding an error from its message drops whatever the runtime
+// attached to it (NativeScriptException's `nativeException`) and its stack.
+//
+// This engine is not yet wired to the Node-API shim, so nothing populates the
+// payload here and value() always reports null -- callers fall back to the
+// message. The API exists so the shim stays engine-neutral.
 class JSError : public std::runtime_error {
  public:
   JSError(Runtime&, const std::string& message) : std::runtime_error(message) {}
   explicit JSError(const std::string& message) : std::runtime_error(message) {}
+
+  JSError(Runtime& runtime, const std::string& message, const Value& value,
+          std::string stack);
+
+  const Value* value() const { return value_.get(); }
+  const std::string& stack() const { return stack_; }
+
+ private:
+  std::shared_ptr<Value> value_;
+  std::string stack_;
 };
 
 class StringBuffer {
@@ -93,6 +111,46 @@ class HostObject {
   virtual Value get(Runtime& runtime, const PropNameID& name);
   virtual bool set(Runtime& runtime, const PropNameID& name, const Value& value);
   virtual std::vector<PropNameID> getPropertyNames(Runtime& runtime);
+
+  // Indexed access, taking the index as an integer rather than as the decimal
+  // string the named form would hand over. See V8Runtime.h for the full note.
+  // QuickJS has no indexed hook, so this layer recognises an index-carrying
+  // atom and routes it here -- but only for a host object that opted in, since
+  // the named path also does the prototype handling.
+  virtual Value getValueAtIndex(Runtime& runtime, uint32_t index);
+  virtual bool setValueAtIndex(Runtime& runtime, uint32_t index, const Value& value);
+
+  bool hasIndexedAccess() const { return indexedAccess_; }
+  void setIndexedAccess(bool value) { indexedAccess_ = value; }
+
+  // The JS object standing for this host object, valid ONLY for the duration of
+  // the call the engine is currently dispatching. Mirrors the V8 and Hermes
+  // layers; see V8Runtime.h for the full note.
+  //
+  // Handed in per call rather than stored, and deliberately non-owning. A
+  // HostObject holding an owned handle to its own wrapper is a strong
+  // self-cycle: the wrapper is then permanently reachable, its finalizer never
+  // runs, and on Android ObjectManager never calls makeInstanceWeak -- every
+  // Java instance stays pinned.
+  const Value* receiver() const { return receiver_; }
+
+  // Sets the receiver for one dispatch and clears it on scope exit.
+  class ReceiverScope {
+   public:
+    ReceiverScope(HostObject& host, const Value& receiver) : host_(host) {
+      host_.receiver_ = &receiver;
+    }
+    ~ReceiverScope() { host_.receiver_ = nullptr; }
+    ReceiverScope(const ReceiverScope&) = delete;
+    ReceiverScope& operator=(const ReceiverScope&) = delete;
+
+   private:
+    HostObject& host_;
+  };
+
+ private:
+  const Value* receiver_ = nullptr;
+  bool indexedAccess_ = false;
 };
 
 using HostFunctionType = std::function<Value(Runtime&, const Value&, const Value*, size_t)>;
@@ -111,12 +169,90 @@ struct RuntimeState : RuntimeCleanupRegistry {
   bool hostClassRegistered = false;
   bool functionClassRegistered = false;
   bool selectorGroupDataClassRegistered = false;
+  bool nativeStateClassRegistered = false;
+  // The atom every native-state slot hangs off, interned once per runtime.
+  // Classic QuickJS has no JS_NewSymbol, so this is a string atom -- but the
+  // property is defined non-enumerable and read with JS_GetOwnProperty, which
+  // skips the prototype chain entirely.
+  //
+  // Freed by releaseStateForContext, not by ~RuntimeState: a HostObjectHolder
+  // keeps a shared_ptr to this state and is itself released by a GC finaliser
+  // during JS_FreeContext, so the state can outlive the context it names.
+  JSAtom nativeStateAtom = JS_ATOM_NULL;
+  // Whether an array index can be read straight out of the atom the exotic
+  // handlers are handed. Established once per runtime in ensureClasses; see
+  // atomAsArrayIndex in QuickJSHostObjects.cpp.
+  bool indexAtomsAreTagged = false;
+  bool indexAtomTaggingChecked = false;
 };
 
 extern JSClassID gHostClassId;
 extern JSClassID gFunctionClassId;
+// An ordinary object that happens to carry an opaque slot: no exotic table, so
+// property access on it is exactly what it is on a plain object. Used for the
+// receiver a host constructor builds, which is the object the Node-API shim
+// wraps. See Object::setNativeState.
+extern JSClassID gNativeStateClassId;
+
+// JS_NewClassID gained a JSRuntime* parameter in quickjs-ng. Apple and Android's
+// QUICKJS_NG build take the two-argument form, Android's classic QuickJS build
+// the one-argument form; both are the same call. Resolved by overload rather
+// than by #if, because there is no version macro that separates the two
+// consistently across all three vendored copies.
+// Both template parameters are deduced so that each overload's return type is
+// dependent -- a non-dependent decltype would be a hard error, not a
+// substitution failure, and the wrong arm would break the build outright.
+template <typename R, typename C>
+inline auto newClassIdImpl(R* runtime, C* classId, int)
+    -> decltype(JS_NewClassID(runtime, classId)) {
+  return JS_NewClassID(runtime, classId);
+}
+template <typename R, typename C>
+inline auto newClassIdImpl(R*, C* classId, long) -> decltype(JS_NewClassID(classId)) {
+  return JS_NewClassID(classId);
+}
+inline JSClassID newClassId(JSRuntime* runtime, JSClassID* classId) {
+  return newClassIdImpl(runtime, classId, 0);
+}
+
+// JS_IsBigInt and JS_IsArray dropped their JSContext* in quickjs-ng. Android's
+// QUICKJS_NG build takes the one-argument form; Android's classic QuickJS and
+// the Apple copy take the two-argument one. Same overload trick as above.
+template <typename C, typename V>
+inline auto isBigIntImpl(C* context, const V& value, int)
+    -> decltype(JS_IsBigInt(context, value)) {
+  return JS_IsBigInt(context, value);
+}
+template <typename C, typename V>
+inline auto isBigIntImpl(C*, const V& value, long) -> decltype(JS_IsBigInt(value)) {
+  return JS_IsBigInt(value);
+}
+inline bool isBigInt(JSContext* context, JSValueConst value) {
+  return isBigIntImpl(context, value, 0) != 0;
+}
+
+template <typename C, typename V>
+inline auto isArrayImpl(C* context, const V& value, int)
+    -> decltype(JS_IsArray(context, value)) {
+  return JS_IsArray(context, value);
+}
+template <typename C, typename V>
+inline auto isArrayImpl(C*, const V& value, long) -> decltype(JS_IsArray(value)) {
+  return JS_IsArray(value);
+}
+inline bool isArray(JSContext* context, JSValueConst value) {
+  return isArrayImpl(context, value, 0) != 0;
+}
 
 std::shared_ptr<RuntimeState> stateForContext(JSContext* context);
+
+// Drops the RuntimeState cached for a context that is about to be freed.
+//
+// The cache is keyed by JSContext*, and the allocator hands the same address
+// back for the next runtime -- workers create and destroy one each. A surviving
+// entry would give the new context a state that already says
+// hostClassRegistered, so JS_NewClass would never run for its JSRuntime and
+// every host object created on it would carry an unregistered class id.
 void releaseStateForContext(JSContext* context);
 
 struct ValueStorage {
@@ -201,6 +337,33 @@ void ensureClasses(Runtime& runtime);
 
 }  // namespace quickjsengine
 
+// Mirrors jsi::WeakObject. lock() returns undefined once the referent has been
+// collected.
+//
+// Backed by a JS `WeakRef`, which is what QuickJS exposes -- it has no
+// C-level weak handle. Same mechanism the Node-API binding uses
+// (vendor/quickjs/quickjs-api.c's napi_create_reference), so the two
+// binding layers have the same collection behaviour.
+//
+// A value WeakRef cannot hold -- a primitive, or a string -- is kept strongly
+// instead. Those are not garbage in the sense a weak reference cares about, and
+// reporting them as collected would be wrong.
+class WeakObject {
+ public:
+  WeakObject() = default;
+  WeakObject(Runtime& runtime, const Value& value);
+  Value lock(Runtime& runtime) const;
+  bool empty() const { return storage_ == nullptr; }
+  void reset() {
+    storage_.reset();
+    isWeakRef_ = false;
+  }
+
+ private:
+  std::shared_ptr<quickjsengine::ValueStorage> storage_;
+  bool isWeakRef_ = false;
+};
+
 class Runtime {
  public:
   explicit Runtime(JSContext* context) : state_(quickjsengine::stateForContext(context)) {}
@@ -209,6 +372,13 @@ class Runtime {
   std::shared_ptr<quickjsengine::RuntimeState> state() const { return state_; }
   const void* identity() const { return state_.get(); }
   void detachState() { state_.reset(); }
+  // See RuntimeState::nativeStateAtom. Interned on first use.
+  JSAtom nativeStateAtom() const {
+    if (state_->nativeStateAtom == JS_ATOM_NULL) {
+      state_->nativeStateAtom = JS_NewAtom(state_->context, "__nsNativeState");
+    }
+    return state_->nativeStateAtom;
+  }
   Object global();
   Value evaluateJavaScript(std::shared_ptr<StringBuffer> buffer, const std::string& sourceURL);
   void drainMicrotasks() {
@@ -227,15 +397,30 @@ class String {
  public:
   String() = default;
   String(Runtime& runtime, JSValue value);
+
+  // The three factories below adopt the reference JS_New*String returns instead
+  // of going through String(Runtime&, JSValue), which *duplicates* it. That
+  // constructor's contract is "the caller keeps its own reference and frees it"
+  // -- correct for Value::asString, which does free -- but a freshly created
+  // string has no other owner, so duplicating it left the refcount permanently
+  // one too high. Every JS string built through this layer on QuickJS leaked.
+  static String adopt(Runtime& runtime, JSValue value) {
+    String result;
+    result.storage_ = std::make_shared<quickjsengine::ValueStorage>(
+        quickjsengine::ValueStorage::Kind::QuickJS);
+    result.storage_->context = runtime.context();
+    result.storage_->value = value;
+    return result;
+  }
   static String createFromUtf8(Runtime& runtime, const char* value) {
-    return String(runtime, JS_NewString(runtime.context(), value != nullptr ? value : ""));
+    return adopt(runtime, JS_NewString(runtime.context(), value != nullptr ? value : ""));
   }
   static String createFromUtf8(Runtime& runtime, const std::string& value) {
-    return String(runtime, JS_NewStringLen(runtime.context(), value.data(), value.size()));
+    return adopt(runtime, JS_NewStringLen(runtime.context(), value.data(), value.size()));
   }
   static String createFromUtf8(Runtime& runtime, const uint8_t* value, size_t length) {
-    return String(runtime,
-                  JS_NewStringLen(runtime.context(), reinterpret_cast<const char*>(value), length));
+    return adopt(runtime,
+                 JS_NewStringLen(runtime.context(), reinterpret_cast<const char*>(value), length));
   }
   std::string utf8(Runtime& runtime) const;
   JSValue local(Runtime& runtime) const;
@@ -366,12 +551,31 @@ class Value {
   }
   bool isObject() const { return isQuickJS() && JS_IsObject(jsValue()); }
   bool isString() const { return isQuickJS() && JS_IsString(jsValue()); }
-  bool isBigInt() const { return isQuickJS() && JS_IsBigInt(jsValue()); }
+  bool isBigInt() const {
+    return isQuickJS() && quickjsengine::isBigInt(jsContext(), jsValue());
+  }
   bool isSymbol() const { return isQuickJS() && JS_IsSymbol(jsValue()); }
 
   Object asObject(Runtime& runtime) const;
+  // Borrowing is a V8-only capability; see jsi/v8/V8Runtime.h. Everywhere else
+  // this is the owning conversion, and callers get the stronger guarantee.
+  // Declared, not defined: Object is still incomplete here, so a body calling
+  // asObject would not compile. Defined next to asObject in QuickJSValue.cpp.
+  Object asObjectBorrowed(Runtime& runtime) const;
   String asString(Runtime& runtime) const;
   BigInt getBigInt(Runtime& runtime) const;
+
+  // Read the UTF-8 of a string value without materialising a String. See the
+  // comment on the V8 declaration: String is an owning type, and building one
+  // costs a make_shared plus a JS_DupValue/JS_FreeValue pair for a handle that
+  // dies two statements later.
+  std::string utf8(Runtime& runtime) const;
+
+  // Create a string value, adopting the reference JS_NewStringLen returns
+  // instead of duplicating it. QuickJS strings are refcounted rather than
+  // scope-rooted, so unlike V8 this still needs owning storage -- but it does
+  // not need a second reference.
+  static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
 
   JSValue local(Runtime& runtime) const {
     switch (kind_) {
@@ -431,6 +635,120 @@ class Value {
   std::shared_ptr<quickjsengine::ValueStorage> storage_;
 };
 
+// Defined here rather than with the class: constructing the shared_ptr needs
+// Value to be complete.
+inline WeakObject::WeakObject(Runtime& runtime, const Value& value) {
+  JSContext* ctx = runtime.context();
+  JSValue target = value.local(runtime);
+  storage_ =
+      std::make_shared<quickjsengine::ValueStorage>(quickjsengine::ValueStorage::Kind::QuickJS);
+  storage_->context = ctx;
+
+  if (!JS_IsObject(target) && !JS_IsSymbol(target)) {
+    storage_->value = target;
+    return;
+  }
+
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue weakRefCtor = JS_GetPropertyStr(ctx, global, "WeakRef");
+  JS_FreeValue(ctx, global);
+  if (!JS_IsFunction(ctx, weakRefCtor)) {
+    JS_FreeValue(ctx, weakRefCtor);
+    storage_->value = target;
+    return;
+  }
+  JSValue args[1] = {target};
+  JSValue weakRef = JS_CallConstructor(ctx, weakRefCtor, 1, args);
+  JS_FreeValue(ctx, weakRefCtor);
+  if (JS_IsException(weakRef)) {
+    // Nothing may throw out of here: this runs from napi_create_reference,
+    // which has no way to report it. Falling back to a strong handle keeps the
+    // reference usable; it merely stops being collectable.
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_FreeValue(ctx, weakRef);
+    storage_->value = target;
+    return;
+  }
+  JS_FreeValue(ctx, target);
+  storage_->value = weakRef;
+  isWeakRef_ = true;
+}
+
+inline Value WeakObject::lock(Runtime& runtime) const {
+  if (storage_ == nullptr) {
+    return Value::undefined();
+  }
+  if (!isWeakRef_) {
+    return Value::fromStorage(storage_);
+  }
+  JSValue target = JS_WeakRef_Deref(runtime.context(), storage_->value);
+  Value result(runtime, target);
+  JS_FreeValue(runtime.context(), target);
+  return result;
+}
+
+inline JSError::JSError(Runtime& runtime, const std::string& message,
+                        const Value& value, std::string stack)
+    : std::runtime_error(message),
+      value_(std::make_shared<Value>(runtime, value)),
+      stack_(std::move(stack)) {}
+
+namespace quickjsengine {
+
+// Take the context's pending exception and wrap it in a JSError that CARRIES
+// the thrown value, not just its text.
+//
+// Rebuilding an error from its message loses two things the Node-API shim
+// needs: the error's type (a SyntaxError arrives as the string
+// "SyntaxError: ..." and reaches JS as a plain Error) and anything the runtime
+// attached to it -- NativeScriptException hangs the originating Java throwable
+// off `nativeException`, and dropping it makes `e.nativeException.getStackTrace()`
+// undefined. This mirrors what the V8 and Hermes layers already do.
+//
+// Additive: JSError's payload was previously never populated by this engine and
+// every existing caller reads only what(), which is unchanged.
+inline JSError caughtError(Runtime& runtime, const char* fallback) {
+  JSContext* context = runtime.context();
+  JSValue exception = JS_GetException(context);
+  // JS_GetException yields null when nothing is pending, which some failure
+  // paths (a bad atom, an out-of-range index) can reach. Reporting the string
+  // "null" as the message would be worse than the caller's fallback.
+  if (JS_IsNull(exception) || JS_IsUninitialized(exception)) {
+    JS_FreeValue(context, exception);
+    return JSError(runtime, fallback != nullptr ? fallback : "QuickJS call failed.");
+  }
+  std::string message = valueToUtf8(context, exception);
+  std::string stack;
+  if (JS_IsObject(exception)) {
+    JSValue stackValue = JS_GetPropertyStr(context, exception, "stack");
+    if (JS_IsString(stackValue)) {
+      stack = valueToUtf8(context, stackValue);
+    }
+    JS_FreeValue(context, stackValue);
+  }
+  Value value(runtime, exception);
+  JS_FreeValue(context, exception);
+  if (message.empty()) {
+    message = fallback != nullptr ? fallback : "QuickJS call failed.";
+  }
+  return JSError(runtime, message, value, std::move(stack));
+}
+
+// Re-throw a JSError into JS, preserving the original thrown value when the
+// error carries one. Without this every error crossing the host boundary was
+// flattened into a TypeError built from its message.
+inline JSValue throwJSError(Runtime& runtime, const JSError& error) {
+  JSContext* context = runtime.context();
+  if (const Value* thrown = error.value()) {
+    if (!thrown->isUndefined() && !thrown->isNull()) {
+      return JS_Throw(context, thrown->local(runtime));
+    }
+  }
+  return throwError(context, error);
+}
+
+}  // namespace quickjsengine
+
 class Object {
  public:
   Object() = default;
@@ -452,12 +770,26 @@ class Object {
                                          quickjsengine::hostObjectTypeToken<T>());
   }
 
+  // A native (Java/ObjC-backed) instance, as opposed to an opaque host object.
+  //
+  // Only V8 distinguishes a masking from a non-masking named interceptor, and
+  // there the difference is large: a native instance carries the class
+  // prototype where the field accessors live, so a masking interceptor would
+  // divert every named read into the trap instead of letting V8 resolve it (and
+  // form a load IC) on the prototype. This backend has no such distinction, so
+  // a native instance is built exactly like any other host object; the separate
+  // name exists so callers can express the intent once, for every engine.
+  template <typename T>
+  static Object createNativeInstanceHostObject(Runtime& runtime, std::shared_ptr<T> host) {
+    return createFromHostObject<T>(runtime, std::move(host));
+  }
+
   Value getProperty(Runtime& runtime, const char* name) const {
     JSValue object = local(runtime);
     JSValue result = JS_GetPropertyStr(runtime.context(), object, name != nullptr ? name : "");
     JS_FreeValue(runtime.context(), object);
     if (JS_IsException(result)) {
-      throw JSError(runtime, "QuickJS property get failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS property get failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
@@ -478,12 +810,27 @@ class Object {
     }
     JS_FreeValue(runtime.context(), object);
     if (JS_IsException(result)) {
-      throw JSError(runtime, "QuickJS property get failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS property get failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
     return value;
   }
+  // Borrowing is a V8-only capability; see jsi/v8/V8Runtime.h.
+  //
+  // The name exists on every engine so the Node-API shim's read paths stay
+  // engine-neutral, but this engine cannot honour it: a read here hands back a
+  // handle the caller must keep alive (QuickJS returns a +1 refcount, JSC needs
+  // JSValueProtect, Hermes owns its jsi::Value), and a bare handle rooted only
+  // by an ambient scope has no equivalent. So these are the owning reads, and
+  // callers get the stronger guarantee.
+  Value getPropertyBorrowed(Runtime& runtime, const char* name) const {
+    return getProperty(runtime, name);
+  }
+  Value getPropertyBorrowed(Runtime& runtime, const Value& key) const {
+    return getProperty(runtime, key);
+  }
+
   Object getPropertyAsObject(Runtime& runtime, const char* name) const {
     return getProperty(runtime, name).asObject(runtime);
   }
@@ -496,7 +843,7 @@ class Object {
         JS_SetPropertyStr(runtime.context(), object, name != nullptr ? name : "", localValue);
     JS_FreeValue(runtime.context(), object);
     if (status < 0) {
-      throw JSError(runtime, "QuickJS property set failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS property set failed.");
     }
   }
   void setProperty(Runtime& runtime, const char* name, const String& value) {
@@ -530,7 +877,7 @@ class Object {
     }
     JS_FreeValue(runtime.context(), object);
     if (status < 0) {
-      throw JSError(runtime, "QuickJS property set failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS property set failed.");
     }
   }
   bool hasProperty(Runtime& runtime, const char* name) const {
@@ -549,13 +896,16 @@ class Object {
   }
   bool isArray(Runtime& runtime) const {
     JSValue object = local(runtime);
-    int result = JS_IsArray(object);
+    bool result = quickjsengine::isArray(runtime.context(), object);
     JS_FreeValue(runtime.context(), object);
-    return result > 0;
+    return result;
   }
   bool isArrayBuffer(Runtime& runtime) const {
     JSValue object = local(runtime);
-    bool result = JS_IsArrayBuffer(object);
+    // JS_IsArrayBuffer2 rather than JS_IsArrayBuffer: the same predicate, but
+    // it is the spelling present in every vendored QuickJS here. Classic
+    // QuickJS (Android's non-NG build) has no JS_IsArrayBuffer at all.
+    bool result = JS_IsArrayBuffer2(runtime.context(), object) != 0;
     JS_FreeValue(runtime.context(), object);
     return result;
   }
@@ -577,6 +927,36 @@ class Object {
     }
     return std::static_pointer_cast<T>(holder->hostObject);
   }
+  // ---- Native state -------------------------------------------------------
+  //
+  // See jsi/v8/V8Runtime.h for what this is for. QuickJS gets it from its own
+  // per-object opaque slot: objects created for a host constructor's `this`
+  // are built with JS_NewObjectProtoClass and a dedicated class that carries
+  // no exotic table (so ordinary property access on them is unchanged) but
+  // does carry an opaque pointer and a finalizer. Reading the payload back is
+  // then a field load plus a class-id compare, where the old __nsWrap path did
+  // two full prototype-chain walks.
+  //
+  // Node-API allows napi_wrap on any object, including a plain `{}` JS made
+  // itself, which is not class-backed. Those fall back to a non-enumerable
+  // property under an interned atom, read own-only with JS_GetOwnProperty.
+  //
+  // In both cases the payload is a HostObject released when the object is
+  // collected, so finalizer timing is what it was.
+  template <typename T>
+  void setNativeState(Runtime& runtime, std::shared_ptr<T> state) {
+    setNativeStateWithToken(runtime, std::static_pointer_cast<HostObject>(std::move(state)),
+                            quickjsengine::hostObjectTypeToken<T>());
+  }
+
+  template <typename T>
+  std::shared_ptr<T> getNativeState(Runtime& runtime) const {
+    std::shared_ptr<HostObject> host =
+        nativeStateOf(runtime, quickjsengine::hostObjectTypeToken<T>());
+    if (host == nullptr) return nullptr;
+    return std::static_pointer_cast<T>(std::move(host));
+  }
+
   JSValue local(Runtime& runtime) const { return JS_DupValue(runtime.context(), storage_->value); }
   operator Value() const { return Value::fromStorage(storage_); }
 
@@ -590,6 +970,9 @@ class Object {
       : storage_(std::move(storage)) {}
   static Object createFromHostObjectWithToken(Runtime& runtime, std::shared_ptr<HostObject> host,
                                               const void* typeToken);
+  void setNativeStateWithToken(Runtime& runtime, std::shared_ptr<HostObject> host,
+                               const void* typeToken);
+  std::shared_ptr<HostObject> nativeStateOf(Runtime& runtime, const void* typeToken) const;
   quickjsengine::HostObjectHolder* hostObjectHolder(Runtime& runtime) const;
   std::shared_ptr<quickjsengine::ValueStorage> storage_;
 };
@@ -600,6 +983,27 @@ class Function : public Object {
   explicit Function(Object object) : Object(std::move(object.storage_)) {}
   static Function createFromHostFunction(Runtime& runtime, const PropNameID& name, unsigned int,
                                          HostFunctionType callback);
+
+  // Like createFromHostFunction, but the result may be used with `new`, and its
+  // `prototype` property is a writable object.
+  //
+  // createFromHostFunction builds the function with JS_NewCFunctionData, which
+  // produces an object whose constructor bit is clear and which has no
+  // `prototype` property at all -- so `new Ctor()` throws "not a constructor"
+  // and napi_define_class cannot reach, let alone reassign, `Ctor.prototype`.
+  // The Android runtime's MetadataNode chains class prototypes with a plain
+  // `ctor.prototype = ...` assignment, so a read-only (or absent) prototype
+  // silently drops the whole inheritance chain.
+  //
+  // The function is built from the engine's own JSClass instead: its JSClassCall
+  // receives QuickJS' call flags, so the trampoline can tell `new` from a plain
+  // call and synthesise the receiver the way OrdinaryCreateFromConstructor does.
+  // No JS wrapper is involved, so no extra frame appears in stack traces --
+  // which matters, because the runtime resolves a Worker's module directory by
+  // reading `frames[2]`.
+  static Function createFromHostConstructor(Runtime& runtime, const PropNameID& name,
+                                            unsigned int paramCount,
+                                            HostFunctionType callback);
   Value call(Runtime& runtime, const Value* args, size_t count) const {
     JSValue function = local(runtime);
     JSValue global = JS_GetGlobalObject(runtime.context());
@@ -616,7 +1020,7 @@ class Function : public Object {
     JS_FreeValue(runtime.context(), global);
     JS_FreeValue(runtime.context(), function);
     if (JS_IsException(result)) {
-      throw JSError(runtime, quickjsengine::currentExceptionMessage(runtime.context()));
+      throw quickjsengine::caughtError(runtime, "QuickJS function call failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
@@ -628,9 +1032,20 @@ class Function : public Object {
   Value call(Runtime& runtime, std::nullptr_t, size_t) const {
     return call(runtime, static_cast<const Value*>(nullptr), 0);
   }
-  template <size_t N>
-  Value call(Runtime& runtime, const Value (&args)[N], size_t count) const {
-    return call(runtime, static_cast<const Value*>(args), count);
+  // `count` is deduced rather than fixed to size_t on purpose.
+  //
+  // With a `size_t` parameter, `fn.call(rt, args, 2)` needed an int -> size_t
+  // conversion here while the variadic overload below matched exactly -- so the
+  // variadic won, and silently reinterpreted (array, count) as a two-argument
+  // JS call passing the array and the number. The array then decayed to a
+  // pointer and converted to `bool`, so console.log(str) came out as "true".
+  // Deducing the count makes this overload exact too, and partial ordering then
+  // prefers it over the pack. V8's backend has carried this fix since the
+  // Node-API shim work; it was never propagated here.
+  template <size_t N, typename Count,
+            typename = std::enable_if_t<std::is_integral_v<std::decay_t<Count>>>>
+  Value call(Runtime& runtime, const Value (&args)[N], Count count) const {
+    return call(runtime, static_cast<const Value*>(args), static_cast<size_t>(count));
   }
   template <typename... Args>
   Value call(Runtime& runtime, Args&&... args) const {
@@ -654,7 +1069,7 @@ class Function : public Object {
     JS_FreeValue(runtime.context(), thisValue);
     JS_FreeValue(runtime.context(), function);
     if (JS_IsException(result)) {
-      throw JSError(runtime, quickjsengine::currentExceptionMessage(runtime.context()));
+      throw quickjsengine::caughtError(runtime, "QuickJS function call failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
@@ -674,7 +1089,7 @@ class Function : public Object {
     }
     JS_FreeValue(runtime.context(), function);
     if (JS_IsException(result)) {
-      throw JSError(runtime, "QuickJS constructor call failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS constructor call failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
@@ -683,9 +1098,20 @@ class Function : public Object {
   Value callAsConstructor(Runtime& runtime, std::nullptr_t, size_t) const {
     return callAsConstructor(runtime, static_cast<const Value*>(nullptr), 0);
   }
-  template <size_t N>
-  Value callAsConstructor(Runtime& runtime, const Value (&args)[N], size_t count) const {
-    return callAsConstructor(runtime, static_cast<const Value*>(args), count);
+  // `count` is deduced rather than fixed to size_t on purpose.
+  //
+  // With a `size_t` parameter, `fn.call(rt, args, 2)` needed an int -> size_t
+  // conversion here while the variadic overload below matched exactly -- so the
+  // variadic won, and silently reinterpreted (array, count) as a two-argument
+  // JS call passing the array and the number. The array then decayed to a
+  // pointer and converted to `bool`, so console.log(str) came out as "true".
+  // Deducing the count makes this overload exact too, and partial ordering then
+  // prefers it over the pack. V8's backend has carried this fix since the
+  // Node-API shim work; it was never propagated here.
+  template <size_t N, typename Count,
+            typename = std::enable_if_t<std::is_integral_v<std::decay_t<Count>>>>
+  Value callAsConstructor(Runtime& runtime, const Value (&args)[N], Count count) const {
+    return callAsConstructor(runtime, static_cast<const Value*>(args), static_cast<size_t>(count));
   }
   template <typename... Args>
   Value callAsConstructor(Runtime& runtime, Args&&... args) const {
@@ -709,12 +1135,17 @@ class Array : public Object {
     Value length = getProperty(runtime, "length");
     return length.isNumber() ? static_cast<size_t>(std::max<double>(0, length.getNumber())) : 0;
   }
+  // See Object::getPropertyBorrowed.
+  Value getValueAtIndexBorrowed(Runtime& runtime, size_t index) const {
+    return getValueAtIndex(runtime, index);
+  }
+
   Value getValueAtIndex(Runtime& runtime, size_t index) const {
     JSValue object = local(runtime);
     JSValue result = JS_GetPropertyUint32(runtime.context(), object, static_cast<uint32_t>(index));
     JS_FreeValue(runtime.context(), object);
     if (JS_IsException(result)) {
-      throw JSError(runtime, "QuickJS array get failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS array get failed.");
     }
     Value value(runtime, result);
     JS_FreeValue(runtime.context(), result);
@@ -727,7 +1158,7 @@ class Array : public Object {
         JS_SetPropertyUint32(runtime.context(), object, static_cast<uint32_t>(index), localValue);
     JS_FreeValue(runtime.context(), object);
     if (status < 0) {
-      throw JSError(runtime, "QuickJS array set failed.");
+      throw quickjsengine::caughtError(runtime, "QuickJS array set failed.");
     }
   }
   void setValueAtIndex(Runtime& runtime, size_t index, const String& value) {

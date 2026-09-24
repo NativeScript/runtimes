@@ -55,12 +55,30 @@ endif ()
 get_filename_component(REPO_ROOT "${PROJECT_SOURCE_DIR}/../../../.." ABSOLUTE)
 set(NS_ROOT "${REPO_ROOT}/NativeScript")
 set(NS_RUNTIME_DIR "${NS_ROOT}/runtime")
-set(NS_ANDROID_RUNTIME_DIR "${NS_RUNTIME_DIR}/android")
 set(NS_RUNTIME_MODULES_DIR "${NS_RUNTIME_DIR}/modules")
 set(NS_NAPI_DIR "${NS_ROOT}/napi")
 # Third-party JS engine sources shared by the Apple and Android builds.
 set(VENDOR_DIR "${REPO_ROOT}/vendor")
-set(NS_JNI_NAPI_DIR "${NS_ROOT}/ffi/jni/napi")
+# Two complete, parallel runtimes. NS_BINDING selects which one is compiled;
+# they are never built together, and neither is aware of the other.
+#
+#   napi  runtime/android/napi + ffi/jni/napi -- the reference implementation,
+#         a Node-API program throughout.
+#   jsi   runtime/android/jsi  + ffi/jni/jsi  -- the same runtime written
+#         directly against nativescript::engine, with no Node-API anywhere.
+#
+# Both consume NativeScript/jsi/ (the engine:: backends). Selecting one swaps
+# the whole runtime and its JNI interop layer, not a shim under a fixed runtime.
+if(NOT DEFINED NS_BINDING)
+    set(NS_BINDING "napi")
+endif()
+if(NOT NS_BINDING STREQUAL "napi" AND NOT NS_BINDING STREQUAL "jsi")
+    message(FATAL_ERROR "NS_BINDING must be 'napi' or 'jsi', got '${NS_BINDING}'")
+endif()
+message(STATUS "# NativeScript binding layer: ${NS_BINDING}")
+
+set(NS_ANDROID_RUNTIME_DIR "${NS_RUNTIME_DIR}/android/${NS_BINDING}")
+set(NS_JNI_NAPI_DIR "${NS_ROOT}/ffi/jni/${NS_BINDING}")
 
 # Command info: https://cmake.org/cmake/help/v3.4/command/include_directories.html
 include_directories(
@@ -115,15 +133,72 @@ file(GLOB_RECURSE JNI_NAPI_FILES
         "${NS_JNI_NAPI_DIR}/*.cpp"
 )
 
-set(MODULE_FILES
-        ${NS_RUNTIME_MODULES_DIR}/url/URL.cpp
-        ${NS_RUNTIME_MODULES_DIR}/url/URLSearchParams.cpp
-        ${NS_RUNTIME_MODULES_DIR}/url/URLPattern.cpp
-        ${NS_RUNTIME_MODULES_DIR}/url/ada/ada.cpp
-)
-# modules/url: URL, URLSearchParams, URLPattern (backed by vendored ada)
+# Standalone unit tests live next to what they test and have their own main();
+# they are built by scripts/, never linked into the runtime.
+list(FILTER JNI_NAPI_FILES EXCLUDE REGEX "_test\\.cpp$")
+
+if (NS_BINDING STREQUAL "napi")
+    set(MODULE_FILES
+            ${NS_RUNTIME_MODULES_DIR}/url/URL.cpp
+            ${NS_RUNTIME_MODULES_DIR}/url/URLSearchParams.cpp
+            ${NS_RUNTIME_MODULES_DIR}/url/URLPattern.cpp
+            ${NS_RUNTIME_MODULES_DIR}/url/ada/ada.cpp
+    )
+    # modules/url: URL, URLSearchParams, URLPattern (backed by vendored ada)
+else ()
+    # runtime/modules/url is shared verbatim with the Apple build and is a
+    # Node-API program (URL::Init takes a napi_env). It must not be forked, so
+    # the jsi runtime ships no URL globals until they gain an engine:: front
+    # end. See runtime/android/jsi/modules/AndroidRuntimeModules.h.
+    set(MODULE_FILES)
+endif ()
 
 set(SOURCES ${ANDROID_RUNTIME_FILES} ${JNI_NAPI_FILES} ${MODULE_FILES})
+
+if (NS_BINDING STREQUAL "jsi")
+    # The engine:: layer. ${NS_ROOT} on the include path is what makes the
+    # rooted includes ("jsi/v8/V8Runtime.h") resolve. Note this shadows an
+    # angle-include of a jsi/ header from an engine that ships one -- Hermes
+    # ships <jsi/jsi.h> -- so the shared layer's own includes stay quoted and
+    # rooted.
+    set(NS_JSI_DIR "${NS_ROOT}/jsi")
+    include_directories(${NS_ROOT})
+
+    # The inspector implements the Chrome DevTools Protocol against v8_inspector
+    # and pumps V8's message loop directly, so it is V8-specific by construction.
+    # The jsi runtime has no debugger until that capability is expressed on the
+    # engine layer itself.
+    add_compile_definitions(NS_NO_INSPECTOR)
+
+    if (V8 OR V8_10 OR V8_11 OR V8_13)
+        set(SOURCES ${SOURCES}
+                ${NS_JSI_DIR}/v8/V8Runtime.cpp
+                ${NS_JSI_DIR}/v8/V8Value.cpp
+                ${NS_JSI_DIR}/v8/V8HostObjects.cpp)
+        add_compile_definitions(TARGET_ENGINE_V8)
+    elseif (JSC)
+        set(SOURCES ${SOURCES}
+                ${NS_JSI_DIR}/jsc/JSCRuntime.cpp
+                ${NS_JSI_DIR}/jsc/JSCValue.cpp
+                ${NS_JSI_DIR}/jsc/JSCHostObjects.cpp)
+        add_compile_definitions(TARGET_ENGINE_JSC)
+    elseif (QUICKJS OR QUICKJS_NG)
+        set(SOURCES ${SOURCES}
+                ${NS_JSI_DIR}/quickjs/QuickJSRuntime.cpp
+                ${NS_JSI_DIR}/quickjs/QuickJSValue.cpp
+                ${NS_JSI_DIR}/quickjs/QuickJSHostObjects.cpp)
+        add_compile_definitions(TARGET_ENGINE_QUICKJS)
+    elseif (HERMES OR SHERMES)
+        # Hermes contributes no engine-layer sources: jsi/hermes is a header-only
+        # adapter over the real facebook::jsi that nativescript::engine is shaped
+        # after.
+        add_compile_definitions(TARGET_ENGINE_HERMES)
+    else ()
+        message(FATAL_ERROR
+                "bindingLayer=jsi has no engine layer for this engine. PrimJS is "
+                "deliberately unsupported there; use -PbindingLayer=napi for it.")
+    endif ()
+endif ()
 
 if (QUICKJS OR QUICKJS_NG)
     # quickjs-ng, NativeScript-patched, vendored at the repo root and shared with
@@ -141,10 +216,13 @@ if (QUICKJS OR QUICKJS_NG)
             ${QJS_SOURCE_DIR}/libunicode.c
             ${QJS_SOURCE_DIR}/quickjs.c
             ${QJS_SOURCE_DIR}/dtoa.c
-            # napi
-            ${VENDOR_DIR}/quickjs/quickjs-api.c
-            ${NS_NAPI_DIR}/quickjs/jsr.cpp
     )
+
+    if (NS_BINDING STREQUAL "napi")
+        set(SOURCES ${SOURCES}
+                ${VENDOR_DIR}/quickjs/quickjs-api.c
+                ${NS_NAPI_DIR}/quickjs/jsr.cpp)
+    endif ()
 
     include_directories(
             ${NS_NAPI_DIR}/quickjs
@@ -194,9 +272,9 @@ if (HERMES OR SHERMES)
             ${NS_NAPI_DIR}/hermes
             ${NS_NAPI_DIR}/common
     )
-    set(SOURCES ${SOURCES}
-            ${NS_NAPI_DIR}/hermes/jsr.cpp
-    )
+    if (NS_BINDING STREQUAL "napi")
+        set(SOURCES ${SOURCES} ${NS_NAPI_DIR}/hermes/jsr.cpp)
+    endif ()
 endif ()
 
 if (JSC)
@@ -209,10 +287,11 @@ if (JSC)
             # framework, whose JSC is a different build with a different ABI.
             ${VENDOR_DIR}/jsc/include
     )
-    set(SOURCES ${SOURCES}
-            ${VENDOR_DIR}/jsc/jsc-api.cpp
-            ${NS_NAPI_DIR}/jsc/jsr.cpp
-    )
+    if (NS_BINDING STREQUAL "napi")
+        set(SOURCES ${SOURCES}
+                ${VENDOR_DIR}/jsc/jsc-api.cpp
+                ${NS_NAPI_DIR}/jsc/jsr.cpp)
+    endif ()
 endif ()
 
 if (V8)
@@ -241,19 +320,25 @@ if (V8)
 
     if (NOT OPTIMIZED_BUILD OR OPTIMIZED_WITH_INSPECTOR_BUILD)
         add_definitions(-DAPPLICATION_IN_DEBUG)
-        set(
-                SOURCES
-                ${SOURCES}
-                ${VENDOR_DIR}/v8/v8_inspector/Utils.cpp
-                ${VENDOR_DIR}/v8/v8_inspector/ns-v8-tracing-agent-impl.cpp
-        )
+        # The tracing agent is part of the inspector, which the jsi runtime does
+        # not have (NS_NO_INSPECTOR above): its sources include the runtime's
+        # JsV8InspectorClient.h, which only exists in the napi tree.
+        if (NOT NS_BINDING STREQUAL "jsi")
+            set(
+                    SOURCES
+                    ${SOURCES}
+                    ${VENDOR_DIR}/v8/v8_inspector/Utils.cpp
+                    ${VENDOR_DIR}/v8/v8_inspector/ns-v8-tracing-agent-impl.cpp
+            )
+        endif ()
     endif ()
 
-    set(SOURCES ${SOURCES}
-            ${VENDOR_DIR}/v8/v8-api.cpp
-            ${NS_NAPI_DIR}/v8/jsr.cpp
-            ${VENDOR_DIR}/v8/SimpleAllocator.cpp
-    )
+    if (NS_BINDING STREQUAL "napi")
+        set(SOURCES ${SOURCES}
+                ${VENDOR_DIR}/v8/v8-api.cpp
+                ${NS_NAPI_DIR}/v8/jsr.cpp
+                ${VENDOR_DIR}/v8/SimpleAllocator.cpp)
+    endif ()
 
 
     set(COMMON_CMAKE_ARGUMENTS "${COMMON_CMAKE_ARGUMENTS} -DV8_ENABLE_REGEXP_INTERPRETER_THREADED_DISPATCH -DV8_EMBEDDED_BUILTINS")

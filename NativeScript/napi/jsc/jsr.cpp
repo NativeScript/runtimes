@@ -21,67 +21,6 @@
 #endif
 
 #ifdef __ANDROID__
-// Forces a full, synchronous collection. Declared in
-// JavaScriptCore/ExtraSymbolsForTAPI.h and exported by the prebuilt
-// libJavaScriptCore, but not reachable through any public header.
-//
-// Unlike JSGarbageCollect, this entry point does NOT take the VM's API lock in
-// the vendored jsc-android build -- it jumps straight to Heap::collectNow, and
-// Heap::requestCollection opens with
-//
-//   RELEASE_ASSERT(vm().atomStringTable() == Thread::current().atomStringTable())
-//
-// The VM's AtomStringTable is only installed on a thread by JSLock::lock, so
-// the caller must already hold the API lock. See JscCollectSynchronously below
-// for why that is not automatic inside a napi callback.
-extern "C" void JSSynchronousGarbageCollectForDebugging(JSContextRef);
-
-namespace {
-
-// JSC hands a property callback the context with the API lock still held, so
-// this runs on the locked side and may force the collection.
-JSValueRef JscSyncGcGetProperty(JSContextRef ctx, JSObjectRef, JSStringRef,
-                                JSValueRef*) {
-  JSSynchronousGarbageCollectForDebugging(ctx);
-  return JSValueMakeUndefined(ctx);
-}
-
-JSClassRef JscSyncGcClass() {
-  static JSClassRef cls = [] {
-    JSClassDefinition definition{kJSClassDefinitionEmpty};
-    definition.className = "NativeScriptSynchronousGC";
-    definition.getProperty = JscSyncGcGetProperty;
-    return JSClassCreate(&definition);
-  }();
-  return cls;
-}
-
-// Runs a full collection that has actually finished by the time it returns.
-//
-// The detour through a property read is not decoration. JSC's C API takes the
-// VM's API lock inside each entry point, but JSCallbackObject wraps a
-// callAsFunction callback in JSLock::DropAllLocks -- so for the whole body of a
-// napi function callback (which is what global.gc() is) this thread holds no
-// lock and does not have the VM's AtomStringTable installed. Calling
-// JSSynchronousGarbageCollectForDebugging from there trips the RELEASE_ASSERT
-// quoted above and aborts the process.
-//
-// Property callbacks are not wrapped in DropAllLocks, so entering through
-// JSObjectGetProperty puts us back inside the lock, which is exactly the state
-// the collector requires. Verified on-device: the same probe reports the VM's
-// table installed in getProperty and initialize, and the thread's default table
-// in callAsFunction.
-void JscCollectSynchronously(JSGlobalContextRef context) {
-  JSObjectRef trigger = JSObjectMake(context, JscSyncGcClass(), nullptr);
-  JSStringRef name = JSStringCreateWithUTF8CString("collect");
-  JSObjectGetProperty(context, trigger, name, nullptr);
-  JSStringRelease(name);
-}
-
-}  // namespace
-#endif
-
-#ifdef __ANDROID__
 // Native trampoline for JSC's unhandled-promise-rejection callback. JSC invokes
 // it with (promise, reason); we forward to the JS-side
 // globalThis.onUnhandledPromiseRejectionTracker (installed by ts_helpers.js),
@@ -122,15 +61,12 @@ napi_status js_create_napi_env(napi_env* env, jsr_ns_runtime runtime) {
   napi_create_function(
       *env, "gc", strlen("gc"),
       [](napi_env env, napi_callback_info info) -> napi_value {
-        // JSGarbageCollect only hints -- JSC may defer or skip the
-        // collection, so unreachable objects need not be gone by the time it
-        // returns, and the timers spec "frees up resources after complete"
-        // fails. Retrying it does not help; repeated hints are still hints.
-#ifdef __ANDROID__
-        JscCollectSynchronously(env->context);
-#else
+        // JSGarbageCollect only hints: JSC may defer or decline the collection,
+        // so an unreachable object need not be reclaimed by the time this
+        // returns. That is how the engine is designed rather than a defect, and
+        // the specs that observe reclamation account for it instead of forcing
+        // a collection through JSC's debug-only synchronous entry point.
         JSGarbageCollect(env->context);
-#endif
         napi_value undefined;
         napi_get_undefined(env, &undefined);
         return undefined;

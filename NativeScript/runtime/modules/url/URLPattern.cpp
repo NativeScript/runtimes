@@ -496,7 +496,7 @@ napi_value URLPattern::Exec(napi_env env, napi_callback_info info) {
 }
 
 void URLPattern::Init(napi_env env, napi_value global) {
-    NAPI_PREAMBLE
+    NS_NAPI_PREAMBLE
     napi_value ctor;
     static const int instance_prop_count = 11;
     napi_property_descriptor properties[instance_prop_count] = {

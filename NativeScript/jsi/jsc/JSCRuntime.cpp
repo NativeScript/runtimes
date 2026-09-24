@@ -19,7 +19,7 @@ Value Runtime::evaluateJavaScript(std::shared_ptr<StringBuffer> buffer,
   JSStringRelease(source);
   JSStringRelease(url);
   if (exception != nullptr) {
-    throw JSError(*this, jscengine::valueToUtf8(context(), exception));
+    throw jscengine::toJSError(*this, exception);
   }
   return Value(*this, result);
 }
