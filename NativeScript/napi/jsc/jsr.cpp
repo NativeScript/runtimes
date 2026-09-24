@@ -67,7 +67,6 @@ napi_status js_create_napi_env(napi_env* env, jsr_ns_runtime runtime) {
         // the specs that observe reclamation account for it instead of forcing
         // a collection through JSC's debug-only synchronous entry point.
         JSGarbageCollect(env->context);
-#endif
         napi_value undefined;
         napi_get_undefined(env, &undefined);
         return undefined;
