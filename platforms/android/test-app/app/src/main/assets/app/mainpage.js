@@ -32,6 +32,7 @@ require("./tests/tests");
 require("./tests/testMethodResolution");
 require("./tests/testOverloadResolutionRegression");
 require("./tests/testReturnTypeResolution");
+require("./tests/testSingleOverloadResolution");
 require("./tests/testMethodResolutionWithNulls");
 require("./tests/testArrays");
 require("./tests/testsForRuntimeBindingGenerator");
