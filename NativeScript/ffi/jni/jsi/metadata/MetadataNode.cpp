@@ -2285,11 +2285,14 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                 break;
             }
         }
+        constexpr int kMetadataMismatch = -1;
+        constexpr int kMetadataUnknown = 0;
+        constexpr int kMetadataMatch = 1;
         auto metadataTypesMatch = [&](MetadataEntry &candidate,
-                                      std::vector<jclass> &parameterClasses) {
+                                      std::vector<jclass> &parameterClasses) -> int {
             const auto signature = candidate.getSig();
             if (signature.empty() || signature[0] != '(') {
-                return false;
+                return kMetadataMismatch;
             }
 
             std::vector<std::string> parameterTypes;
@@ -2298,7 +2301,7 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                 const size_t start = index;
                 if (signature[index] == 'L') {
                     const auto end = signature.find(';', index);
-                    if (end == std::string::npos) return false;
+                    if (end == std::string::npos) return kMetadataMismatch;
                     index = end + 1;
                 } else if (signature[index] == '[') {
                     do {
@@ -2306,10 +2309,10 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                     } while (index < signature.size() && signature[index] == '[');
                     if (index < signature.size() && signature[index] == 'L') {
                         const auto end = signature.find(';', index);
-                        if (end == std::string::npos) return false;
+                        if (end == std::string::npos) return kMetadataMismatch;
                         index = end + 1;
                     } else if (index >= signature.size()) {
-                        return false;
+                        return kMetadataMismatch;
                     } else {
                         index++;
                     }
@@ -2320,14 +2323,19 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
             }
 
             if (candidate.isExtensionFunction) {
-                if (parameterTypes.empty()) return false;
+                if (parameterTypes.empty()) return kMetadataMismatch;
                 parameterTypes.erase(parameterTypes.begin());
             }
-            if (index >= signature.size() || parameterTypes.size() != argc) return false;
+            if (index >= signature.size() || parameterTypes.size() != argc) return kMetadataMismatch;
 
             parameterClasses.assign(argc, nullptr);
+            bool hasUnknownArgument = false;
             for (size_t i = 0; i < argc; i++) {
                 const auto &parameterType = parameterTypes[i];
+                if (args[i].isNull() || args[i].isUndefined()) {
+                    hasUnknownArgument = true;
+                    continue;
+                }
                 if (parameterType[0] == 'L' || parameterType[0] == '[') {
                     auto expectedName = parameterType;
                     if (expectedName[0] == 'L') {
@@ -2336,24 +2344,30 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                     auto expectedClass = metadataEnv.FindClass(expectedName);
                     if (expectedClass == nullptr) {
                         metadataEnv.ExceptionClear();
-                        return false;
+                        return kMetadataMismatch;
                     }
                     parameterClasses[i] = expectedClass;
                     if (args[i].isString()) {
-                        if (expectedName != "java/lang/String") return false;
+                        if (expectedName != "java/lang/String") return kMetadataMismatch;
                         auto stringClass = metadataEnv.FindClass("java/lang/String");
                         if (stringClass == nullptr) {
                             metadataEnv.ExceptionClear();
-                            return false;
+                            return kMetadataMismatch;
                         }
-                        if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) return false;
+                        if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) return kMetadataMismatch;
                     } else {
-                        if (!args[i].isObject()) return false;
-                        if (MetadataNode::GetNullNode(rt, args[i]) != nullptr) return false;
+                        if (!args[i].isObject()) return kMetadataMismatch;
+                        if (MetadataNode::GetNullNode(rt, args[i]) != nullptr) return kMetadataMismatch;
                         auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(args[i]);
-                        if (actualObject.IsNull()) return false;
+                        if (actualObject.IsNull()) {
+                            // JS array for an array parameter, or a JS value
+                            // without a Java peer: only the lenient
+                            // JsArgConverter can marshal these.
+                            hasUnknownArgument = true;
+                            continue;
+                        }
                         if (parameterType[0] == '[' && expectedName == "[Ljava/lang/Object;" &&
-                            ObjectManager::GetClassName((jobject) actualObject) != expectedName) return false;
+                            ObjectManager::GetClassName((jobject) actualObject) != expectedName) return kMetadataMismatch;
                         bool hasSerializableCandidate = false;
                         for (auto *arityCandidate : arityCandidates) {
                             if (arityCandidate->getSig().find("Ljava/io/Serializable;") != std::string::npos) {
@@ -2361,26 +2375,26 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                                 break;
                             }
                         }
-                        if (expectedName == "java/lang/Object" && !hasSerializableCandidate) return false;
-                        if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                        if (expectedName == "java/lang/Object" && !hasSerializableCandidate) return kMetadataMismatch;
+                        if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return kMetadataMismatch;
                     }
                 } else if (parameterType[0] == 'Z') {
-                    if (!args[i].isBool()) return false;
+                    if (!args[i].isBool()) return kMetadataMismatch;
                 } else if (!args[i].isNumber() ||
                            (parameterType[0] != 'B' && parameterType[0] != 'C' &&
                             parameterType[0] != 'S' && parameterType[0] != 'I' &&
                             parameterType[0] != 'J' && parameterType[0] != 'F' &&
                             parameterType[0] != 'D')) {
-                    return false;
+                    return kMetadataMismatch;
                 }
             }
-            return true;
+            return hasUnknownArgument ? kMetadataUnknown : kMetadataMatch;
         };
         if (!hasNullArgument && selectedCallbackData != nullptr && arityCandidates.size() > 1 && !preserveGenericObject) {
             for (auto *candidate : arityCandidates) {
                 if (candidate->isStatic != first.isStatic) continue;
                 std::vector<jclass> parameterClasses;
-                if (metadataTypesMatch(*candidate, parameterClasses)) {
+                if (metadataTypesMatch(*candidate, parameterClasses) == kMetadataMatch) {
                     metadataCandidateMatches.push_back({candidate, std::move(parameterClasses)});
                 }
             }
@@ -2437,15 +2451,21 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
         }
         if (!hasNullArgument && entry != nullptr && !entry->isExtensionFunction && arityCandidates.size() == 1) {
             std::vector<jclass> parameterClasses;
-            if (metadataTypesMatch(*entry, parameterClasses)) {
+            const int compatibility = metadataTypesMatch(*entry, parameterClasses);
+            if (compatibility == kMetadataMatch) {
                 metadataMatch = entry;
                 metadataSignatureIsUnambiguous = true;
-            } else {
+            } else if (compatibility == kMetadataMismatch) {
+                // Provable mismatch against the only metadata candidate: the
+                // metadata may be stale, so let reflection resolve it.
                 const auto signature = entry->getSig();
                 if (entry->isStatic || signature.find("Ljava/lang/Object;") == std::string::npos) {
                     entry = nullptr;
                 }
             }
+            // kMetadataUnknown: keep the entry (direct call via JsArgConverter
+            // when generator-resolved, reflection otherwise). Reflection can't
+            // marshal JS arrays, so demoting here breaks valid calls.
         }
         if (!hasNullArgument && entry != nullptr && entry->isExtensionFunction) {
             metadataMatch = entry;

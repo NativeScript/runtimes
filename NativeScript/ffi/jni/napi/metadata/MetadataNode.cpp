@@ -2706,11 +2706,14 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                     break;
                 }
             }
+            constexpr int kMetadataMismatch = -1;
+            constexpr int kMetadataUnknown = 0;
+            constexpr int kMetadataMatch = 1;
             auto metadataTypesMatch = [&](MetadataEntry &candidate,
-                                           std::vector<jclass> &parameterClasses) {
+                                           std::vector<jclass> &parameterClasses) -> int {
                 const auto signature = candidate.getSig();
                 if (signature.empty() || signature[0] != '(') {
-                    return false;
+                    return kMetadataMismatch;
                 }
 
                 std::vector<std::string> parameterTypes;
@@ -2719,13 +2722,13 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                     const size_t start = index;
                     if (signature[index] == 'L') {
                         const auto end = signature.find(';', index);
-                        if (end == std::string::npos) return false;
+                        if (end == std::string::npos) return kMetadataMismatch;
                         index = end + 1;
                     } else if (signature[index] == '[') {
                         index++;
                         if (index < signature.size() && signature[index] == 'L') {
                             const auto end = signature.find(';', index);
-                            if (end == std::string::npos) return false;
+                            if (end == std::string::npos) return kMetadataMismatch;
                             index = end + 1;
                         } else {
                             index++;
@@ -2737,16 +2740,23 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                 }
 
                 if (candidate.isExtensionFunction) {
-                    if (parameterTypes.empty()) return false;
+                    if (parameterTypes.empty()) return kMetadataMismatch;
                     parameterTypes.erase(parameterTypes.begin());
                 }
-                if (parameterTypes.size() != argc) return false;
+                if (parameterTypes.size() != argc) return kMetadataMismatch;
 
                 parameterClasses.assign(argc, nullptr);
+                bool hasUnknownArgument = false;
                 for (size_t i = 0; i < argc; i++) {
                     const auto &parameterType = parameterTypes[i];
                     napi_valuetype valueType;
                     napi_typeof(env, argv[i], &valueType);
+                    if (valueType == napi_null || valueType == napi_undefined) {
+                        // JsArgConverter maps null/undefined for any parameter
+                        // type; nothing to check statically.
+                        hasUnknownArgument = true;
+                        continue;
+                    }
                     if (parameterType[0] == 'L' || parameterType[0] == '[') {
                         jclass expectedClass = nullptr;
                         auto expectedName = parameterType;
@@ -2756,34 +2766,40 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                         expectedClass = metadataEnv.FindClass(expectedName);
                         if (expectedClass == nullptr) {
                             metadataEnv.ExceptionClear();
-                            return false;
+                            return kMetadataMismatch;
                         }
                         parameterClasses[i] = expectedClass;
 
                         if (valueType == napi_string) {
                             if (expectedName != "java/lang/String") {
-                                return false;
+                                return kMetadataMismatch;
                             }
                             auto stringClass = metadataEnv.FindClass("java/lang/String");
                             if (stringClass == nullptr) {
                                 metadataEnv.ExceptionClear();
-                                return false;
+                                return kMetadataMismatch;
                             }
                             if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) {
-                                return false;
+                                return kMetadataMismatch;
                             }
                         } else {
-                            if (valueType != napi_object && valueType != napi_function) return false;
+                            if (valueType != napi_object && valueType != napi_function) return kMetadataMismatch;
                             napi_value nullNode = nullptr;
                             if (napi_get_named_property(env, argv[i], PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
                                 !napi_util::is_null_or_undefined(env, nullNode)) {
-                                return false;
+                                return kMetadataMismatch;
                             }
                             auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(argv[i]);
-                            if (actualObject.IsNull()) return false;
+                            if (actualObject.IsNull()) {
+                                // JS array for an array parameter, or a JS value
+                                // without a Java peer: only the lenient
+                                // JsArgConverter can marshal these.
+                                hasUnknownArgument = true;
+                                continue;
+                            }
                             if (parameterType[0] == '[' && expectedName == "[Ljava/lang/Object;") {
                                 if (ObjectManager::GetClassName((jobject) actualObject) != expectedName) {
-                                    return false;
+                                    return kMetadataMismatch;
                                 }
                             }
                             bool hasSerializableCandidate = false;
@@ -2794,21 +2810,21 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                                 }
                             }
                             if (expectedName == "java/lang/Object" && !hasSerializableCandidate) {
-                                return false;
+                                return kMetadataMismatch;
                             }
-                            if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return false;
+                            if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return kMetadataMismatch;
                         }
                     } else if (parameterType[0] == 'Z') {
-                        if (valueType != napi_boolean) return false;
+                        if (valueType != napi_boolean) return kMetadataMismatch;
                     } else if (valueType != napi_number ||
                                (parameterType[0] != 'B' && parameterType[0] != 'C' &&
                                 parameterType[0] != 'S' && parameterType[0] != 'I' &&
                                 parameterType[0] != 'J' && parameterType[0] != 'F' &&
                                 parameterType[0] != 'D')) {
-                        return false;
+                        return kMetadataMismatch;
                     }
                 }
-                return true;
+                return hasUnknownArgument ? kMetadataUnknown : kMetadataMatch;
             };
             if (!hasNullArgument && selectedCallbackData != nullptr && arityCandidates.size() > 1 && !preserveGenericObject) {
                 for (auto *candidate : arityCandidates) {
@@ -2816,7 +2832,7 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                         continue;
                     }
                     std::vector<jclass> parameterClasses;
-                    if (metadataTypesMatch(*candidate, parameterClasses)) {
+                    if (metadataTypesMatch(*candidate, parameterClasses) == kMetadataMatch) {
                         metadataCandidateMatches.push_back({candidate, std::move(parameterClasses)});
                     }
                 }
@@ -2913,15 +2929,26 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
             }
             if (!hasNullArgument && entry != nullptr && !entry->isExtensionFunction && arityCandidates.size() == 1) {
                 std::vector<jclass> parameterClasses;
-                if (metadataTypesMatch(*entry, parameterClasses)) {
+                const int compatibility = metadataTypesMatch(*entry, parameterClasses);
+                if (compatibility == kMetadataMatch) {
                     metadataMatch = entry;
                     metadataSignatureIsUnambiguous = true;
-                } else {
+                } else if (compatibility == kMetadataMismatch) {
+                    // A provable mismatch against the only metadata candidate
+                    // means the metadata may be stale (the runtime class can
+                    // have overloads the generator never saw). Let reflection
+                    // resolve against the real class.
                     const auto signature = entry->getSig();
                     if (entry->isStatic || signature.find("Ljava/lang/Object;") == std::string::npos) {
                         entry = nullptr;
                     }
                 }
+                // kMetadataUnknown: keep the entry. A generator-resolved entry is
+                // invoked directly through the lenient JsArgConverter (the
+                // pre-metadata-first behavior); unresolved ones still use
+                // reflection. Reflection can't marshal JS arrays or null for
+                // primitives, so demoting here would turn valid calls into
+                // "Failed resolving method" errors.
             }
             if (!hasNullArgument && entry != nullptr && entry->isExtensionFunction) {
                 metadataMatch = entry;
