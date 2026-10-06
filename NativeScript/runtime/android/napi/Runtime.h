@@ -90,6 +90,14 @@ namespace tns {
 
         std::string ReadFileText(const std::string &filePath);
 
+        // Java -> JS transitions are counted so the microtask checkpoint runs
+        // only when the outermost one returns; see RunMicrotaskCheckpoint.
+        void EnterJsCall();
+
+        void LeaveJsCall();
+
+        void RunMicrotaskCheckpoint();
+
         bool NotifyGC(JNIEnv *jEnv, jobject obj, jintArray object_ids);
 
         bool TryCallGC();
@@ -194,6 +202,7 @@ namespace tns {
         ArrayBufferHelper m_arrayBufferHelper;
 
         bool m_isMainThread;
+        int m_jsCallDepth = 0;
 
         ModuleInternal m_module;
 

@@ -176,7 +176,8 @@ napi_status js_create_napi_env(napi_env* env, jsr_ns_runtime runtime) {
   //
   // Apple used to take a different route through a NativeScript-local
   // jsi::Runtime::createNodeApiEnv hook. That hook no longer exists upstream,
-  // and both platforms now build against the same headers, so there is one path.
+  // and both platforms now build against the same headers, so there is one
+  // path.
   auto hermesInterface =
       facebook::jsi::castInterface<facebook::hermes::IHermes>(
           runtime->hermes->rt);
@@ -310,7 +311,19 @@ napi_status js_execute_pending_jobs(napi_env env) {
   if (jsr == nullptr) {
     return napi_invalid_arg;
   }
-  jsr->rt->drainMicrotasks();
+  // drainMicrotasks() reports a failing job by throwing a C++ jsi::JSError
+  // (see jsr_drain_microtasks). Callers sit behind JNI and Looper callbacks,
+  // where an unwinding C++ exception aborts the process, so it is converted
+  // into a pending exception they already know how to report.
+  try {
+    jsr->rt->drainMicrotasks();
+  } catch (const facebook::jsi::JSError& e) {
+    napi_throw_error(env, nullptr, e.getMessage().c_str());
+    return napi_pending_exception;
+  } catch (const facebook::jsi::JSIException& e) {
+    napi_throw_error(env, nullptr, e.what());
+    return napi_pending_exception;
+  }
   return napi_ok;
 #else
   bool result;

@@ -2363,6 +2363,9 @@ Value makeNativeObjectValue(Runtime& runtime,
 Value makeNativeClassValue(Runtime& runtime,
                            const std::shared_ptr<NativeApiBridge>& bridge,
                            NativeApiSymbol symbol);
+Value makeExtendedNativeClassValue(Runtime& runtime,
+                                   const std::shared_ptr<NativeApiBridge>& bridge,
+                                   NativeApiSymbol symbol);
 
 Object symbolToObject(Runtime& runtime, const NativeApiSymbol& symbol) {
   Object result(runtime);
