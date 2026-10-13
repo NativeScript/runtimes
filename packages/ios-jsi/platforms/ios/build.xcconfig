@@ -1,0 +1,2 @@
+HEADER_SEARCH_PATHS = $(inherited) "$(SRCROOT)/../../node_modules/@nativescript/ios-jsi/Sources/NativeScriptJSI/include" "$(SRCROOT)/../../node_modules/@nativescript/ios-jsi/Sources/NativeScriptJSI/v8_headers" "$(CONFIGURATION_BUILD_DIR)/NativeScript.framework/Headers" "$(CONFIGURATION_BUILD_DIR)/NativeScript.framework/Headers/include"
+CLANG_CXX_LANGUAGE_STANDARD = c++20

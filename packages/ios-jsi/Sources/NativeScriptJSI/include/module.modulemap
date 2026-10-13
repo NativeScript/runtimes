@@ -1,0 +1,4 @@
+module NativeScriptJSI {
+  header "JSIRuntime.h"
+  export *
+}
