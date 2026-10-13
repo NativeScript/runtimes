@@ -1,0 +1,36 @@
+{
+  "name": "@nativescript/android-jsi",
+  "version": "0.1.0",
+  "description": "Standalone Facebook JSI + V8Runtime bridge for NativeScript Android",
+  "keywords": [
+    "NativeScript",
+    "Android",
+    "JSI",
+    "V8",
+    "Nitro"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NativeScript/runtimes",
+    "directory": "packages/android-jsi"
+  },
+  "author": {
+    "name": "NativeScript Team",
+    "email": "oss@nativescript.org"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "nativescript": {
+    "platforms": {
+      "android": "8.0.0"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "platforms",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0"
+}

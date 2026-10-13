@@ -1,0 +1,53 @@
+#ifndef JSIRUNTIME_H_
+#define JSIRUNTIME_H_
+
+#ifdef __OBJC__
+#import <Foundation/Foundation.h>
+
+@interface JSIRuntime : NSObject
+/**
+ * Returns the raw `facebook::jsi::Runtime*` pointer for the active V8 isolate
+ * on the calling thread, or NULL if no V8 isolate is active on this thread.
+ */
++ (void* _Nullable)runtime;
+
+/**
+ * Returns the pointer address of the active `facebook::jsi::Runtime*` as an
+ * unsigned 64-bit integer NSNumber (0 if no isolate is active).
+ */
++ (NSNumber* _Nonnull)runtimePointer;
+
+/**
+ * Releases the JSI runtime associated with the calling thread's V8 isolate.
+ */
++ (void)disposeRuntimeForCurrentIsolate;
+@end
+#endif /* __OBJC__ */
+
+#ifdef __cplusplus
+#include <memory>
+
+#include "jsi/jsi.h"
+
+extern "C" {
+
+// The JSI Runtime of the NativeScript V8 isolate on the calling thread, or
+// nullptr when this thread has no active V8 isolate. Each isolate (main thread
+// and each Worker) owns a separate JSI Runtime bound to that V8 isolate.
+__attribute__((visibility("default"))) facebook::jsi::Runtime*
+NativeScriptJSIRuntime(void);
+
+}  // extern "C"
+
+namespace tns {
+
+__attribute__((visibility("default"))) std::shared_ptr<facebook::jsi::Runtime>
+GetJSIRuntime();
+
+__attribute__((visibility("default"))) void
+DisposeJSIRuntimeForCurrentIsolate();
+
+}  // namespace tns
+#endif /* __cplusplus */
+
+#endif /* JSIRUNTIME_H_ */

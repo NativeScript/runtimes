@@ -1,0 +1,37 @@
+{
+  "name": "@nativescript/ios-jsi",
+  "version": "0.1.0",
+  "description": "Standalone Facebook JSI + V8Runtime bridge for NativeScript iOS",
+  "keywords": [
+    "NativeScript",
+    "iOS",
+    "JSI",
+    "V8",
+    "Nitro"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NativeScript/runtimes",
+    "directory": "packages/ios-jsi"
+  },
+  "author": {
+    "name": "NativeScript Team",
+    "email": "oss@nativescript.org"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "nativescript": {
+    "platforms": {
+      "ios": "8.0.0"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "NativeScriptJSI.podspec",
+    "platforms",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0"
+}
