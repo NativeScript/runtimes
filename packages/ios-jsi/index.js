@@ -1,6 +1,6 @@
 function getJSIRuntimePointer() {
-  if (typeof JSIRuntime !== 'undefined' && typeof JSIRuntime.runtimePointer === 'function') {
-    return Number(JSIRuntime.runtimePointer());
+  if (typeof NSJSIRuntime !== 'undefined' && typeof NSJSIRuntime.runtimePointer === 'function') {
+    return Number(NSJSIRuntime.runtimePointer());
   }
   return 0;
 }
@@ -10,8 +10,8 @@ function isJSIRuntimeAvailable() {
 }
 
 function disposeJSIRuntimeForCurrentIsolate() {
-  if (typeof JSIRuntime !== 'undefined' && typeof JSIRuntime.disposeRuntimeForCurrentIsolate === 'function') {
-    JSIRuntime.disposeRuntimeForCurrentIsolate();
+  if (typeof NSJSIRuntime !== 'undefined' && typeof NSJSIRuntime.disposeRuntimeForCurrentIsolate === 'function') {
+    NSJSIRuntime.disposeRuntimeForCurrentIsolate();
   }
 }
 

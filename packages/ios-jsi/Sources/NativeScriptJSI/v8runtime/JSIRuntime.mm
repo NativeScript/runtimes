@@ -51,9 +51,13 @@ extern "C" facebook::jsi::Runtime* NativeScriptJSIRuntime(void) {
 }
 
 #ifdef __OBJC__
-@implementation JSIRuntime
+@implementation NSJSIRuntime
 
-+ (void*)runtime {
++ (std::shared_ptr<facebook::jsi::Runtime>)runtime {
+  return tns::GetJSIRuntime();
+}
+
++ (void*)rawRuntime {
   return (void*)NativeScriptJSIRuntime();
 }
 
