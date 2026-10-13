@@ -65,10 +65,11 @@ if(DEFINED NATIVESCRIPT_SO_PATH AND EXISTS "${NATIVESCRIPT_SO_PATH}")
     NativeScriptRuntime
   )
 else()
+  string(REGEX REPLACE "(^| )-Wl,--no-undefined( |$)" " " CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
   target_link_options(
     nativescript-jsi
     PRIVATE
-    "-Wl,--unresolved-symbols=ignore-in-shared-libs"
+    "-Wl,--unresolved-symbols=ignore-all"
     "-Wl,--allow-shlib-undefined"
   )
   target_link_libraries(

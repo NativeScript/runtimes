@@ -6,7 +6,7 @@ export default {
       {
         name: 'NativeScriptJSI',
         libs: ['NativeScriptJSI'],
-        path: '.',
+        path: 'node_modules/@nativescript/ios-jsi',
       },
     ],
   },

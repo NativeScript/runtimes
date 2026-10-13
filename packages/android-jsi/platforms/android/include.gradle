@@ -2,7 +2,7 @@ android {
   sourceSets {
     main {
       java {
-        srcDirs += ["${projectDir}/../../node_modules/@nativescript/android-jsi/platforms/android/java"]
+        srcDirs += ["${rootDir}/../../node_modules/@nativescript/android-jsi/platforms/android/java"]
       }
     }
   }
