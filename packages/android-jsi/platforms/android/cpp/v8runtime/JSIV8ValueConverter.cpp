@@ -16,7 +16,9 @@ namespace rnv8 {
 // static
 jsi::Value JSIV8ValueConverter::ToJSIValue(v8::Isolate* isolate,
                                            const v8::Local<v8::Value>& value) {
-  v8::HandleScope scopedHandle(isolate);
+  if (value->IsNumber()) {
+    return jsi::Value(value.As<v8::Number>()->Value());
+  }
   if (value->IsUndefined()) {
     return jsi::Value::undefined();
   }
@@ -26,18 +28,14 @@ jsi::Value JSIV8ValueConverter::ToJSIValue(v8::Isolate* isolate,
   if (value->IsBoolean()) {
     return jsi::Value(value->BooleanValue(isolate));
   }
-  if (value->IsNumber()) {
-    return jsi::Value(
-        value->NumberValue(isolate->GetCurrentContext()).ToChecked());
-  }
   if (value->IsString()) {
     return V8Runtime::make<jsi::String>(new V8PointerValue(isolate, value));
   }
-  if (value->IsSymbol()) {
-    return V8Runtime::make<jsi::Symbol>(new V8PointerValue(isolate, value));
-  }
   if (value->IsObject()) {
     return V8Runtime::make<jsi::Object>(new V8PointerValue(isolate, value));
+  }
+  if (value->IsSymbol()) {
+    return V8Runtime::make<jsi::Symbol>(new V8PointerValue(isolate, value));
   }
 
   return jsi::Value::undefined();
@@ -46,24 +44,20 @@ jsi::Value JSIV8ValueConverter::ToJSIValue(v8::Isolate* isolate,
 // static
 v8::Local<v8::Value> JSIV8ValueConverter::ToV8Value(const V8Runtime& runtime,
                                                     const jsi::Value& value) {
-  v8::EscapableHandleScope scopedHandle(runtime.isolate_);
-
-  if (value.isUndefined()) {
-    return scopedHandle.Escape(v8::Undefined(runtime.isolate_));
+  if (value.isNumber()) {
+    return v8::Number::New(runtime.isolate_, value.getNumber());
+  } else if (value.isUndefined()) {
+    return v8::Undefined(runtime.isolate_);
   } else if (value.isNull()) {
-    return scopedHandle.Escape(v8::Null(runtime.isolate_));
+    return v8::Null(runtime.isolate_);
   } else if (value.isBool()) {
-    return scopedHandle.Escape(
-        v8::Boolean::New(runtime.isolate_, std::move(value.getBool())));
-  } else if (value.isNumber()) {
-    return scopedHandle.Escape(
-        v8::Number::New(runtime.isolate_, std::move(value.getNumber())));
+    return v8::Boolean::New(runtime.isolate_, value.getBool());
   } else if (value.isString()) {
-    return scopedHandle.Escape(ToV8String(
-        runtime, std::move(value.getString(const_cast<V8Runtime&>(runtime)))));
+    return ToV8String(
+        runtime, value.getString(const_cast<V8Runtime&>(runtime)));
   } else if (value.isObject()) {
-    return scopedHandle.Escape(ToV8Object(
-        runtime, std::move(value.getObject(const_cast<V8Runtime&>(runtime)))));
+    return ToV8Object(
+        runtime, value.getObject(const_cast<V8Runtime&>(runtime)));
   } else {
     // What are you?
     std::abort();

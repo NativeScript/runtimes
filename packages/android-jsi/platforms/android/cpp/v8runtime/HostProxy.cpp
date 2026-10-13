@@ -225,8 +225,11 @@ void HostFunctionProxy::FunctionCallback(
   }
 
   v8::Local<v8::Value> result;
-  jsi::Value thisVal(
-      JSIV8ValueConverter::ToJSIValue(info.GetIsolate(), info.This()));
+  v8::Local<v8::Object> receiver = info.This();
+  jsi::Value thisVal =
+      (receiver.IsEmpty() || receiver->InternalFieldCount() == 0)
+          ? jsi::Value::undefined()
+          : JSIV8ValueConverter::ToJSIValue(info.GetIsolate(), receiver);
   try {
     result = JSIV8ValueConverter::ToV8Value(
         runtime, hostFunctionProxy->hostFunction_(runtime, thisVal, args,

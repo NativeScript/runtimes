@@ -28,6 +28,7 @@ let package = Package(
         .headerSearchPath("include/jsi"),
         .headerSearchPath("v8runtime"),
         .headerSearchPath("v8_headers"),
+        .unsafeFlags(["-O3", "-DNDEBUG"]),
       ],
       linkerSettings: [
         .linkedLibrary("c++"),
