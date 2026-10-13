@@ -1,12 +1,14 @@
 {
   "name": "@nativescript/ios-jsi",
   "version": "0.1.0",
-  "description": "Standalone Facebook JSI + V8Runtime bridge for NativeScript iOS",
+  "description": "Standalone Facebook JSI + V8Runtime bridge for NativeScript iOS (Swift Package)",
   "keywords": [
     "NativeScript",
     "iOS",
     "JSI",
     "V8",
+    "SPM",
+    "SwiftPM",
     "Nitro"
   ],
   "repository": {
@@ -28,7 +30,9 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "NativeScriptJSI.podspec",
+    "nativescript.config.ts",
+    "Package.swift",
+    "Sources",
     "platforms",
     "README.md",
     "LICENSE"

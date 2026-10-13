@@ -34,8 +34,13 @@ extern "C" {
 // The JSI Runtime of the NativeScript V8 isolate on the calling thread, or
 // nullptr when this thread has no active V8 isolate. Each isolate (main thread
 // and each Worker) owns a separate JSI Runtime bound to that V8 isolate.
+#ifdef __clang__
+__attribute__((visibility("default"))) facebook::jsi::Runtime* _Nullable
+NativeScriptJSIRuntime(void);
+#else
 __attribute__((visibility("default"))) facebook::jsi::Runtime*
 NativeScriptJSIRuntime(void);
+#endif
 
 }  // extern "C"
 
