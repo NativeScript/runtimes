@@ -887,7 +887,13 @@ void MetadataNode::CreateTopLevelNamespaces(JsRuntime &rt) {
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
             }
-            global.setProperty(rt, nameSpace.c_str(), packageObj);
+            try {
+                global.setProperty(rt, nameSpace.c_str(), packageObj);
+            } catch (JsError &) {
+                // A host can already own the name as a non-writable global (Expo
+                // defines `expo`), so fall back to the same $ prefix as keywords.
+                global.setProperty(rt, ("$" + nameSpace).c_str(), packageObj);
+            }
         }
     }
 }
