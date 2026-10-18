@@ -680,14 +680,27 @@ That adds two things to your build:
   `android.widget.Toast` and any third-party library resolvable from JavaScript.
   `whitelist.mdg` / `blacklist.mdg` next to `android/app/build.gradle` filter it,
   with the same format the NativeScript CLI uses.
-* **TypeScript declarations** — off by default because they take a while:
+* **TypeScript declarations** — for the same classpath, so third-party
+  libraries are typed too. They are written to `types/android/` next to the app
+  on the first build and regenerated only when the classpath changes; commit
+  them alongside your code. `-PnsGenerateTypings=false` opts out, and
 
   ```bash
-  cd android && ./gradlew generateNativeScriptTypingsDebug -PnsGenerateTypings=true
+  cd android && ./gradlew generateNativeScriptTypingsDebug
   ```
 
-  which writes `types/android/` and, with `configure` having run, is already
-  referenced from `tsconfig.json`.
+  generates them on their own. `configure` adds them to `tsconfig.json`; with
+  the Expo config plugin, add them yourself:
+
+  ```json
+  {
+    "include": ["types/android/android.d.ts", "types/android/android-declarations.d.ts"]
+  }
+  ```
+
+  The package does not ship Android declarations, and `@nativescript/types-android`
+  is not needed: it covers only the Android SDK, and its declarations collide
+  with the generated ones.
 
 ### Extending Java classes
 
