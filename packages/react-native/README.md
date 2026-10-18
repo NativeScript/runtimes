@@ -40,10 +40,19 @@ module.exports = {
   presets: ["module:@react-native/babel-preset"],
   plugins: [
     "@nativescript/react-native/babel-plugin",
-    "react-native-worklets/plugin",
+    ["react-native-worklets/plugin", { strictGlobal: true }],
   ],
 };
 ```
+
+`strictGlobal: true` is required. Without it the Worklets plugin captures every
+name a worklet does not declare (`UIView`, `UILabel`, ...) into the worklet's
+closure, read on the JavaScript thread when the module defining the worklet is
+evaluated. NativeScript's classes do not exist there, so the app fails at
+startup with `ReferenceError: Property 'UILabel' doesn't exist`. With
+`strictGlobal`, those names are resolved on the runtime the worklet runs on.
+With `babel-preset-expo`, also pass `{ worklets: false }` to the preset so it
+does not add a second copy of the plugin without `strictGlobal`.
 
 `installWorklets()` is still exported for custom initialization, but it throws
 when Worklets is unavailable or incompatible. `runOnUI()` throws when the
@@ -512,7 +521,7 @@ npm run test-rn-turbomodule
      presets: ["module:@react-native/babel-preset"],
      plugins: [
        "@nativescript/react-native/babel-plugin",
-       "react-native-worklets/plugin",
+       ["react-native-worklets/plugin", { strictGlobal: true }],
      ],
    };
    ```
@@ -551,8 +560,11 @@ functions that need the module throw an error saying what to rebuild.
    The plugin configures iOS for Hermes and the React Native New Architecture,
    which are required by this JSI TurboModule. It also adds the
    `@nativescript/react-native/babel-plugin` and `react-native-worklets/plugin`
-   transforms to `babel.config.js` so `"use js"` and worklet callbacks work in
-   Expo bundles.
+   (with `{ strictGlobal: true }`) transforms to `babel.config.js` so `"use js"`
+   and worklet callbacks work in Expo bundles, and passes `{ worklets: false }`
+   to `babel-preset-expo` so the preset does not add its own copy of the
+   Worklets plugin. An existing `react-native-worklets/plugin` entry that already
+   has options is left alone, with a warning if it lacks `strictGlobal: true`.
 
 3. Prebuild and run the iOS development build:
 
