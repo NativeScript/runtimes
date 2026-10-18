@@ -1,25 +1,168 @@
 # @nativescript/react-native
 
-React Native TurboModule wrapper for the NativeScript Native API JSI bridge on
-Hermes.
+NativeScript's Native API for React Native: call Objective-C and UIKit on iOS,
+and Java and the Android SDK on Android, directly from JavaScript.
 
-The module exposes one small TurboModule whose `init()` method attaches the
+The package is one small TurboModule. Its `init()` method attaches the
 NativeScript Native API host object to `globalThis.__nativeScriptNativeApi` and
-installs lazy NativeScript-style globals for classes and C functions. The host
-object itself is pure JSI and is shared with the NativeScript Hermes runtime.
+installs lazy NativeScript-style globals for native classes, functions,
+constants and enums. The host object itself is pure JSI and is shared with the
+NativeScript runtime.
+
+## Requirements
+
+- React Native 0.79 or newer.
+- iOS 13+, with Hermes and the New Architecture.
+- `react-native-worklets` 0.8 or newer. It is required on iOS: the pod links
+  `RNWorklets`, and UIKit work runs on the Worklets UI runtime.
+- Android works with Hermes or JSC. See [Android](#android).
+
+Expo Go cannot load this package because it contains custom native code. Use an
+Expo development build, EAS Build, or `npx expo run:ios` / `npx expo run:android`.
+
+## Installation
+
+### React Native
+
+1. Install the package and Worklets:
+
+   ```sh
+   npm install @nativescript/react-native react-native-worklets
+   ```
+
+2. Configure the project:
+
+   ```sh
+   npx nativescript-rn configure
+   ```
+
+   `configure` adds the NativeScript and Worklets Babel plugins when missing,
+   writes `nativescript.react-native.json`, applies the Android Gradle script,
+   adds the Android typings to `tsconfig.json`, and warns when iOS is not
+   configured for Hermes and the New Architecture. It is intentionally
+   conservative and does not make destructive native project edits.
+
+   To configure Babel by hand instead:
+
+   ```js
+   module.exports = {
+     presets: ["module:@react-native/babel-preset"],
+     plugins: [
+       "@nativescript/react-native/babel-plugin",
+       ["react-native-worklets/plugin", { strictGlobal: true }],
+     ],
+   };
+   ```
+
+   `strictGlobal: true` is required. Without it the Worklets plugin captures
+   every name a worklet does not declare (`UIView`, `UILabel`, ...) into the
+   worklet's closure, read on the JavaScript thread when the module defining
+   the worklet is evaluated. NativeScript's classes do not exist there, so the
+   app fails at startup with `ReferenceError: Property 'UILabel' doesn't exist`.
+   With `strictGlobal`, those names are resolved on the runtime the worklet runs
+   on. With `babel-preset-expo`, also pass `{ worklets: false }` to the preset
+   so it does not add a second copy of the plugin without `strictGlobal`.
+
+3. Install the pods:
+
+   ```sh
+   cd ios
+   RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install
+   ```
+
+`npx nativescript-rn generate-metadata --check` prints the iOS metadata
+configuration (extra pods and system frameworks) that native builds will use.
+
+### Expo
+
+1. Install the package and Worklets:
+
+   ```sh
+   npx expo install @nativescript/react-native react-native-worklets
+   ```
+
+2. Add the config plugin to `app.json` or `app.config.js`:
+
+   ```json
+   {
+     "expo": {
+       "plugins": ["@nativescript/react-native"]
+     }
+   }
+   ```
+
+   The plugin:
+
+   - configures iOS for Hermes and the React Native New Architecture, which this
+     JSI TurboModule requires;
+   - applies the NativeScript Gradle script to `android/app/build.gradle`;
+   - adds the `@nativescript/react-native/babel-plugin` and
+     `react-native-worklets/plugin` (with `{ strictGlobal: true }`) transforms to
+     `babel.config.js`, and passes `{ worklets: false }` to `babel-preset-expo`
+     so the preset does not add its own copy of the Worklets plugin. An existing
+     `react-native-worklets/plugin` entry that already has options is left
+     alone, with a warning if it lacks `strictGlobal: true`.
+
+   Set `{ "babelPlugin": false }` in the plugin options if you prefer to add the
+   NativeScript and Worklets Babel plugins manually.
+
+3. Prebuild and run a development build:
+
+   ```sh
+   npx expo prebuild
+   npx expo run:ios
+   npx expo run:android
+   ```
+
+The plugin also writes `nativescript.react-native.json` so metadata options are
+visible to native builds. On iOS you can pass metadata inputs when the app uses
+Objective-C-visible pods or extra system frameworks:
+
+```json
+{
+  "expo": {
+    "plugins": [
+      [
+        "@nativescript/react-native",
+        {
+          "metadata": {
+            "includePods": ["SomeObjCSDK"],
+            "includeSystemFrameworks": ["UIKit", "MapKit", "WebKit"]
+          }
+        }
+      ]
+    ]
+  }
+}
+```
+
+Bare projects using `nativescript-rn configure` can put the same `metadata`
+object under a `nativeScriptReactNative` key in `package.json`.
+
+Importing the package in a build without its native module is safe:
+`NativeScript.isAvailable()` returns `false` there, and `init()` and the other
+functions that need the module throw an error saying what to rebuild.
+
+## Usage
+
+Call `init()` once, before using native APIs:
 
 ```ts
 import NativeScript from "@nativescript/react-native";
 
 NativeScript.init();
-
-const object = NSObject.new();
 ```
 
-`NativeScript.init()` also installs the Native API into the
-`react-native-worklets` UI runtime. `NativeScript.runOnUI()` only accepts
-Worklets callbacks; running React Native's JS-thread runtime as a UI-thread shim
-is not supported.
+### Which runtime gets the globals (iOS)
+
+UIKit must only be touched on the main thread, and React Native's JavaScript
+runs on its own JS thread. So on iOS, `init()` installs the full set of native
+globals (`UIView`, `NSObject`, `NSTextAlignment`, ...) into the
+`react-native-worklets` UI runtime, which runs on the main thread. On the
+JavaScript thread it installs only `globalThis.__nativeScriptNativeApi`,
+`interop`, and protocol globals.
+
+Run UIKit work through `NativeScript.runOnUI()` with a Worklets callback:
 
 ```ts
 await NativeScript.runOnUI(() => {
@@ -28,35 +171,34 @@ await NativeScript.runOnUI(() => {
 });
 ```
 
-Install `react-native-worklets`, add its Babel plugin, and run `pod install` so
-the `RNWorklets` pod is linked:
+`runOnUI()` only accepts Worklets callbacks and throws when the callback was not
+transformed into a Worklets function; running React Native's JS-thread runtime
+as a UI-thread shim is not supported. `installWorklets()` is still exported for
+custom initialization, but it throws when Worklets is unavailable or
+incompatible.
 
-```sh
-npm install react-native-worklets
+For non-UI APIs on the JavaScript thread (Foundation, file system, networking),
+either look classes up explicitly or opt into JS-thread globals:
+
+```ts
+const NSDateClass = NativeScript.getClass<typeof NSDate>("NSDate");
+
+// or
+NativeScript.init("", { globals: true });
+const now = NSDate.new();
 ```
 
-```js
-module.exports = {
-  presets: ["module:@react-native/babel-preset"],
-  plugins: [
-    "@nativescript/react-native/babel-plugin",
-    ["react-native-worklets/plugin", { strictGlobal: true }],
-  ],
-};
-```
+Only full C constant names become globals, for example `NSTextAlignmentCenter`
+and `NSOrderedAscending`; short enum member names stay on their enum
+(`NSTextAlignment.Center`). JS-thread globals make it possible to touch UIKit
+off the main thread by accident, which is why they are opt-in. Helpers that
+build native classes, such as `createDelegate()`, need them when called on the
+JavaScript thread.
 
-`strictGlobal: true` is required. Without it the Worklets plugin captures every
-name a worklet does not declare (`UIView`, `UILabel`, ...) into the worklet's
-closure, read on the JavaScript thread when the module defining the worklet is
-evaluated. NativeScript's classes do not exist there, so the app fails at
-startup with `ReferenceError: Property 'UILabel' doesn't exist`. With
-`strictGlobal`, those names are resolved on the runtime the worklet runs on.
-With `babel-preset-expo`, also pass `{ worklets: false }` to the preset so it
-does not add a second copy of the plugin without `strictGlobal`.
+On Android, `init()` installs the Java package namespaces (`java`, `android`,
+...) on the JavaScript runtime. See [Android](#android).
 
-`installWorklets()` is still exported for custom initialization, but it throws
-when Worklets is unavailable or incompatible. `runOnUI()` throws when the
-callback was not transformed into a Worklets function.
+### Callbacks and threads
 
 Obj-C blocks and JS-backed Obj-C method callbacks, including `NSObject.extend`
 subclass overrides and delegates created with `createDelegate()`, should return
@@ -64,13 +206,17 @@ to React Native's JS thread for JS work. Use `jsInvoker()` when a callback can b
 reached from a native caller thread:
 
 ```ts
-UIView.animateWithDurationAnimationsCompletion(
-  0.25,
-  null,
-  NativeScript.jsInvoker((finished) => {
-    console.log("animation finished", finished);
-  }),
-);
+NativeScript.init("", { globals: true });
+
+const url = NSURL.URLWithString("https://nativescript.org");
+NSURLSession.sharedSession
+  .dataTaskWithURLCompletionHandler(
+    url,
+    NativeScript.jsInvoker((data, response, error) => {
+      console.log("request finished", error == null);
+    }),
+  )
+  .resume();
 ```
 
 Delegate, data-source, target/action, and `UIAction` callbacks are JS-side
@@ -78,7 +224,7 @@ callbacks. Treat their bodies as JS work. If a callback can be reached from a
 background native thread and needs to mutate UIKit, wrap the mutation in
 `NativeScript.runOnUI()` with a Worklets callback.
 
-The package also includes a Babel plugin for directive-style JS callbacks:
+The bundled Babel plugin also supports directive-style JS callbacks:
 
 ```ts
 someNativeApi(() => {
@@ -154,11 +300,11 @@ badgeRef.current?.invalidateNativeLayout();
 
 React Native view props such as `style`, `testID`, accessibility props, responder
 props, and `pointerEvents` go to the host component. Your own props go to the
-UIKit definition; use `nativeProps(props)` when a plugin prop should also affect
-the RN host. The `name` option is forwarded to the shared native host view as a
-debug name, so native view descriptions can show `NativeScriptUIView` with your
-definition name. It does not dynamically change the registered RN host component
-tag.
+UIKit definition; add a `nativeProps(props)` function to the definition when a
+plugin prop should also affect the RN host. The `name` option is forwarded to the
+shared native host view as a debug name, so native view descriptions can show
+`NativeScriptUIView` with your definition name. It does not dynamically change
+the registered RN host component tag.
 
 ### Lifecycle and context
 
@@ -248,7 +394,9 @@ retainer.dispose();
 
 `createDelegate(protocols, methods, options)` accepts protocol objects or names.
 If metadata was generated before a framework was loaded, use strings with
-`NativeScript.loadFramework()` and `NativeScript.getProtocol()`:
+`NativeScript.loadFramework()` and `NativeScript.getProtocol()`. Passing
+`{ owner: ctx }` from a definition's `create(ctx)` ties the delegate to the
+component's lifetime:
 
 ```ts
 NativeScript.loadFramework("QuickLook");
@@ -260,7 +408,7 @@ const dataSource = NativeScript.createDelegate(
       return 1;
     },
     previewControllerPreviewItemAtIndex() {
-      return NSURL.fileURLWithPath(path);
+      return NSURL.fileURLWithPath(ctx.props.path);
     },
   },
   { owner: ctx },
@@ -406,12 +554,13 @@ export const NativeTabs = NativeScript.defineUIViewController<
 ```
 
 For modal UIKit controllers, find the top visible presenter and guard against
-double presentation:
+double presentation. Helpers called from a worklet must be worklets too:
 
 ```ts
 function topVisibleViewController(
   root = UIApplication.sharedApplication.keyWindow?.rootViewController,
 ) {
+  "worklet";
   let current = root;
   while (current?.presentedViewController) {
     current = current.presentedViewController;
@@ -449,7 +598,6 @@ if (
   const CameraController = NativeScript.getClass<
     typeof VNDocumentCameraViewController
   >("VNDocumentCameraViewController");
-  const controller = CameraController?.new();
 }
 ```
 
@@ -470,175 +618,11 @@ to JS errors where Objective-C can catch them. Process-level failures such as
 violations are not catchable; use availability checks and presentation guards
 instead of relying on exceptions as control flow.
 
-The package ships example definitions under `@nativescript/react-native/examples`.
+More example definitions ship in the package's `examples/` folder, for example
+`@nativescript/react-native/examples/UIKitSwitch`.
 
-The published package includes generated NativeScript metadata, the libffi
-xcframework, and generated iOS SDK TypeScript declarations. Build it from the
-repository root with:
-
-```sh
-npm run build-rn-turbomodule
-```
-
-The tarball is written to `packages/react-native/dist/` and copied to
-`build/npm-tarballs/`.
-
-To verify it inside a generated React Native iOS app:
-
-```sh
-npm run test-rn-turbomodule
-```
-
-## Using the package in a React Native app
-
-1. Build or download the package tarball.
-2. Install it in an RN app that has Hermes and the New Architecture enabled:
-
-   ```sh
-   npm install /path/to/nativescript-react-native-0.0.1.tgz react-native-worklets
-   cd ios
-   RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install
-   ```
-
-3. Initialize it before using native APIs:
-
-   ```ts
-   import NativeScript from "@nativescript/react-native";
-
-   NativeScript.init();
-
-   await NativeScript.runOnUI(() => {
-     "worklet";
-     UIApplication.sharedApplication.keyWindow.tintColor =
-       UIColor.systemPinkColor;
-   });
-   ```
-
-4. Add the bundled NativeScript Babel plugin and the Worklets Babel plugin:
-
-   ```js
-   module.exports = {
-     presets: ["module:@react-native/babel-preset"],
-     plugins: [
-       "@nativescript/react-native/babel-plugin",
-       ["react-native-worklets/plugin", { strictGlobal: true }],
-     ],
-   };
-   ```
-
-## Using the package in an Expo app
-
-Expo Go cannot load this package because it contains custom native code. Use an
-Expo development build, EAS Build, or `npx expo run:ios`.
-
-Importing the package in a build without its native module is safe:
-`NativeScript.isAvailable()` returns `false` there, and `init()` and the other
-functions that need the module throw an error saying what to rebuild.
-
-1. Install the package:
-
-   ```sh
-   npx expo install @nativescript/react-native react-native-worklets
-   ```
-
-   When testing a local tarball:
-
-   ```sh
-   npm install /path/to/nativescript-react-native-0.0.1.tgz
-   ```
-
-2. Add the config plugin to `app.json` or `app.config.js`:
-
-   ```json
-   {
-     "expo": {
-       "plugins": ["@nativescript/react-native"]
-     }
-   }
-   ```
-
-   The plugin configures iOS for Hermes and the React Native New Architecture,
-   which are required by this JSI TurboModule. It also adds the
-   `@nativescript/react-native/babel-plugin` and `react-native-worklets/plugin`
-   (with `{ strictGlobal: true }`) transforms to `babel.config.js` so `"use js"`
-   and worklet callbacks work in Expo bundles, and passes `{ worklets: false }`
-   to `babel-preset-expo` so the preset does not add its own copy of the
-   Worklets plugin. An existing `react-native-worklets/plugin` entry that already
-   has options is left alone, with a warning if it lacks `strictGlobal: true`.
-
-3. Prebuild and run the iOS development build:
-
-   ```sh
-   npx expo prebuild --platform ios
-   npx expo run:ios
-   ```
-
-4. Initialize NativeScript in app code before using native APIs:
-
-   ```tsx
-   import NativeScript, { defineUIKitView } from "@nativescript/react-native";
-
-   NativeScript.init();
-
-   const NativeBadge = defineUIKitView<{ title: string }, UIView>({
-     name: "NativeBadge",
-     create() {
-       const view = UIView.alloc().initWithFrame(CGRectZero);
-       const label = UILabel.alloc().initWithFrame(CGRectZero);
-       label.tag = 1;
-       label.textAlignment = NSTextAlignment.Center;
-       view.addSubview(label);
-       return view;
-     },
-     update(view, props) {
-       view.backgroundColor = UIColor.systemBlueColor;
-       const label = view.viewWithTag(1) as UILabel;
-       label.text = props.title;
-     },
-   });
-   ```
-
-Set `{ "babelPlugin": false }` in the config plugin options if you prefer to add
-the NativeScript and Worklets Babel plugins manually.
-
-The plugin also writes `nativescript.react-native.json` so metadata options are
-visible to native builds. You can pass metadata inputs when the app uses
-Objective-C-visible pods or extra system frameworks:
-
-```json
-{
-  "expo": {
-    "plugins": [
-      [
-        "@nativescript/react-native",
-        {
-          "metadata": {
-            "includePods": ["SomeObjCSDK"],
-            "includeSystemFrameworks": ["UIKit", "MapKit", "WebKit"]
-          }
-        }
-      ]
-    ]
-  }
-}
-```
-
-## Bare React Native setup helper
-
-The tarball includes a small CLI for bare RN projects:
-
-```sh
-npx nativescript-rn configure
-npx nativescript-rn generate-metadata --check
-cd ios
-RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install
-```
-
-`configure` adds the bundled NativeScript and Worklets Babel plugins when
-missing, writes
-`nativescript.react-native.json`, and warns when the app is not configured for
-Hermes and the New Architecture. The command is intentionally conservative and
-does not make destructive native project edits.
+The package includes generated NativeScript metadata, the libffi xcframework,
+and generated iOS SDK TypeScript declarations.
 
 ## Android
 
@@ -666,8 +650,8 @@ prebuilt binary could not be safe across them.
 
 ### Setup
 
-`npx nativescript-rn configure` adds the Gradle script and the typings entries.
-To do it by hand, in `android/app/build.gradle`, after the React plugin:
+`npx nativescript-rn configure` and the Expo config plugin both add the Gradle
+script. To do it by hand, in `android/app/build.gradle`, after the React plugin:
 
 ```groovy
 apply from: "../../node_modules/@nativescript/react-native/android/nativescript.gradle"
@@ -675,11 +659,20 @@ apply from: "../../node_modules/@nativescript/react-native/android/nativescript.
 
 That adds two things to your build:
 
-* **Metadata** — a description of every class on the app's resolved classpath,
+* **Metadata** — a description of the classes on the app's resolved classpath,
   generated into the APK's assets on every build. This is what makes
   `android.widget.Toast` and any third-party library resolvable from JavaScript.
   `whitelist.mdg` / `blacklist.mdg` next to `android/app/build.gradle` filter it,
   with the same format the NativeScript CLI uses.
+
+  Debug builds ship the whole classpath. Release builds ship only what the
+  JavaScript bundle can reach, plus the supertypes, nested classes and
+  signature types those classes need. A class your code only reaches
+  dynamically (a name built at runtime, for example) can therefore resolve in
+  debug and be missing in release. In a release build, `whitelist.mdg` adds to
+  that set rather than replacing it, so list such classes there.
+  `-PnsFilterMetadata=false` turns the filter off and ships the whole
+  classpath.
 * **TypeScript declarations** — for the same classpath, so third-party
   libraries are typed too. They are written to `types/android/` next to the app
   on the first build and regenerated only when the classpath changes; commit
@@ -817,3 +810,19 @@ React Native already provides `console`, timers, `queueMicrotask`,
 installs only the metadata globals, the object manager and the interop
 callbacks. `Worker` is not installed either: a worker needs its own VM, which a
 guest has no way to create.
+
+## Building from source
+
+From the root of the [NativeScript/runtimes](https://github.com/NativeScript/runtimes)
+repository:
+
+```sh
+npm run build-rn-turbomodule
+```
+
+The tarball is written to `packages/react-native/dist/` and copied to
+`build/npm-tarballs/`. To verify it inside a generated React Native iOS app:
+
+```sh
+npm run test-rn-turbomodule
+```
