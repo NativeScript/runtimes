@@ -1699,6 +1699,24 @@ void InstallNativeApiGlobalSymbols(Runtime& runtime, const char* globalName) {
   var protocolNameSet = nameSet(protocolNameList);
   var enumNameSet = nameSet(enumNameList);
 
+  // Only full C constant names (NSTextAlignmentCenter, kCLAuthorizationStatus...)
+  // become globals. The enum object also carries short member names (Center,
+  // CloudKit's Zone), which as globals shadow what libraries feature-detect.
+  function isEnumMemberGlobalName(enumName, memberName) {
+    if (/^-?\d+$/.test(memberName)) {
+      return false;
+    }
+    if (/^k[A-Z]/.test(memberName)) {
+      return true;
+    }
+    var match = /^[A-Z]+(?=[A-Z][a-z])/.exec(enumName);
+    var prefix = match ? match[0] : '';
+    return prefix.length >= 2 &&
+      memberName.length > prefix.length &&
+      memberName.indexOf(prefix) === 0 &&
+      /[A-Z]/.test(memberName.charAt(prefix.length));
+  }
+
   function resolveNativeApiEnum(enumName) {
     return (api.getEnum && api.getEnum(enumName)) || api[enumName];
   }
@@ -1759,7 +1777,7 @@ void InstallNativeApiGlobalSymbols(Runtime& runtime, const char* globalName) {
       return;
     }
     Object.keys(enumValue).forEach(function(memberName) {
-      if (/^-?\d+$/.test(memberName)) {
+      if (!isEnumMemberGlobalName(name, memberName)) {
         return;
       }
       defineLazyGlobal(memberName, function() {

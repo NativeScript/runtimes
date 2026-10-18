@@ -906,6 +906,26 @@ function installInlineFunctions(): void {
   );
 }
 
+// Only full C constant names (`NSTextAlignmentCenter`, `kCLAuthorizationStatus...`)
+// become globals. The enum object also carries short member names (`Center`,
+// CloudKit's `Zone`), which as globals shadow what libraries feature-detect.
+function isEnumMemberGlobalName(enumName: string, memberName: string): boolean {
+  if (/^-?\d+$/.test(memberName)) {
+    return false;
+  }
+  if (/^k[A-Z]/.test(memberName)) {
+    return true;
+  }
+  const prefix = /^[A-Z]+(?=[A-Z][a-z])/.exec(enumName)?.[0];
+  return (
+    prefix !== undefined &&
+    prefix.length >= 2 &&
+    memberName.length > prefix.length &&
+    memberName.startsWith(prefix) &&
+    /[A-Z]/.test(memberName[prefix.length])
+  );
+}
+
 export function installGlobals(): boolean {
   const api = nativeApiHost();
   if (!api) {
@@ -948,7 +968,7 @@ export function installGlobals(): boolean {
       continue;
     }
     for (const memberName of Object.keys(enumValue)) {
-      if (/^-?\d+$/.test(memberName)) {
+      if (!isEnumMemberGlobalName(name, memberName)) {
         continue;
       }
       defineLazyNativeGlobal(
