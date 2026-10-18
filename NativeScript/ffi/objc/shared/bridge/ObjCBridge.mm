@@ -540,9 +540,31 @@ class NativeApiBridge {
   }
 
   ~NativeApiBridge() {
+    if (runtimeTornDown_.load(std::memory_order_acquire)) {
+      abandonRuntimeValues(roundTripValues_);
+      abandonRuntimeValues(roundTripCacheFramesByThread_);
+      abandonRuntimeValues(recentRoundTripValues_);
+#ifdef TARGET_ENGINE_HERMES
+      abandonRuntimeValues(roundTripRootCache_);
+#endif
+      abandonRuntimeValues(classValues_);
+      abandonRuntimeValues(classPrototypes_);
+      abandonRuntimeValues(pointerValues_);
+      abandonRuntimeValues(objectExpandos_);
+      abandonRuntimeValues(retainedLifetimes_);
+    }
     if (selfDl_ != nullptr) {
       dlclose(selfDl_);
     }
+  }
+
+  // Called when the runtime this bridge was installed into is torn down. Host
+  // objects can be shared into another runtime (react-native-worklets does so
+  // for values crossing runOnUI) and finalized there after this runtime is
+  // gone; releasing a Value whose runtime is destroyed is a use-after-free, so
+  // from here on every Value the bridge drops is leaked instead.
+  void markRuntimeTornDown() {
+    runtimeTornDown_.store(true, std::memory_order_release);
   }
 
   MDMetadataReader* metadata() const { return metadata_.get(); }
@@ -842,6 +864,7 @@ class NativeApiBridge {
       eraseRoundTripKeyFromScopedCaches(key, releaseAfterUnlock);
       roundTripValuesGeneration_.fetch_add(1, std::memory_order_release);
     }
+    abandonIfRuntimeTornDown(releaseAfterUnlock);
   }
 
   uint64_t roundTripValuesGeneration() const {
@@ -1023,8 +1046,11 @@ class NativeApiBridge {
       return;
     }
     auto key = normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native));
-    objectExpandos_.erase(
-        key);
+    auto it = objectExpandos_.find(key);
+    if (it != objectExpandos_.end()) {
+      abandonIfRuntimeTornDown(it->second);
+      objectExpandos_.erase(it);
+    }
     objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
   }
 
@@ -1111,7 +1137,11 @@ class NativeApiBridge {
     if (native == nullptr) {
       return;
     }
-    pointerValues_.erase(reinterpret_cast<uintptr_t>(native));
+    auto it = pointerValues_.find(reinterpret_cast<uintptr_t>(native));
+    if (it != pointerValues_.end()) {
+      abandonIfRuntimeTornDown(it->second);
+      pointerValues_.erase(it);
+    }
   }
 
   const NativeApiSymbol* findConstant(const std::string& name) const {
@@ -2101,6 +2131,47 @@ class NativeApiBridge {
     return members;
   }
 
+  template <typename T>
+  void abandonIfRuntimeTornDown(T& values) {
+    if (runtimeTornDown_.load(std::memory_order_acquire)) {
+      abandonRuntimeValues(values);
+    }
+  }
+
+  // Moves each Value out into a deliberately leaked allocation so destroying
+  // the container never reaches the runtime. Leak the Value, not its
+  // shared_ptr: the thread_local lookup caches hold weak_ptrs keyed by bridge
+  // address and rely on them expiring once that bridge is gone.
+  static void abandonRuntimeValues(std::shared_ptr<Value>& value) {
+    if (value != nullptr) {
+      new Value(std::move(*value));
+    }
+  }
+
+  static void abandonRuntimeValues(std::shared_ptr<void>& lifetime) {
+    if (lifetime != nullptr) {
+      new std::shared_ptr<void>(std::move(lifetime));
+    }
+  }
+
+  static void abandonRuntimeValues(NativeApiRoundTripValue& entry) {
+    abandonRuntimeValues(entry.value);
+  }
+
+  template <typename Key, typename Mapped>
+  static void abandonRuntimeValues(std::unordered_map<Key, Mapped>& values) {
+    for (auto& entry : values) {
+      abandonRuntimeValues(entry.second);
+    }
+  }
+
+  template <typename Element>
+  static void abandonRuntimeValues(std::vector<Element>& values) {
+    for (auto& value : values) {
+      abandonRuntimeValues(value);
+    }
+  }
+
   std::unique_ptr<MDMetadataReader> metadata_;
   void* selfDl_ = nullptr;
   std::unordered_map<std::string, NativeApiSymbol> symbolsByName_;
@@ -2133,6 +2204,7 @@ class NativeApiBridge {
       objectExpandos_;
   std::unordered_map<uintptr_t, size_t> objectExpandoOwnerCounts_;
   std::atomic<uint64_t> objectExpandosGeneration_{1};
+  std::atomic<bool> runtimeTornDown_{false};
   std::unordered_map<Class, std::unordered_map<std::string, CachedPropertyGetter>>
       propertyGetterCache_;
   std::atomic<uint64_t> propertyGetterCacheGeneration_{1};

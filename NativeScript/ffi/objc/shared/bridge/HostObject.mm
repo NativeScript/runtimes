@@ -23,6 +23,11 @@ class NativeApiHostObject final : public HostObject {
   explicit NativeApiHostObject(std::shared_ptr<NativeApiBridge> bridge)
       : bridge_(std::move(bridge)) {}
 
+  // Each bridge has exactly one API object and it lives on its runtime's
+  // global, so this runs as that runtime is finalized. Running earlier would
+  // only leak the Values the bridge drops afterwards.
+  ~NativeApiHostObject() override { bridge_->markRuntimeTornDown(); }
+
   Value get(Runtime& runtime, const PropNameID& name) override {
     std::string property = name.utf8(runtime);
     if (property == "runtime") {
