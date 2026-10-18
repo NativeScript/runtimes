@@ -56,9 +56,10 @@ public:
     static void SetFlags(const char *flags);
 
 #if defined(NS_JSI_HOST_RUNTIME)
-    // Adopts a runtime the embedder owns. The reference must outlive this host:
-    // React Native tears its runtime down only after the TurboModule that holds
-    // us has been invalidated, which is what ReleaseEngineState is wired to.
+    // Adopts a runtime the embedder owns. Nothing may enter the runtime through
+    // this host once it is gone: React Native tears it down only after the
+    // TurboModule that holds us has been invalidated, which is what
+    // Runtime::Detach is wired to.
     static std::shared_ptr<EngineHost> Adopt(::facebook::jsi::Runtime &runtime);
 #else
     static std::shared_ptr<EngineHost> Create();

@@ -265,6 +265,29 @@ void Runtime::Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &f
     InitCommon(filesRoot, /*callingDir*/ "", maxLogcatObjectSize, forceLog, /*guest*/ true);
 }
 
+void Runtime::Detach() {
+    // Another thread -- the GC listener, typically -- may already hold this
+    // pointer from a lookup made before DestroyRuntime unregisters it. It then
+    // blocks on this scope's lock and finds is_destroying set. The lock lives in
+    // engineHost, which this object owns, so the object must outlive any such
+    // caller: it is deliberately never deleted.
+    JSEnterScope
+
+    if (is_destroying) {
+        return;
+    }
+
+    DestroyRuntime();
+
+    // The main looper is the JS thread's, and the next host runtime runs on a
+    // different thread; letting the next Attach become main rebinds it there.
+    if (m_isMainThread) {
+        ReleaseMainLooper();
+        s_main_rt = nullptr;
+        s_mainThreadInitialized = false;
+    }
+}
+
 #endif  // NS_JSI_HOST_RUNTIME
 
 // Everything both flavours install.
@@ -462,8 +485,11 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
         global.setProperty(rt, "global", global);
     }
 
-    if (!s_mainThreadInitialized) {
-        MetadataNode::BuildMetadata(filesRoot);
+    if (m_isMainThread) {
+        if (!s_metadataBuilt) {
+            MetadataNode::BuildMetadata(filesRoot);
+            s_metadataBuilt = true;
+        }
     } else {
         // Do not set 'self' accessor to main thread
         global.setProperty(rt, "self", global);
@@ -534,18 +560,27 @@ Runtime::~Runtime() {
     engineHost.reset();
 
     if (m_isMainThread) {
+        ReleaseMainLooper();
+    }
+}
+
+void Runtime::ReleaseMainLooper() {
+    if (m_mainLooper != nullptr) {
         if (m_mainLooper_fd[0] != -1) {
             ALooper_removeFd(m_mainLooper, m_mainLooper_fd[0]);
         }
         ALooper_release(m_mainLooper);
+        m_mainLooper = nullptr;
+    }
 
-        if (m_mainLooper_fd[0] != -1) {
-            close(m_mainLooper_fd[0]);
-        }
+    if (m_mainLooper_fd[0] != -1) {
+        close(m_mainLooper_fd[0]);
+        m_mainLooper_fd[0] = -1;
+    }
 
-        if (m_mainLooper_fd[1] != -1) {
-            close(m_mainLooper_fd[1]);
-        }
+    if (m_mainLooper_fd[1] != -1) {
+        close(m_mainLooper_fd[1]);
+        m_mainLooper_fd[1] = -1;
     }
 }
 
@@ -914,6 +949,7 @@ jmethodID Runtime::GET_USED_MEMORY_METHOD_ID = nullptr;
 tns::ConcurrentMap<int, Runtime *> Runtime::id_to_runtime_cache;
 tns::ConcurrentMap<const void *, Runtime *> Runtime::rt_to_runtime_cache;
 bool Runtime::s_mainThreadInitialized = false;
+bool Runtime::s_metadataBuilt = false;
 int Runtime::m_androidVersion = Runtime::GetAndroidVersion();
 ALooper *Runtime::m_mainLooper = nullptr;
 tns::ConcurrentMap<std::thread::id, Runtime *> Runtime::thread_id_to_rt_cache;
