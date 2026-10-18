@@ -14,4 +14,7 @@ export interface Spec extends TurboModule {
   readonly __writeTestMarker: (content: string) => boolean;
 }
 
-export default TurboModuleRegistry.getEnforcing<Spec>('NativeScriptNativeApi');
+// `get`, not `getEnforcing`: a build without the native module (Expo Go, or a
+// build made before the package was added) must still be able to import the
+// package and decide what to do without it.
+export default TurboModuleRegistry.get<Spec>('NativeScriptNativeApi');

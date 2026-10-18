@@ -522,6 +522,10 @@ npm run test-rn-turbomodule
 Expo Go cannot load this package because it contains custom native code. Use an
 Expo development build, EAS Build, or `npx expo run:ios`.
 
+Importing the package in a build without its native module is safe:
+`NativeScript.isAvailable()` returns `false` there, and `init()` and the other
+functions that need the module throw an error saying what to rebuild.
+
 1. Install the package:
 
    ```sh
@@ -631,9 +635,9 @@ Android gives you Java and the Android SDK — plus every library your app
 depends on, because the metadata is generated from your app's own classpath.
 
 ```ts
-import NativeScriptNativeApi from "@nativescript/react-native/src/NativeScriptNativeApi";
+import NativeScript from "@nativescript/react-native";
 
-NativeScriptNativeApi.install("");
+NativeScript.init();
 
 const now = java.lang.System.currentTimeMillis();
 const sdk = android.os.Build.VERSION.SDK_INT;
@@ -774,6 +778,12 @@ Java callback arriving on another thread is marshalled onto the JS thread for
 you. The one thing to avoid is blocking the JS thread while waiting for such a
 callback — `thread.join()` immediately after `thread.start()` deadlocks, because
 the callback cannot run until the JS thread is free again.
+
+That includes callbacks Android runs on the main thread: a `Runnable` posted to
+`new Handler(Looper.getMainLooper())` runs its JavaScript on the JS thread. There
+is no Worklets UI runtime on Android yet, so `runOnUI()` and the UIKit view
+helpers are iOS only, and touching an `android.view.View` from JavaScript throws
+`CalledFromWrongThreadException`. Every non-UI Android API is available.
 
 ### What a guest does not install
 
