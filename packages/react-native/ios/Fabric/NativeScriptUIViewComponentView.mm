@@ -10,6 +10,11 @@
 
 using namespace facebook::react;
 
+static const std::shared_ptr<const NativeScriptUIViewProps>& NativeScriptUIViewDefaultProps() {
+  static const auto defaultProps = std::make_shared<const NativeScriptUIViewProps>();
+  return defaultProps;
+}
+
 static BOOL NativeScriptFabricViewIsDescendantOfView(UIView* view, UIView* ancestor) {
   UIView* current = view;
   while (current != nil) {
@@ -78,8 +83,7 @@ static UITabBar* NativeScriptFabricVisibleTabBarAtPoint(UIView* root, UIWindow* 
 
 - (instancetype)initWithFrame:(CGRect)frame {
   if (self = [super initWithFrame:frame]) {
-    static const auto defaultProps = std::make_shared<const NativeScriptUIViewProps>();
-    _props = defaultProps;
+    _props = NativeScriptUIViewDefaultProps();
 
     _containerView = [[NativeScriptUIView alloc] initWithFrame:self.bounds];
     _containerView.hostReadyDelegate = self;
@@ -190,7 +194,12 @@ static UITabBar* NativeScriptFabricVisibleTabBarAtPoint(UIView* root, UIWindow* 
 }
 
 - (void)updateProps:(Props::Shared const&)props oldProps:(Props::Shared const&)oldProps {
-  const auto oldViewProps = std::static_pointer_cast<const NativeScriptUIViewProps>(_props);
+  // Diff against oldProps, not _props: React Native leaves _props untouched on
+  // recycle, while prepareForRecycle clears the container, so a recycled view
+  // mounted with its previous handle would otherwise never attach it.
+  const auto oldViewProps =
+      oldProps ? std::static_pointer_cast<const NativeScriptUIViewProps>(oldProps)
+               : NativeScriptUIViewDefaultProps();
   const auto newViewProps = std::static_pointer_cast<const NativeScriptUIViewProps>(props);
   const std::string oldNativeViewHandle = oldViewProps->nativeViewHandle;
   const std::string newNativeViewHandle = newViewProps->nativeViewHandle;
