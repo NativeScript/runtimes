@@ -136,8 +136,11 @@ Objective-C-visible pods or extra system frameworks:
 }
 ```
 
-Bare projects using `nativescript-rn configure` can put the same `metadata`
-object under a `nativeScriptReactNative` key in `package.json`.
+For Android release builds, `metadata.android.include` lists classes to keep;
+see [Android setup](#setup). Bare projects using `nativescript-rn configure` can
+put the same `metadata` object under a `nativeScriptReactNative` key in
+`package.json`. An `android` block written into `nativescript.react-native.json`
+by hand is kept unless the options set one.
 
 Importing the package in a build without its native module is safe:
 `NativeScript.isAvailable()` returns `false` there, and `init()` and the other
@@ -667,12 +670,28 @@ That adds two things to your build:
 
   Debug builds ship the whole classpath. Release builds ship only what the
   JavaScript bundle can reach, plus the supertypes, nested classes and
-  signature types those classes need. A class your code only reaches
-  dynamically (a name built at runtime, for example) can therefore resolve in
-  debug and be missing in release. In a release build, `whitelist.mdg` adds to
-  that set rather than replacing it, so list such classes there.
-  `-PnsFilterMetadata=false` turns the filter off and ships the whole
-  classpath.
+  signature types those classes need. They also leave out the packages of
+  autolinked React Native modules, which are reached over the TurboModule
+  bridge rather than the interop. A class your code only reaches dynamically
+  (a name built at runtime, for example) can therefore resolve in debug and be
+  missing in release. Declare such classes in `nativescript.react-native.json`
+  at the project root, as `"pkg.Class"`, `"pkg.*"` or `"pkg:Class"`:
+
+  ```json
+  {
+    "reactNative": {
+      "metadata": {
+        "android": {
+          "include": ["com.example.sdk.Worker", "com.example.views.*"]
+        }
+      }
+    }
+  }
+  ```
+
+  With Expo, put the same `android` object under `metadata` in the config
+  plugin options. `-PnsFilterMetadata=false` turns the filter off and ships
+  the whole classpath.
 * **TypeScript declarations** — for the same classpath, so third-party
   libraries are typed too. They are written to `types/android/` next to the app
   on the first build and regenerated only when the classpath changes; commit
