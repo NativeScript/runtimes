@@ -55,6 +55,7 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
     public NativeScriptNativeApiModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.reactContext = reactContext;
+        NativeScriptViewRegistry.setReactContext(reactContext);
     }
 
     @Override
@@ -122,7 +123,8 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
         // Worklet runtimes are separate jsi::Runtimes on separate threads. Each
         // would need its own attach and its own object manager, which the object
         // graph does not yet model on Android; iOS reaches this through
-        // NativeApiJsi.mm. Reported honestly rather than silently no-oped.
+        // NativeApiJsi.mm. Android's runOnUI lends this runtime to the main
+        // thread instead (com.tns.MainThreadLoan), so it needs no second one.
         return false;
     }
 

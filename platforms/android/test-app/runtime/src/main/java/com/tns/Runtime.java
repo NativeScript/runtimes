@@ -56,6 +56,15 @@ public class Runtime {
     // Implemented alongside attachNativeScript; see detach().
     private native void detachNativeScript(int runtimeId);
 
+    // Guest only, implemented alongside attachNativeScript; see MainThreadLoan.
+    private native void runMainThreadTaskNative(int runtimeId, long task);
+
+    private native int releaseEngineLockNative(int runtimeId);
+
+    private native void reacquireEngineLockNative(int runtimeId, int depth);
+
+    private native void drainMicrotasksNative(int runtimeId);
+
     private native void runModule(int runtimeId, String filePath) throws NativeScriptException;
 
     private native Object runScript(int runtimeId, String filePath) throws NativeScriptException;
@@ -147,6 +156,9 @@ public class Runtime {
 
     // Read by the GC listener's thread.
     private volatile boolean detached;
+
+    // Set when attached to a host runtime, whose JS thread is not the main thread.
+    private MainThreadLoan mainThreadLoan;
 
     private final static String FAILED_CTOR_RESOLUTION_MSG = "Check the number and type of arguments.\n" +
             "Primitive types need to be manually wrapped in their respective Object wrappers.\n" +
@@ -524,6 +536,8 @@ public class Runtime {
         attachNativeScript(getRuntimeId(), metadataPath, hostRuntimePtr, logger.isEnabled(), maxLogcatObjectSize, forceConsoleLog,
                 bootstrapScript);
 
+        mainThreadLoan = new MainThreadLoan(this, threadScheduler);
+
         GcListener.subscribe(this);
 
         initialized = true;
@@ -540,6 +554,10 @@ public class Runtime {
             return;
         }
         detached = true;
+
+        if (mainThreadLoan != null) {
+            mainThreadLoan.close();
+        }
 
         GcListener.unsubscribe(this);
         runtimeCache.remove(runtimeId);
@@ -558,6 +576,47 @@ public class Runtime {
         strongInstances.clear();
         strongJavaObjectToID.clear();
         detachedRuntimes.add(this);
+    }
+
+    /*
+        Called by the guest's __nativeScriptRunOnMainThread on the JS thread.
+        Returns once the main thread has run `task`, a native pointer it hands
+        back to runMainThreadTaskNative.
+     */
+    @RuntimeCallable
+    private void runOnMainThread(long task) {
+        mainThreadLoan.runOnMainThread(task);
+    }
+
+    /* Makes this the runtime getCurrentRuntime answers on the calling thread; returns the previous one. */
+    Runtime enterOnThisThread() {
+        Runtime previous = currentRuntime.get();
+        currentRuntime.set(this);
+        return previous;
+    }
+
+    static void restoreOnThisThread(Runtime previous) {
+        if (previous == null) {
+            currentRuntime.remove();
+        } else {
+            currentRuntime.set(previous);
+        }
+    }
+
+    void runMainThreadTask(long task) {
+        runMainThreadTaskNative(runtimeId, task);
+    }
+
+    int releaseEngineLock() {
+        return releaseEngineLockNative(runtimeId);
+    }
+
+    void reacquireEngineLock(int depth) {
+        reacquireEngineLockNative(runtimeId, depth);
+    }
+
+    void drainMicrotasks() {
+        drainMicrotasksNative(runtimeId);
     }
 
     private static Runtime getDetachedObjectRuntime(Object object) {
@@ -1453,6 +1512,20 @@ public class Runtime {
                     throw e;
                 }
             }
+        } else if (mainThreadLoan != null && MainThreadLoan.isMainThread()) {
+            // A view's listener runs where it can touch the view.
+            ret = mainThreadLoan.borrow(() -> {
+                try {
+                    return callJSMethodNative(getRuntimeId(), javaObjectID, claz, methodName, returnType, isConstructor, packageArgs(tmpArgs));
+                } catch (NativeScriptException e) {
+                    if (discardUncaughtJsExceptions) {
+                        android.util.Log.w("Warning", "NativeScript discarding uncaught JS exception!");
+                        passExceptionToJS(e, false, true);
+                        return null;
+                    }
+                    throw e;
+                }
+            });
         } else {
             final Object[] arr = new Object[2];
 
@@ -1474,6 +1547,11 @@ public class Runtime {
                                 throw e;
                             }
                         } finally {
+                            // A looper message is no React Native task, so nothing
+                            // else drains what the call queued.
+                            if (mainThreadLoan != null) {
+                                drainMicrotasks();
+                            }
                             this.notify();
                             arr[1] = Boolean.TRUE;
                         }
