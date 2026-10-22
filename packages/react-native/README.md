@@ -174,8 +174,9 @@ await NativeScript.runOnUI(() => {
 });
 ```
 
-`runOnUI()` only accepts Worklets callbacks and throws when the callback was not
-transformed into a Worklets function; running React Native's JS-thread runtime
+On iOS, `runOnUI()` only accepts Worklets callbacks and throws when the callback was not
+transformed into a Worklets function (Android runs it on the main thread instead; see
+[Threads](#threads)); running React Native's JS-thread runtime
 as a UI-thread shim is not supported. `installWorklets()` is still exported for
 custom initialization, but it throws when Worklets is unavailable or
 incompatible.
@@ -810,17 +811,54 @@ const listener = new android.view.View.OnClickListener({ onClick(v) {} });
 
 ### Threads
 
-React Native owns the JavaScript thread, and JSI may only be touched there. A
-Java callback arriving on another thread is marshalled onto the JS thread for
-you. The one thing to avoid is blocking the JS thread while waiting for such a
-callback — `thread.join()` immediately after `thread.start()` deadlocks, because
-the callback cannot run until the JS thread is free again.
+React Native runs JavaScript on its own thread, and Android views belong to the
+main thread. JSI may be entered from one thread at a time, so when JavaScript
+has to run on the main thread, the JS thread stops and waits while it does.
+React Native hands its runtime over the same way for its own synchronous work.
 
-That includes callbacks Android runs on the main thread: a `Runnable` posted to
-`new Handler(Looper.getMainLooper())` runs its JavaScript on the JS thread. There
-is no Worklets UI runtime on Android yet, so `runOnUI()` and the UIKit view
-helpers are iOS only, and touching an `android.view.View` from JavaScript throws
-`CalledFromWrongThreadException`. Every non-UI Android API is available.
+- **Callbacks the main thread makes** (a view's listeners, a `Runnable` posted
+  to `new Handler(Looper.getMainLooper())`) run their JavaScript on the main
+  thread, so they can touch views.
+- **Callbacks from any other thread** are marshalled onto the JS thread. Promises
+  they resolve settle when the callback returns.
+- **`runOnUI(callback, ...args)`** runs `callback` on the main thread and
+  resolves with what it returns. There is no Worklets runtime involved: it is the
+  same runtime, so `callback` sees the caller's values, not copies. The Worklets
+  Babel plugin still turns a function passed to `runOnUI` into a worklet, which
+  drops its `this`; pass what it needs as arguments.
+
+Don't block the JS thread while it waits for one of these. `thread.join()`
+straight after `thread.start()` deadlocks, because the callback can't run until
+the JS thread is free.
+
+### Android views
+
+`runOnUI` builds a view on the main thread. `androidContext()` returns the
+Context to build it with, and `nativeViewHandle(view)` returns the string a
+`NativeScriptUIView` takes to show it. The host sizes the view to fill its own
+layout box:
+
+```tsx
+import NativeScript, { androidContext, nativeViewHandle } from "@nativescript/react-native";
+import NativeScriptUIView from "@nativescript/react-native/src/NativeScriptUIViewNativeComponent";
+
+const views = new Map<string, unknown>();
+
+async function makeLabel(id: string, text: string) {
+  return NativeScript.runOnUI((id: string, text: string) => {
+    const label = new android.widget.TextView(androidContext());
+    label.setText(text);
+    views.set(id, label); // A handle does not keep its view alive.
+    return nativeViewHandle(label);
+  }, id, text);
+}
+
+// <NativeScriptUIView style={{ height: 48 }} nativeViewHandle={handle} />
+```
+
+A view is in one place at a time: showing its handle in a second host moves it
+there. Update a view from `runOnUI` or from one of its own listeners. The
+`defineUIKitView` helpers are UIKit's and remain iOS only.
 
 ### What a guest does not install
 

@@ -1017,7 +1017,7 @@ function nativeModule(): NativeScriptNativeApiSpec {
 }
 
 // Android has no Worklets runtime to install into (see installWorkletRuntime in
-// NativeScriptNativeApiModule.java).
+// NativeScriptNativeApiModule.java): runOnUI runs on its main thread instead.
 function supportsWorkletRuntime(): boolean {
   return Platform.OS === "ios";
 }
@@ -1025,7 +1025,7 @@ function supportsWorkletRuntime(): boolean {
 function assertWorkletRuntimeSupported(): void {
   if (!supportsWorkletRuntime()) {
     throw new Error(
-      `NativeScript does not support Worklets on ${Platform.OS}: there is no UI runtime to install into, so runOnUI and UIKit views are iOS only.`,
+      `NativeScript does not install into Worklets on ${Platform.OS}: there is no UI runtime to install into. runOnUI runs on the main thread there without one.`,
     );
   }
 }
@@ -1401,6 +1401,9 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
   }
 
   ensureNativeScriptInstalled();
+  if (Platform.OS === "android") {
+    return runOnAndroidMainThread(callback, args);
+  }
   const worklets = ensureWorkletsInstalled();
   if (worklets.isWorkletFunction(callback) !== true) {
     throw workletsSetupError(
@@ -1408,6 +1411,28 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
     );
   }
   return worklets.runOnUIAsync(callback, ...args);
+}
+
+// One runtime, so arguments and captured values are the caller's own rather
+// than copies. The JS thread waits while the main thread runs the callback.
+function runOnAndroidMainThread<Args extends unknown[], ReturnValue>(
+  callback: (...args: Args) => ReturnValue | Promise<ReturnValue>,
+  args: Args,
+): Promise<ReturnValue> {
+  const runOnMainThread = (globalThis as Record<string, any>)
+    .__nativeScriptRunOnMainThread;
+  if (typeof runOnMainThread !== "function") {
+    return Promise.reject(
+      new Error(
+        "This build of NativeScript cannot run on the Android main thread; rebuild the app",
+      ),
+    );
+  }
+  try {
+    return Promise.resolve(runOnMainThread(() => callback(...args)));
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
 function callbackInvoker<T extends AnyFunction>(
@@ -1567,8 +1592,28 @@ export const createEventBridge = eventBridge;
 export function isMainThread(): boolean {
   "worklet";
 
-  const NSThread = (globalThis as Record<string, any>).NSThread;
-  return NSThread?.isMainThread === true;
+  const g = globalThis as Record<string, any>;
+  if (typeof g.__nativeScriptIsMainThread === "function") {
+    return g.__nativeScriptIsMainThread() === true;
+  }
+  return g.NSThread?.isMainThread === true;
+}
+
+export function androidContext(): unknown {
+  const context = (globalThis as Record<string, any>)
+    .__nativeScriptAndroidContext;
+  return typeof context === "function" ? context() : null;
+}
+
+export function nativeViewHandle(view: unknown): string {
+  "worklet";
+
+  const androidViewHandle = (globalThis as Record<string, any>)
+    .__nativeScriptAndroidViewHandle;
+  if (typeof androidViewHandle === "function") {
+    return androidViewHandle(view);
+  }
+  return nativeHandleForUIKitView(view);
 }
 
 export function assertUIKitThread(
@@ -3286,6 +3331,7 @@ export function defineUIViewController<
 }
 
 const NativeScript = {
+  androidContext,
   init,
   install,
   installGlobals,
@@ -3308,6 +3354,7 @@ const NativeScript = {
   isFrameworkLoaded,
   isMainThread,
   jsInvoker,
+  nativeViewHandle,
   loadFramework,
   release,
   retain,
