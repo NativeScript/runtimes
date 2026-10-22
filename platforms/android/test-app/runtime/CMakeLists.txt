@@ -118,6 +118,7 @@ include_directories(
         # shared runtime modules
         ${NS_RUNTIME_MODULES_DIR}
         ${NS_RUNTIME_MODULES_DIR}/url
+        ${NS_RUNTIME_MODULES_DIR}/esm
         # shared Node-API headers
         ${NS_NAPI_DIR}/common
 )
@@ -143,6 +144,7 @@ if (NS_BINDING STREQUAL "napi")
             ${NS_RUNTIME_MODULES_DIR}/url/URLSearchParams.cpp
             ${NS_RUNTIME_MODULES_DIR}/url/URLPattern.cpp
             ${NS_RUNTIME_MODULES_DIR}/url/ada/ada.cpp
+            ${NS_RUNTIME_MODULES_DIR}/esm/ESModuleSupport.cpp
     )
     # modules/url: URL, URLSearchParams, URLPattern (backed by vendored ada)
 else ()

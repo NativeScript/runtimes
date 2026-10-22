@@ -63,6 +63,8 @@ class ModuleInternal {
         napi_value RequireCallbackImpl(napi_env env, napi_callback_info info);
 
         napi_value WrapModuleContent(napi_env env, const std::string& path);
+        napi_value WrapESModuleContent(napi_env env, const std::string& path);
+        napi_value WrapWithModuleFunction(napi_env env, const std::string& content, bool isESModule);
 
         napi_value LoadImpl(napi_env env, const std::string& moduleName, const std::string& baseDir, bool& isData);
 

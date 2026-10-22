@@ -129,6 +129,22 @@ Runtime* TryGetRuntime(int runtimeId) {
     return runtime;
 }
 
+// Brackets a call from Java into JS so the runtime knows when the outermost
+// one returns; see Runtime::RunMicrotaskCheckpoint.
+class JsCallScope {
+public:
+    explicit JsCallScope(Runtime* runtime) : m_runtime(runtime) {
+        m_runtime->EnterJsCall();
+    }
+
+    ~JsCallScope() {
+        m_runtime->LeaveJsCall();
+    }
+
+private:
+    Runtime* m_runtime;
+};
+
 extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject obj, jint runtimeId, jstring scriptFile) {
     auto runtime = TryGetRuntime(runtimeId);
     if (runtime == nullptr) {
@@ -136,9 +152,11 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject o
     }
 
     NapiScope scope(runtime->GetNapiEnv());
+    JsCallScope call(runtime);
 
     try {
         runtime->RunModule(_env, obj, scriptFile);
+        runtime->RunMicrotaskCheckpoint();
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(runtime->GetNapiEnv());
     } catch (std::exception e) {
@@ -160,8 +178,10 @@ extern "C" JNIEXPORT jobject Java_com_tns_Runtime_runScript(JNIEnv* _env, jobjec
 
     napi_env napiEnv = runtime->GetNapiEnv();
     NapiScope scope(napiEnv);
+    JsCallScope call(runtime);
     try {
         result = runtime->RunScript(_env, obj, scriptFile);
+        runtime->RunMicrotaskCheckpoint();
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(napiEnv);
     } catch (std::exception e) {
@@ -183,8 +203,10 @@ extern "C" JNIEXPORT jobject Java_com_tns_Runtime_callJSMethodNative(JNIEnv* _en
     if (runtime == nullptr) return result;
 
     NapiScope scope(runtime->GetNapiEnv());
+    JsCallScope call(runtime);
     try {
         result = runtime->CallJSMethodNative(_env, obj, javaObjectID, claz, methodName, retType, isConstructor, packagedArgs);
+        runtime->RunMicrotaskCheckpoint();
     } catch (NativeScriptException& e) {
         e.ReThrowToJava( runtime->GetNapiEnv());
     } catch (std::exception e) {
@@ -206,9 +228,11 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_createJSInstanceNative(JNIEnv* _e
     if (runtime == nullptr) return;
 
     NapiScope scope(runtime->GetNapiEnv());
+    JsCallScope call(runtime);
 
     try {
         runtime->CreateJSInstanceNative(_env, obj, javaObject, javaObjectID, className);
+        runtime->RunMicrotaskCheckpoint();
     } catch (NativeScriptException& e) {
         e.ReThrowToJava( runtime->GetNapiEnv());
     } catch (std::exception e) {
@@ -286,9 +310,11 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_passExceptionToJsNative(JNIEnv* j
     if (runtime == nullptr) return;
 
     NapiScope scope(runtime->GetNapiEnv());
+    JsCallScope call(runtime);
 
     try {
         runtime->PassExceptionToJsNative(jEnv, obj, exception, message, fullStackTrace, jsStackTrace, isDiscarded, isPendingError);
+        runtime->RunMicrotaskCheckpoint();
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(runtime->GetNapiEnv());
     } catch (std::exception e) {

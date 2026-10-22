@@ -192,28 +192,45 @@ class Module {
         return foundModule;
     }
 
-    //tries to load the path as a file, returns null if that's not possible
-    private static File loadAsFile(File path) {
-        String fallbackExtension;
+    // Probe order for extensionless specifiers and directory indexes. It
+    // matches the Apple runtime so a project resolves the same file on both.
+    private static final String[] SCRIPT_EXTENSIONS = new String[]{".mjs", ".js", ".cjs"};
 
-        boolean isJSFile = path.getName().endsWith(".js");
-        boolean isSOFile = path.getName().endsWith(".so");
-        boolean isJSONFile = path.getName().endsWith(".json");
-
-        if (isJSFile || isJSONFile || isSOFile) {
-            fallbackExtension = "";
-        } else {
-            fallbackExtension = ".js";
+    private static boolean isScriptFile(String fileName) {
+        for (String extension : SCRIPT_EXTENSIONS) {
+            if (fileName.endsWith(extension)) {
+                return true;
+            }
         }
+        return false;
+    }
 
-        File foundFile = new File(path.getAbsolutePath() + fallbackExtension);
+    private static File existingFile(File candidate) {
         try {
-            File canonicalFile = foundFile.getCanonicalFile();
+            File canonicalFile = candidate.getCanonicalFile();
             if (canonicalFile.exists() && canonicalFile.isFile()) {
-                return foundFile;
+                return candidate;
             }
         } catch (IOException e) {
-            // return null
+            // treated as missing
+        }
+        return null;
+    }
+
+    //tries to load the path as a file, returns null if that's not possible
+    private static File loadAsFile(File path) {
+        String fileName = path.getName();
+        boolean hasKnownExtension = isScriptFile(fileName) || fileName.endsWith(".so") || fileName.endsWith(".json");
+
+        if (hasKnownExtension) {
+            return existingFile(path);
+        }
+
+        for (String extension : SCRIPT_EXTENSIONS) {
+            File foundFile = existingFile(new File(path.getAbsolutePath() + extension));
+            if (foundFile != null) {
+                return foundFile;
+            }
         }
 
         return null;
@@ -248,14 +265,11 @@ class Module {
             }
         }
 
-        //fallback to index js
-        foundFile = new File(path, "index.js");
-        try {
-            if (foundFile.getCanonicalFile().exists()) {
+        for (String extension : SCRIPT_EXTENSIONS) {
+            foundFile = existingFile(new File(path, "index" + extension));
+            if (foundFile != null) {
                 return foundFile;
             }
-        } catch (IOException e) {
-            return null;
         }
 
         //TODO: plamen5kov: add later if necessary

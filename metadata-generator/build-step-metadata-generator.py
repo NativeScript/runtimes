@@ -177,6 +177,58 @@ if signature_bindings_cpp_path is None:
         signature_bindings_cpp_path = default_signature_bindings_path
 
 
+def libclang_search_dirs():
+    """Toolchain lib dirs holding libclang.dylib, active toolchain first.
+
+    The generator links @rpath/libclang.dylib with an rpath pointing at the
+    toolchain of the machine that built it. That path need not exist on the
+    machine running the build (Xcode installed under another name, a beta, or
+    Command Line Tools only), so the active toolchain has to be offered to dyld
+    as a fallback.
+    """
+    candidates = []
+    for env_name in ("TOOLCHAIN_DIR", "DT_TOOLCHAIN_DIR"):
+        toolchain_dir = env_or_empty(env_name)
+        if toolchain_dir:
+            candidates.append(os.path.join(toolchain_dir, "usr", "lib"))
+
+    try:
+        clang_path = subprocess.check_output(
+            ["xcrun", "--find", "clang"],
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        clang_path = ""
+    if clang_path:
+        candidates.append(os.path.join(os.path.dirname(os.path.dirname(clang_path)), "lib"))
+
+    developer_dir = env_or_empty("DEVELOPER_DIR")
+    if developer_dir:
+        candidates.append(os.path.join(developer_dir, "Toolchains", "XcodeDefault.xctoolchain", "usr", "lib"))
+
+    candidates.append("/Library/Developer/CommandLineTools/usr/lib")
+
+    result = []
+    for candidate in candidates:
+        if candidate in result:
+            continue
+        if os.path.isfile(os.path.join(candidate, "libclang.dylib")):
+            result.append(candidate)
+    return result
+
+
+def generator_environment():
+    child_env = os.environ.copy()
+    search_dirs = libclang_search_dirs()
+    if search_dirs:
+        existing = child_env.get("DYLD_FALLBACK_LIBRARY_PATH")
+        if existing:
+            search_dirs.append(existing)
+        child_env["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(search_dirs)
+    return child_env
+
+
 def save_stream_to_file(filename, stream):
     f = open(filename, "w")
     f.write(stream)
@@ -246,7 +298,8 @@ def generate_metadata(arch):
         generator_call,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True
+        universal_newlines=True,
+        env=generator_environment()
     )
     sys.stdout.flush()
     output_stream_content, error_stream_content = child_process.communicate()

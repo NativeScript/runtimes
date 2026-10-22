@@ -38,6 +38,18 @@ cp -R "./platforms/apple/templates/ios/." "$STAGING_DIR/framework"
 cp -R "dist/NativeScript.xcframework" "$STAGING_DIR/framework/internal"
 cp -R "dist/TKLiveSync.xcframework" "$STAGING_DIR/framework/internal"
 
+# Hermes is linked as its own dynamic framework (@rpath/hermes.framework), so
+# the package has to carry it and the app template has to embed it.
+if [ "$IOS_VARIANT" = "ios-hermes" ]; then
+    if [ ! -d "Frameworks/hermes.xcframework" ]; then
+        echo "Frameworks/hermes.xcframework is missing; run scripts/download_hermes.sh first." >&2
+        exit 1
+    fi
+    cp -R "Frameworks/hermes.xcframework" "$STAGING_DIR/framework/internal"
+    python3 "$SCRIPT_DIR/embed_engine_xcframework.py" \
+        "$STAGING_DIR/framework/__PROJECT_NAME__.xcodeproj/project.pbxproj" "hermes.xcframework"
+fi
+
 mkdir -p "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
 cp -R "metadata-generator/dist/x86_64/." "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
 
