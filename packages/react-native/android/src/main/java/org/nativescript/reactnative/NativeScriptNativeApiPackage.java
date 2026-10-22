@@ -7,8 +7,11 @@ import com.facebook.react.bridge.NativeModule;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.module.model.ReactModuleInfo;
 import com.facebook.react.module.model.ReactModuleInfoProvider;
+import com.facebook.react.uimanager.ViewManager;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Autolinking entry point for @nativescript/react-native. */
@@ -21,6 +24,12 @@ public class NativeScriptNativeApiPackage extends BaseReactPackage {
             return new NativeScriptNativeApiModule(reactContext);
         }
         return null;
+    }
+
+    @SuppressWarnings("rawtypes")
+    @Override
+    public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
+        return Collections.singletonList(new NativeScriptUIViewManager());
     }
 
     @Override

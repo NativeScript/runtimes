@@ -273,6 +273,12 @@ export type UIViewControllerDefinition<
 export function init(metadataPath?: string, options?: InstallOptions): boolean;
 export const install: typeof init;
 export function installGlobals(): boolean;
+/**
+ * Whether this build contains the package's native module. False in Expo Go
+ * and in builds made before the package was added; every other function that
+ * needs the module throws there.
+ */
+export function isAvailable(): boolean;
 export function isInstalled(): boolean;
 export function defaultMetadataPath(): string;
 export function getRuntimeBackend(): string;
@@ -280,6 +286,12 @@ export function installWorklets(
   worklets?: NativeScriptWorklets,
   metadataPath?: string,
 ): boolean;
+/**
+ * Runs `callback` on the UI thread, where views can be touched. On iOS it must
+ * be a worklet, and runs on the Worklets UI runtime. On Android it runs on the
+ * main thread in the same runtime, while the JavaScript thread waits; Java
+ * callbacks the main thread makes, such as a view's listeners, run there too.
+ */
 export function runOnUI<Args extends unknown[], ReturnValue>(
   callback: (...args: Args) => ReturnValue | Promise<ReturnValue>,
   ...args: Args
@@ -299,6 +311,17 @@ export function eventBridge<T extends (...args: any[]) => any>(
 ): T | NativeScriptInvokedCallback<T>;
 export const createEventBridge: typeof eventBridge;
 export function isMainThread(): boolean;
+/**
+ * The Context to build an Android view with: the current Activity, or the
+ * application before there is one. Null on iOS.
+ */
+export function androidContext(): unknown;
+/**
+ * The string a `NativeScriptUIView` takes as `nativeViewHandle` to show `view`:
+ * a UIView on iOS (call it on the UI runtime), an android.view.View on Android.
+ * The handle does not keep the view alive; hold the view until a host shows it.
+ */
+export function nativeViewHandle(view: unknown): string;
 export function assertUIKitThread(message?: string): void;
 export function refreshUIKitHostView(view: unknown): boolean;
 export function refreshUIKitHostViewHandle(viewHandle: string): boolean;
@@ -339,9 +362,11 @@ export function defineUIViewController<
 ): UIKitViewComponent<Props, Controller>;
 
 declare const NativeScript: {
+  androidContext: typeof androidContext;
   init: typeof init;
   install: typeof install;
   installGlobals: typeof installGlobals;
+  isAvailable: typeof isAvailable;
   isInstalled: typeof isInstalled;
   defaultMetadataPath: typeof defaultMetadataPath;
   defineUIKitContainer: typeof defineUIKitContainer;
@@ -361,6 +386,7 @@ declare const NativeScript: {
   isMainThread: typeof isMainThread;
   jsInvoker: typeof jsInvoker;
   loadFramework: typeof loadFramework;
+  nativeViewHandle: typeof nativeViewHandle;
   release: typeof release;
   retain: typeof retain;
   refreshUIKitHostView: typeof refreshUIKitHostView;

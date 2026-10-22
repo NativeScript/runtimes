@@ -12,7 +12,9 @@ import type {
   RefAttributes,
 } from "react";
 import type { ViewProps } from "react-native";
+import { Platform } from "react-native";
 import NativeScriptNativeApi from "./NativeScriptNativeApi";
+import type { Spec as NativeScriptNativeApiSpec } from "./NativeScriptNativeApi";
 import NativeScriptUIViewNativeComponent from "./NativeScriptUIViewNativeComponent";
 
 declare const require: (id: string) => any;
@@ -906,6 +908,26 @@ function installInlineFunctions(): void {
   );
 }
 
+// Only full C constant names (`NSTextAlignmentCenter`, `kCLAuthorizationStatus...`)
+// become globals. The enum object also carries short member names (`Center`,
+// CloudKit's `Zone`), which as globals shadow what libraries feature-detect.
+function isEnumMemberGlobalName(enumName: string, memberName: string): boolean {
+  if (/^-?\d+$/.test(memberName)) {
+    return false;
+  }
+  if (/^k[A-Z]/.test(memberName)) {
+    return true;
+  }
+  const prefix = /^[A-Z]+(?=[A-Z][a-z])/.exec(enumName)?.[0];
+  return (
+    prefix !== undefined &&
+    prefix.length >= 2 &&
+    memberName.length > prefix.length &&
+    memberName.startsWith(prefix) &&
+    /[A-Z]/.test(memberName[prefix.length])
+  );
+}
+
 export function installGlobals(): boolean {
   const api = nativeApiHost();
   if (!api) {
@@ -948,7 +970,7 @@ export function installGlobals(): boolean {
       continue;
     }
     for (const memberName of Object.keys(enumValue)) {
-      if (/^-?\d+$/.test(memberName)) {
+      if (!isEnumMemberGlobalName(name, memberName)) {
         continue;
       }
       defineLazyNativeGlobal(
@@ -983,10 +1005,38 @@ export function installGlobals(): boolean {
   return true;
 }
 
+function nativeModule(): NativeScriptNativeApiSpec {
+  if (NativeScriptNativeApi == null) {
+    throw new Error(
+      "@nativescript/react-native's native module (NativeScriptNativeApi) is not in this build. " +
+        "The package contains native code, so Expo Go cannot load it: install it in a development " +
+        "build and rebuild the app (npx expo run:ios / run:android, or EAS Build).",
+    );
+  }
+  return NativeScriptNativeApi;
+}
+
+// Android has no Worklets runtime to install into (see installWorkletRuntime in
+// NativeScriptNativeApiModule.java): runOnUI runs on its main thread instead.
+function supportsWorkletRuntime(): boolean {
+  return Platform.OS === "ios";
+}
+
+function assertWorkletRuntimeSupported(): void {
+  if (!supportsWorkletRuntime()) {
+    throw new Error(
+      `NativeScript does not install into Worklets on ${Platform.OS}: there is no UI runtime to install into. runOnUI runs on the main thread there without one.`,
+    );
+  }
+}
+
+export function isAvailable(): boolean {
+  return NativeScriptNativeApi != null;
+}
+
 export function init(metadataPath = "", options: InstallOptions = {}): boolean {
-  const installed =
-    NativeScriptNativeApi.isInstalled() ||
-    NativeScriptNativeApi.install(metadataPath);
+  const api = nativeModule();
+  const installed = api.isInstalled() || api.install(metadataPath);
   if (installed) {
     installInteropConstructors();
     installInlineFunctions();
@@ -994,7 +1044,7 @@ export function init(metadataPath = "", options: InstallOptions = {}): boolean {
   if (installed && options.globals === true) {
     installGlobals();
   }
-  if (installed) {
+  if (installed && supportsWorkletRuntime()) {
     ensureWorkletsInstalled(metadataPath);
   }
   return installed;
@@ -1003,15 +1053,15 @@ export function init(metadataPath = "", options: InstallOptions = {}): boolean {
 export const install = init;
 
 export function isInstalled(): boolean {
-  return NativeScriptNativeApi.isInstalled();
+  return NativeScriptNativeApi != null && NativeScriptNativeApi.isInstalled();
 }
 
 export function defaultMetadataPath(): string {
-  return NativeScriptNativeApi.defaultMetadataPath();
+  return nativeModule().defaultMetadataPath();
 }
 
 export function getRuntimeBackend(): string {
-  return NativeScriptNativeApi.getRuntimeBackend();
+  return nativeModule().getRuntimeBackend();
 }
 
 let workletsAdapter: NativeScriptWorklets | undefined;
@@ -1292,16 +1342,19 @@ function ensureWorkletsInstalled(metadataPath = ""): NativeScriptWorklets {
   if (workletsAdapter) {
     return workletsAdapter;
   }
+  assertWorkletRuntimeSupported();
   installWorklets(requireReactNativeWorklets(), metadataPath);
   return workletsAdapter as NativeScriptWorklets;
 }
 
 export function installWorklets(
-  worklets: NativeScriptWorklets = requireReactNativeWorklets(),
+  worklets?: NativeScriptWorklets,
   metadataPath = "",
 ): boolean {
-  if (!NativeScriptNativeApi.isInstalled()) {
-    const installed = NativeScriptNativeApi.install(metadataPath);
+  const api = nativeModule();
+  assertWorkletRuntimeSupported();
+  if (!api.isInstalled()) {
+    const installed = api.install(metadataPath);
     if (!installed) {
       throw new Error(
         "NativeScript Native API JSI host object was not installed",
@@ -1311,14 +1364,16 @@ export function installWorklets(
     installInlineFunctions();
   }
 
-  const validWorklets = validateWorkletsModule(worklets);
+  const validWorklets = validateWorkletsModule(
+    worklets ?? requireReactNativeWorklets(),
+  );
   const holder = validWorklets.getUIRuntimeHolder();
   if (holder == null || typeof holder !== "object") {
     throw workletsSetupError(
       "NativeScript.runOnUI could not resolve a Worklets UI runtime",
     );
   }
-  const installRuntime = NativeScriptNativeApi.installWorkletRuntime;
+  const installRuntime = api.installWorkletRuntime;
   if (typeof installRuntime !== "function") {
     throw workletsSetupError(
       "NativeScript Native API was built without RNWorklets runtime support",
@@ -1346,6 +1401,9 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
   }
 
   ensureNativeScriptInstalled();
+  if (Platform.OS === "android") {
+    return runOnAndroidMainThread(callback, args);
+  }
   const worklets = ensureWorkletsInstalled();
   if (worklets.isWorkletFunction(callback) !== true) {
     throw workletsSetupError(
@@ -1353,6 +1411,28 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
     );
   }
   return worklets.runOnUIAsync(callback, ...args);
+}
+
+// One runtime, so arguments and captured values are the caller's own rather
+// than copies. The JS thread waits while the main thread runs the callback.
+function runOnAndroidMainThread<Args extends unknown[], ReturnValue>(
+  callback: (...args: Args) => ReturnValue | Promise<ReturnValue>,
+  args: Args,
+): Promise<ReturnValue> {
+  const runOnMainThread = (globalThis as Record<string, any>)
+    .__nativeScriptRunOnMainThread;
+  if (typeof runOnMainThread !== "function") {
+    return Promise.reject(
+      new Error(
+        "This build of NativeScript cannot run on the Android main thread; rebuild the app",
+      ),
+    );
+  }
+  try {
+    return Promise.resolve(runOnMainThread(() => callback(...args)));
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
 function callbackInvoker<T extends AnyFunction>(
@@ -1512,8 +1592,28 @@ export const createEventBridge = eventBridge;
 export function isMainThread(): boolean {
   "worklet";
 
-  const NSThread = (globalThis as Record<string, any>).NSThread;
-  return NSThread?.isMainThread === true;
+  const g = globalThis as Record<string, any>;
+  if (typeof g.__nativeScriptIsMainThread === "function") {
+    return g.__nativeScriptIsMainThread() === true;
+  }
+  return g.NSThread?.isMainThread === true;
+}
+
+export function androidContext(): unknown {
+  const context = (globalThis as Record<string, any>)
+    .__nativeScriptAndroidContext;
+  return typeof context === "function" ? context() : null;
+}
+
+export function nativeViewHandle(view: unknown): string {
+  "worklet";
+
+  const androidViewHandle = (globalThis as Record<string, any>)
+    .__nativeScriptAndroidViewHandle;
+  if (typeof androidViewHandle === "function") {
+    return androidViewHandle(view);
+  }
+  return nativeHandleForUIKitView(view);
 }
 
 export function assertUIKitThread(
@@ -3231,9 +3331,11 @@ export function defineUIViewController<
 }
 
 const NativeScript = {
+  androidContext,
   init,
   install,
   installGlobals,
+  isAvailable,
   isInstalled,
   defaultMetadataPath,
   defineUIKitContainer,
@@ -3252,6 +3354,7 @@ const NativeScript = {
   isFrameworkLoaded,
   isMainThread,
   jsInvoker,
+  nativeViewHandle,
   loadFramework,
   release,
   retain,

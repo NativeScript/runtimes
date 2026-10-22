@@ -90,6 +90,12 @@ namespace tns {
 
         void Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
                     bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+
+        // Releases every handle held into the host runtime and unregisters this
+        // runtime, after which a new Attach can bind to another host runtime.
+        // The host runtime must still be alive, and its JS thread must not be
+        // running JS. Idempotent; the object itself is never freed.
+        void Detach();
 #endif
 
         jobject GetJavaRuntime() const;
@@ -231,6 +237,12 @@ namespace tns {
         static jmethodID GET_USED_MEMORY_METHOD_ID;
 
         static bool s_mainThreadInitialized;
+
+        // Separate from s_mainThreadInitialized, which a guest resets on Detach:
+        // the MetadataNode caches point into the tree, so it is built only once.
+        static bool s_metadataBuilt;
+
+        static void ReleaseMainLooper();
 
         static ALooper *m_mainLooper;
 

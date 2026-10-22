@@ -540,9 +540,31 @@ class NativeApiBridge {
   }
 
   ~NativeApiBridge() {
+    if (runtimeTornDown_.load(std::memory_order_acquire)) {
+      abandonRuntimeValues(roundTripValues_);
+      abandonRuntimeValues(roundTripCacheFramesByThread_);
+      abandonRuntimeValues(recentRoundTripValues_);
+#ifdef TARGET_ENGINE_HERMES
+      abandonRuntimeValues(roundTripRootCache_);
+#endif
+      abandonRuntimeValues(classValues_);
+      abandonRuntimeValues(classPrototypes_);
+      abandonRuntimeValues(pointerValues_);
+      abandonRuntimeValues(objectExpandos_);
+      abandonRuntimeValues(retainedLifetimes_);
+    }
     if (selfDl_ != nullptr) {
       dlclose(selfDl_);
     }
+  }
+
+  // Called when the runtime this bridge was installed into is torn down. Host
+  // objects can be shared into another runtime (react-native-worklets does so
+  // for values crossing runOnUI) and finalized there after this runtime is
+  // gone; releasing a Value whose runtime is destroyed is a use-after-free, so
+  // from here on every Value the bridge drops is leaked instead.
+  void markRuntimeTornDown() {
+    runtimeTornDown_.store(true, std::memory_order_release);
   }
 
   MDMetadataReader* metadata() const { return metadata_.get(); }
@@ -708,7 +730,7 @@ class NativeApiBridge {
             ? validationKey
             : (nativeIsObject ? nativeObjectClassKey(native) : 0);
     struct RoundTripCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       uintptr_t key = 0;
       uint64_t generation = 0;
       std::weak_ptr<Value> value;
@@ -722,7 +744,7 @@ class NativeApiBridge {
     const size_t firstSlot = (key >> 4) & 3;
     for (size_t i = 0; i < 4; i++) {
       RoundTripCacheEntry& entry = cache[(firstSlot + i) & 3];
-      if (entry.bridge == this && entry.key == key &&
+      if (entry.bridgeId == instanceId_ && entry.key == key &&
           entry.generation == generation) {
         if (entry.validationKey != expectedValidationKey) {
           break;
@@ -777,13 +799,13 @@ class NativeApiBridge {
       }
       if (entry == nullptr) {
         cache[firstSlot] = RoundTripCacheEntry{
-            this, key, generation, {}, true, false, expectedValidationKey};
+            instanceId_, key, generation, {}, true, false, expectedValidationKey};
         return Value::undefined();
       }
       storedValue = entry->value;
       cachedStringLike = entry->stringLikeNative;
       cache[firstSlot] = RoundTripCacheEntry{
-          this, key, generation, storedValue, false, cachedStringLike,
+          instanceId_, key, generation, storedValue, false, cachedStringLike,
           entry->validationKey};
     }
     if (stringLikeNative != nullptr) {
@@ -842,6 +864,7 @@ class NativeApiBridge {
       eraseRoundTripKeyFromScopedCaches(key, releaseAfterUnlock);
       roundTripValuesGeneration_.fetch_add(1, std::memory_order_release);
     }
+    abandonIfRuntimeTornDown(releaseAfterUnlock);
   }
 
   uint64_t roundTripValuesGeneration() const {
@@ -973,7 +996,7 @@ class NativeApiBridge {
       return Value::undefined();
     }
     struct ObjectExpandoCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       uintptr_t key = 0;
       uint64_t generation = 0;
       std::string property;
@@ -988,7 +1011,7 @@ class NativeApiBridge {
     const uint64_t generation =
         objectExpandosGeneration_.load(std::memory_order_acquire);
     for (auto& entry : cache) {
-      if (entry.bridge == this && entry.key == key &&
+      if (entry.bridgeId == instanceId_ && entry.key == key &&
           entry.generation == generation && entry.property == property) {
         if (entry.miss) {
           return Value::undefined();
@@ -1004,17 +1027,17 @@ class NativeApiBridge {
     const size_t slot = nextSlot++ & 7;
     if (objectIt == objectExpandos_.end()) {
       cache[slot] =
-          ObjectExpandoCacheEntry{this, key, generation, property, {}, true};
+          ObjectExpandoCacheEntry{instanceId_, key, generation, property, {}, true};
       return Value::undefined();
     }
     auto propertyIt = objectIt->second.find(property);
     if (propertyIt == objectIt->second.end() || propertyIt->second == nullptr) {
       cache[slot] =
-          ObjectExpandoCacheEntry{this, key, generation, property, {}, true};
+          ObjectExpandoCacheEntry{instanceId_, key, generation, property, {}, true};
       return Value::undefined();
     }
     cache[slot] = ObjectExpandoCacheEntry{
-        this, key, generation, property, propertyIt->second, false};
+        instanceId_, key, generation, property, propertyIt->second, false};
     return Value(runtime, *propertyIt->second);
   }
 
@@ -1023,8 +1046,11 @@ class NativeApiBridge {
       return;
     }
     auto key = normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native));
-    objectExpandos_.erase(
-        key);
+    auto it = objectExpandos_.find(key);
+    if (it != objectExpandos_.end()) {
+      abandonIfRuntimeTornDown(it->second);
+      objectExpandos_.erase(it);
+    }
     objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
   }
 
@@ -1045,7 +1071,7 @@ class NativeApiBridge {
       return nullptr;
     }
     struct PropertyGetterCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       Class cls = Nil;
       uint64_t generation = 0;
       std::string property;
@@ -1058,7 +1084,7 @@ class NativeApiBridge {
     const uint64_t generation =
         propertyGetterCacheGeneration_.load(std::memory_order_acquire);
     for (auto& entry : cache) {
-      if (entry.bridge == this && entry.cls == cls &&
+      if (entry.bridgeId == instanceId_ && entry.cls == cls &&
           entry.generation == generation && entry.property == property) {
         return entry.miss ? nullptr : entry.getter;
       }
@@ -1068,17 +1094,17 @@ class NativeApiBridge {
     const size_t slot = nextSlot++ & 7;
     if (classIt == propertyGetterCache_.end()) {
       cache[slot] = PropertyGetterCacheEntry{
-          this, cls, generation, property, nullptr, true};
+          instanceId_, cls, generation, property, nullptr, true};
       return nullptr;
     }
     auto propIt = classIt->second.find(property);
     if (propIt == classIt->second.end()) {
       cache[slot] = PropertyGetterCacheEntry{
-          this, cls, generation, property, nullptr, true};
+          instanceId_, cls, generation, property, nullptr, true};
       return nullptr;
     }
     cache[slot] =
-        PropertyGetterCacheEntry{this, cls, generation, property,
+        PropertyGetterCacheEntry{instanceId_, cls, generation, property,
                                  &propIt->second, false};
     return &propIt->second;
   }
@@ -1111,7 +1137,11 @@ class NativeApiBridge {
     if (native == nullptr) {
       return;
     }
-    pointerValues_.erase(reinterpret_cast<uintptr_t>(native));
+    auto it = pointerValues_.find(reinterpret_cast<uintptr_t>(native));
+    if (it != pointerValues_.end()) {
+      abandonIfRuntimeTornDown(it->second);
+      pointerValues_.erase(it);
+    }
   }
 
   const NativeApiSymbol* findConstant(const std::string& name) const {
@@ -2101,6 +2131,47 @@ class NativeApiBridge {
     return members;
   }
 
+  template <typename T>
+  void abandonIfRuntimeTornDown(T& values) {
+    if (runtimeTornDown_.load(std::memory_order_acquire)) {
+      abandonRuntimeValues(values);
+    }
+  }
+
+  // Moves each Value out into a deliberately leaked allocation so destroying
+  // the container never reaches the runtime. Leak the Value, not its
+  // shared_ptr: the thread_local lookup caches hold weak_ptrs and rely on them
+  // expiring once this bridge is gone.
+  static void abandonRuntimeValues(std::shared_ptr<Value>& value) {
+    if (value != nullptr) {
+      new Value(std::move(*value));
+    }
+  }
+
+  static void abandonRuntimeValues(std::shared_ptr<void>& lifetime) {
+    if (lifetime != nullptr) {
+      new std::shared_ptr<void>(std::move(lifetime));
+    }
+  }
+
+  static void abandonRuntimeValues(NativeApiRoundTripValue& entry) {
+    abandonRuntimeValues(entry.value);
+  }
+
+  template <typename Key, typename Mapped>
+  static void abandonRuntimeValues(std::unordered_map<Key, Mapped>& values) {
+    for (auto& entry : values) {
+      abandonRuntimeValues(entry.second);
+    }
+  }
+
+  template <typename Element>
+  static void abandonRuntimeValues(std::vector<Element>& values) {
+    for (auto& value : values) {
+      abandonRuntimeValues(value);
+    }
+  }
+
   std::unique_ptr<MDMetadataReader> metadata_;
   void* selfDl_ = nullptr;
   std::unordered_map<std::string, NativeApiSymbol> symbolsByName_;
@@ -2133,6 +2204,14 @@ class NativeApiBridge {
       objectExpandos_;
   std::unordered_map<uintptr_t, size_t> objectExpandoOwnerCounts_;
   std::atomic<uint64_t> objectExpandosGeneration_{1};
+  std::atomic<bool> runtimeTornDown_{false};
+  // Identifies this bridge in the thread_local lookup caches. Its address
+  // cannot: a bridge allocated where a destroyed one lived would match that
+  // one's entries, and the property-getter cache holds raw pointers into it.
+  const uint64_t instanceId_ = [] {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+  }();
   std::unordered_map<Class, std::unordered_map<std::string, CachedPropertyGetter>>
       propertyGetterCache_;
   std::atomic<uint64_t> propertyGetterCacheGeneration_{1};
