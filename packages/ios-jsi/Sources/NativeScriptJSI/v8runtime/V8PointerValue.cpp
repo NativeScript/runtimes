@@ -59,7 +59,7 @@ V8PointerValue* V8PointerValue::createFromUtf8(v8::Isolate* isolate,
   return new V8PointerValue(isolate, v8String);
 }
 
-void V8PointerValue::invalidate() {
+void V8PointerValue::invalidate() noexcept {
   {
     v8::Locker locker(isolate_);
     v8::Isolate::Scope scopedIsolate(isolate_);

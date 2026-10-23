@@ -13,7 +13,7 @@
 #include <tuple>
 #include <unordered_map>
 
-#include "jsi/jsi.h"
+#include <jsi/jsi.h>
 
 namespace facebook {
 namespace jsi {
@@ -74,10 +74,10 @@ class JSI_EXPORT Instrumentation {
   ///   been updated. This callback will be invoked on the same thread that the
   ///   runtime is using.
   virtual void startTrackingHeapObjectStackTraces(
-      std::function<void(uint64_t lastSeenObjectID,
-                         std::chrono::microseconds timestamp,
-                         std::vector<HeapStatsUpdate> stats)>
-          fragmentCallback) = 0;
+      std::function<void(
+          uint64_t lastSeenObjectID,
+          std::chrono::microseconds timestamp,
+          std::vector<HeapStatsUpdate> stats)> fragmentCallback) = 0;
 
   /// Stop capture JS stack-traces for JS heap allocated objects.
   virtual void stopTrackingHeapObjectStackTraces() = 0;
@@ -99,17 +99,17 @@ class JSI_EXPORT Instrumentation {
   ///
   /// \param path to save the heap capture.
   /// \param options additional options for what to capture.
-  virtual void createSnapshotToFile(const std::string& path,
-                                    const HeapSnapshotOptions& options = {
-                                        false}) = 0;
+  virtual void createSnapshotToFile(
+      const std::string& path,
+      const HeapSnapshotOptions& options = {false}) = 0;
 
   /// Captures the heap to an output stream
   ///
   /// \param os output stream to write to.
   /// \param options additional options for what to capture.
-  virtual void createSnapshotToStream(std::ostream& os,
-                                      const HeapSnapshotOptions& options = {
-                                          false}) = 0;
+  virtual void createSnapshotToStream(
+      std::ostream& os,
+      const HeapSnapshotOptions& options = {false}) = 0;
 
   /// If the runtime has been created to trace to a temp file, flush
   /// any unwritten parts of the trace of bridge traffic to the file,
@@ -121,9 +121,12 @@ class JSI_EXPORT Instrumentation {
   virtual void writeBasicBlockProfileTraceToFile(
       const std::string& fileName) const = 0;
 
+  /// Write the opcode stats to the given stream.
+  virtual void dumpOpcodeStats(std::ostream& os) const = 0;
+
   /// Dump external profiler symbols to the given file name.
   virtual void dumpProfilerSymbolsToFile(const std::string& fileName) const = 0;
 };
 
-}  // namespace jsi
-}  // namespace facebook
+} // namespace jsi
+} // namespace facebook
