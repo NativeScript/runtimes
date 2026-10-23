@@ -927,6 +927,124 @@ std::string V8Runtime::utf8(const jsi::String& str) {
   return JSIV8ValueConverter::ToSTLString(utf8);
 }
 
+namespace {
+
+v8::Local<v8::String> newStringFromUtf16(v8::Isolate* isolate,
+                                         const char16_t* utf16,
+                                         size_t length) {
+  v8::Local<v8::String> string;
+  if (!v8::String::NewFromTwoByte(isolate,
+                                  reinterpret_cast<const uint16_t*>(utf16),
+                                  v8::NewStringType::kNormal,
+                                  static_cast<int>(length))
+           .ToLocal(&string)) {
+    throw jsi::JSINativeException("Failed to create a UTF-16 string");
+  }
+  return string;
+}
+
+std::u16string stringToUtf16(v8::Isolate* isolate,
+                             v8::Local<v8::String> string) {
+  std::u16string result(string->Length(), u'\0');
+  string->WriteV2(isolate, 0, string->Length(),
+                  reinterpret_cast<uint16_t*>(result.data()));
+  return result;
+}
+
+// Hands `string`'s characters to `cb` without copying when possible. JSI's
+// `ascii` flag promises 7-bit data, while V8's one-byte strings are Latin-1,
+// so non-ASCII one-byte strings are widened to UTF-16 first.
+void forStringData(v8::Isolate* isolate, v8::Local<v8::String> string,
+                   void* ctx,
+                   void (*cb)(void* ctx, bool ascii, const void* data,
+                              size_t num)) {
+  std::u16string widened;
+  {
+    v8::String::ValueView view(isolate, string);
+    size_t length = view.length();
+    if (!view.is_one_byte()) {
+      cb(ctx, false, view.data16(), length);
+      return;
+    }
+    const uint8_t* data = view.data8();
+    bool isAscii = true;
+    for (size_t i = 0; i < length; i++) {
+      if (data[i] >= 0x80) {
+        isAscii = false;
+        break;
+      }
+    }
+    if (isAscii) {
+      cb(ctx, true, data, length);
+      return;
+    }
+    widened.assign(data, data + length);
+  }
+  cb(ctx, false, widened.data(), widened.size());
+}
+
+}  // namespace
+
+jsi::String V8Runtime::createStringFromUtf16(const char16_t* utf16,
+                                             size_t length) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  return make<jsi::String>(new V8PointerValue(
+      isolate_, newStringFromUtf16(isolate_, utf16, length)));
+}
+
+jsi::PropNameID V8Runtime::createPropNameIDFromUtf16(const char16_t* utf16,
+                                                     size_t length) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  return make<jsi::PropNameID>(new V8PointerValue(
+      isolate_, newStringFromUtf16(isolate_, utf16, length)));
+}
+
+std::u16string V8Runtime::utf16(const jsi::String& str) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+
+  return stringToUtf16(isolate_, JSIV8ValueConverter::ToV8String(*this, str));
+}
+
+std::u16string V8Runtime::utf16(const jsi::PropNameID& sym) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+
+  return stringToUtf16(isolate_, JSIV8ValueConverter::ToV8String(*this, sym));
+}
+
+void V8Runtime::getStringData(const jsi::String& str, void* ctx,
+                              void (*cb)(void* ctx, bool ascii,
+                                         const void* data, size_t num)) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+
+  forStringData(isolate_, JSIV8ValueConverter::ToV8String(*this, str), ctx,
+                cb);
+}
+
+void V8Runtime::getPropNameIdData(const jsi::PropNameID& sym, void* ctx,
+                                  void (*cb)(void* ctx, bool ascii,
+                                             const void* data, size_t num)) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+
+  forStringData(isolate_, JSIV8ValueConverter::ToV8String(*this, sym), ctx,
+                cb);
+}
+
 jsi::Object V8Runtime::createObject() {
   v8::Locker locker(isolate_);
   v8::Isolate::Scope scopedIsolate(isolate_);

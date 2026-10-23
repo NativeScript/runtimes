@@ -125,6 +125,19 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
                                              size_t length) override;
   std::string utf8(const facebook::jsi::String&) override;
 
+  facebook::jsi::String createStringFromUtf16(const char16_t* utf16,
+                                              size_t length) override;
+  facebook::jsi::PropNameID createPropNameIDFromUtf16(const char16_t* utf16,
+                                                      size_t length) override;
+  std::u16string utf16(const facebook::jsi::String&) override;
+  std::u16string utf16(const facebook::jsi::PropNameID&) override;
+  void getStringData(const facebook::jsi::String& str, void* ctx,
+                     void (*cb)(void* ctx, bool ascii, const void* data,
+                                size_t num)) override;
+  void getPropNameIdData(const facebook::jsi::PropNameID& sym, void* ctx,
+                         void (*cb)(void* ctx, bool ascii, const void* data,
+                                    size_t num)) override;
+
   facebook::jsi::Object createObject() override;
   facebook::jsi::Object createObject(
       std::shared_ptr<facebook::jsi::HostObject> hostObject) override;
