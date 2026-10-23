@@ -12,12 +12,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
 #include <cerrno>
 #include <cstdarg>
 #include <stdexcept>
 
-#include "jsi/jsilib.h"
+#include <jsi/jsilib.h>
 
 namespace facebook {
 namespace jsi {
@@ -26,8 +25,9 @@ namespace {
 
 constexpr size_t kErrorBufferSize = 512;
 
-__attribute__((format(printf, 1, 2))) void throwFormattedError(const char* fmt,
-                                                               ...) {
+__attribute__((format(printf, 1, 2))) void throwFormattedError(
+    const char* fmt,
+    ...) {
   char logBuffer[kErrorBufferSize];
 
   va_list va_args;
@@ -36,8 +36,8 @@ __attribute__((format(printf, 1, 2))) void throwFormattedError(const char* fmt,
   va_end(va_args);
 
   if (result < 0) {
-    throw JSINativeException(std::string("Failed to format error message: ") +
-                             fmt);
+    throw JSINativeException(
+        std::string("Failed to format error message: ") + fmt);
   }
 
   throw JSINativeException(logBuffer);
@@ -48,18 +48,20 @@ class ScopedFile {
   ScopedFile(const std::string& path)
       : path_(path), fd_(::open(path.c_str(), O_RDONLY)) {
     if (fd_ == -1) {
-      throwFormattedError("Could not open %s: %s", path.c_str(),
-                          strerror(errno));
+      throwFormattedError(
+          "Could not open %s: %s", path.c_str(), strerror(errno));
     }
   }
 
-  ~ScopedFile() { ::close(fd_); }
+  ~ScopedFile() {
+    ::close(fd_);
+  }
 
   size_t size() {
     struct stat fileInfo;
     if (::fstat(fd_, &fileInfo) == -1) {
-      throwFormattedError("Could not stat %s: %s", path_.c_str(),
-                          strerror(errno));
+      throwFormattedError(
+          "Could not stat %s: %s", path_.c_str(), strerror(errno));
     }
     return fileInfo.st_size;
   }
@@ -67,8 +69,8 @@ class ScopedFile {
   uint8_t* mmap(size_t size) {
     void* result = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd_, 0);
     if (result == MAP_FAILED) {
-      throwFormattedError("Could not mmap %s: %s", path_.c_str(),
-                          strerror(errno));
+      throwFormattedError(
+          "Could not mmap %s: %s", path_.c_str(), strerror(errno));
     }
     return reinterpret_cast<uint8_t*>(result);
   }
@@ -77,7 +79,7 @@ class ScopedFile {
   const int fd_;
 };
 
-}  // namespace
+} // namespace
 
 FileBuffer::FileBuffer(const std::string& path) {
   ScopedFile file(path);
@@ -89,15 +91,18 @@ FileBuffer::~FileBuffer() {
   if (::munmap(data_, size_)) {
     // terminate the program with pending exception
     try {
-      throwFormattedError("Could not unmap memory (%p, %zu bytes): %s", data_,
-                          size_, strerror(errno));
+      throwFormattedError(
+          "Could not unmap memory (%p, %zu bytes): %s",
+          data_,
+          size_,
+          strerror(errno));
     } catch (...) {
       std::terminate();
     }
   }
 }
 
-}  // namespace jsi
-}  // namespace facebook
+} // namespace jsi
+} // namespace facebook
 
-#endif  // !defined(_WINDOWS)
+#endif // !defined(_WINDOWS)

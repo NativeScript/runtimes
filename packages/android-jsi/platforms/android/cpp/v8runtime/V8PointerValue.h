@@ -34,7 +34,7 @@ class V8PointerValue final : public V8Runtime::PointerValue {
                                         const uint8_t* str, size_t length);
 
  private:
-  void invalidate() override;
+  void invalidate() noexcept override;
 
  private:
   friend class JSIV8ValueConverter;

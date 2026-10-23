@@ -18,6 +18,7 @@
 // #include <glog/logging.h>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <sstream>
 
 #include "HostProxy.h"
@@ -111,6 +112,45 @@ struct ExternalMemoryTracker {
   }
 };
 
+// Maps a createArrayBuffer() backing store's data pointer to the MutableBuffer
+// that owns it, so tryGetMutableBuffer() can hand it back without copying. V8
+// does not expose a backing store's deleter data, and runs deleters on
+// arbitrary threads. Leaked so deleters running during exit never see it
+// destroyed.
+struct RetainedMutableBuffers {
+  std::mutex mutex;
+  std::unordered_map<const void*, std::shared_ptr<jsi::MutableBuffer>*> byData;
+
+  static RetainedMutableBuffers& shared() {
+    static auto* instance = new RetainedMutableBuffers();
+    return *instance;
+  }
+};
+
+// Enters the isolate and its context only when the caller has not already.
+// JSI calls nearly always come from host functions already running inside
+// them, and re-entering costs a v8::Locker (a real mutex acquire, since
+// NativeScript itself never takes one) plus scope bookkeeping on every call.
+class JSIScope {
+ public:
+  JSIScope(v8::Isolate* isolate, const v8::Global<v8::Context>& context) {
+    if (v8::Isolate::TryGetCurrent() != isolate) {
+      locker_.emplace(isolate);
+      isolateScope_.emplace(isolate);
+    }
+    handleScope_.emplace(isolate);
+    if (!isolate->InContext()) {
+      contextScope_.emplace(context.Get(isolate));
+    }
+  }
+
+ private:
+  std::optional<v8::Locker> locker_;
+  std::optional<v8::Isolate::Scope> isolateScope_;
+  std::optional<v8::HandleScope> handleScope_;
+  std::optional<v8::Context::Scope> contextScope_;
+};
+
 }  // namespace
 
 // static
@@ -147,9 +187,7 @@ V8Runtime::V8Runtime() {
   //   createParams.snapshot_blob = snapshotBlob_.get();
   // }
 
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
+  JSIScope scope(isolate_, context_);
   context_.Reset(isolate_, isolate_->GetCurrentContext());
   v8::Context::Scope scopedContext(context_.Get(isolate_));
   arrayBufferAllocator_.reset(
@@ -247,17 +285,55 @@ V8Runtime::~V8Runtime() {
     v8::Locker locker(isolate_);
     v8::Isolate::Scope scopedIsolate(isolate_);
     v8::HandleScope scopedHandle(isolate_);
+    // Runtime data can hold jsi::Values, which need the isolate to release.
+    for (auto& [uuid, entry] : runtimeData_) {
+      entry.deleter(entry.data);
+    }
+    runtimeData_.clear();
+    taskTrampoline_.Reset();
     if (inspectorClient_) {
       inspectorClient_.reset();
     }
 
     context_.Reset();
   }
-  if (!isSharedRuntime_) {
-    isolate_->Dispose();
-  }
+  // The isolate belongs to the NativeScript runtime; never dispose it here.
   // v8::V8::Dispose();
   // v8::V8::DisposePlatform();
+}
+
+void V8Runtime::ExecuteTask(
+    const std::function<void(jsi::Runtime&)>& task) {
+  JSIScope scope(isolate_, context_);
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
+
+  // Running the task inside a host function turns C++ exceptions into JS
+  // exceptions, which the verbose TryCatch below then reports.
+  if (taskTrampoline_.IsEmpty()) {
+    jsi::Function trampoline = createFunctionFromHostFunction(
+        jsi::PropNameID::forAscii(*this, "executeTask"), 0,
+        [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value*,
+               size_t) {
+          (*currentTask_)(runtime);
+          return jsi::Value::undefined();
+        });
+    taskTrampoline_.Reset(isolate_,
+                          JSIV8ValueConverter::ToV8Function(*this, trampoline));
+  }
+
+  const auto* outerTask = currentTask_;
+  currentTask_ = &task;
+  {
+    // Verbose hands the exception to the isolate's message listeners, which
+    // NativeScript uses for uncaught errors.
+    v8::TryCatch tryCatch(isolate_);
+    tryCatch.SetVerbose(true);
+    (void)taskTrampoline_.Get(isolate_)->Call(context, context->Global(), 0,
+                                              nullptr);
+  }
+  currentTask_ = outerTask;
+
+  isolate_->PerformMicrotaskCheckpoint();
 }
 
 void V8Runtime::OnMainLoopIdle() {
@@ -523,24 +599,21 @@ jsi::Value V8Runtime::evaluatePreparedJavaScript(
 }
 
 void V8Runtime::queueMicrotask(const jsi::Function& callback) {
-  // TODO: add this when we revisit new architecture support
+  JSIScope scope(isolate_, context_);
+
+  isolate_->EnqueueMicrotask(
+      JSIV8ValueConverter::ToV8Function(*this, callback));
 }
 
 bool V8Runtime::drainMicrotasks(int maxMicrotasksHint) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   isolate_->PerformMicrotaskCheckpoint();
   return true;
 }
 
 jsi::Object V8Runtime::global() {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   return make<jsi::Object>(
       new V8PointerValue(isolate_, context_.Get(isolate_)->Global()));
@@ -560,10 +633,7 @@ jsi::Runtime::PointerValue* V8Runtime::cloneSymbol(
   if (!pv) {
     return nullptr;
   }
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue = static_cast<const V8PointerValue*>(pv);
   assert(v8PointerValue->Get(isolate_)->IsSymbol());
@@ -576,10 +646,7 @@ jsi::Runtime::PointerValue* V8Runtime::cloneBigInt(
     return nullptr;
   }
 
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue = static_cast<const V8PointerValue*>(pv);
   assert(v8PointerValue->Get(isolate_)->IsBigInt());
@@ -592,10 +659,7 @@ jsi::Runtime::PointerValue* V8Runtime::cloneString(
     return nullptr;
   }
 
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue = static_cast<const V8PointerValue*>(pv);
   assert(v8PointerValue->Get(isolate_)->IsString());
@@ -608,10 +672,7 @@ jsi::Runtime::PointerValue* V8Runtime::cloneObject(
     return nullptr;
   }
 
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue = static_cast<const V8PointerValue*>(pv);
   assert(v8PointerValue->Get(isolate_)->IsObject());
@@ -625,10 +686,7 @@ jsi::Runtime::PointerValue* V8Runtime::clonePropNameID(
 
 jsi::PropNameID V8Runtime::createPropNameIDFromAscii(const char* str,
                                                      size_t length) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
   V8PointerValue* value =
       V8PointerValue::createFromOneByte(isolate_, str, length);
   if (!value) {
@@ -640,10 +698,7 @@ jsi::PropNameID V8Runtime::createPropNameIDFromAscii(const char* str,
 
 jsi::PropNameID V8Runtime::createPropNameIDFromUtf8(const uint8_t* utf8,
                                                     size_t length) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
   V8PointerValue* value =
       V8PointerValue::createFromUtf8(isolate_, utf8, length);
   if (!value) {
@@ -654,10 +709,7 @@ jsi::PropNameID V8Runtime::createPropNameIDFromUtf8(const uint8_t* utf8,
 }
 
 jsi::PropNameID V8Runtime::createPropNameIDFromString(const jsi::String& str) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(str));
@@ -670,10 +722,7 @@ jsi::PropNameID V8Runtime::createPropNameIDFromString(const jsi::String& str) {
 
 jsi::PropNameID V8Runtime::createPropNameIDFromSymbol(
     const facebook::jsi::Symbol& sym) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   assert(static_cast<const V8PointerValue*>(getPointerValue(sym))
              ->Get(isolate_)
@@ -683,10 +732,7 @@ jsi::PropNameID V8Runtime::createPropNameIDFromSymbol(
 }
 
 std::string V8Runtime::utf8(const jsi::PropNameID& sym) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(sym));
@@ -695,10 +741,7 @@ std::string V8Runtime::utf8(const jsi::PropNameID& sym) {
 }
 
 bool V8Runtime::compare(const jsi::PropNameID& a, const jsi::PropNameID& b) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValueA =
       static_cast<const V8PointerValue*>(getPointerValue(a));
@@ -717,30 +760,21 @@ std::string V8Runtime::symbolToString(const jsi::Symbol& symbol) {
 }
 
 jsi::BigInt V8Runtime::createBigIntFromInt64(int64_t value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::BigInt> v8BigInt = v8::BigInt::New(isolate_, value);
   return make<jsi::BigInt>(new V8PointerValue(isolate_, v8BigInt));
 }
 
 jsi::BigInt V8Runtime::createBigIntFromUint64(uint64_t value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::BigInt> v8BigInt = v8::BigInt::NewFromUnsigned(isolate_, value);
   return make<jsi::BigInt>(new V8PointerValue(isolate_, v8BigInt));
 }
 
 bool V8Runtime::bigintIsInt64(const jsi::BigInt& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(value));
@@ -753,10 +787,7 @@ bool V8Runtime::bigintIsInt64(const jsi::BigInt& value) {
 }
 
 bool V8Runtime::bigintIsUint64(const jsi::BigInt& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(value));
@@ -769,10 +800,7 @@ bool V8Runtime::bigintIsUint64(const jsi::BigInt& value) {
 }
 
 uint64_t V8Runtime::truncate(const jsi::BigInt& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(value));
@@ -783,10 +811,7 @@ uint64_t V8Runtime::truncate(const jsi::BigInt& value) {
 }
 
 jsi::String V8Runtime::bigintToString(const jsi::BigInt& value, int radix) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(value));
@@ -823,10 +848,7 @@ jsi::String V8Runtime::bigintToString(const jsi::BigInt& value, int radix) {
 }
 
 jsi::String V8Runtime::createStringFromAscii(const char* str, size_t length) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   V8PointerValue* value =
       V8PointerValue::createFromOneByte(isolate_, str, length);
@@ -838,10 +860,7 @@ jsi::String V8Runtime::createStringFromAscii(const char* str, size_t length) {
 }
 
 jsi::String V8Runtime::createStringFromUtf8(const uint8_t* str, size_t length) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   V8PointerValue* value = V8PointerValue::createFromUtf8(isolate_, str, length);
   if (!value) {
@@ -852,10 +871,7 @@ jsi::String V8Runtime::createStringFromUtf8(const uint8_t* str, size_t length) {
 }
 
 std::string V8Runtime::utf8(const jsi::String& str) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(str));
@@ -865,11 +881,112 @@ std::string V8Runtime::utf8(const jsi::String& str) {
   return JSIV8ValueConverter::ToSTLString(utf8);
 }
 
+namespace {
+
+v8::Local<v8::String> newStringFromUtf16(v8::Isolate* isolate,
+                                         const char16_t* utf16,
+                                         size_t length) {
+  v8::Local<v8::String> string;
+  if (!v8::String::NewFromTwoByte(isolate,
+                                  reinterpret_cast<const uint16_t*>(utf16),
+                                  v8::NewStringType::kNormal,
+                                  static_cast<int>(length))
+           .ToLocal(&string)) {
+    throw jsi::JSINativeException("Failed to create a UTF-16 string");
+  }
+  return string;
+}
+
+std::u16string stringToUtf16(v8::Isolate* isolate,
+                             v8::Local<v8::String> string) {
+  std::u16string result(string->Length(), u'\0');
+  string->WriteV2(isolate, 0, string->Length(),
+                  reinterpret_cast<uint16_t*>(result.data()));
+  return result;
+}
+
+// Hands `string`'s characters to `cb` without copying when possible. JSI's
+// `ascii` flag promises 7-bit data, while V8's one-byte strings are Latin-1,
+// so non-ASCII one-byte strings are widened to UTF-16 first.
+void forStringData(v8::Isolate* isolate, v8::Local<v8::String> string,
+                   void* ctx,
+                   void (*cb)(void* ctx, bool ascii, const void* data,
+                              size_t num)) {
+  std::u16string widened;
+  {
+    v8::String::ValueView view(isolate, string);
+    size_t length = view.length();
+    if (!view.is_one_byte()) {
+      cb(ctx, false, view.data16(), length);
+      return;
+    }
+    const uint8_t* data = view.data8();
+    bool isAscii = true;
+    for (size_t i = 0; i < length; i++) {
+      if (data[i] >= 0x80) {
+        isAscii = false;
+        break;
+      }
+    }
+    if (isAscii) {
+      cb(ctx, true, data, length);
+      return;
+    }
+    widened.assign(data, data + length);
+  }
+  cb(ctx, false, widened.data(), widened.size());
+}
+
+}  // namespace
+
+jsi::String V8Runtime::createStringFromUtf16(const char16_t* utf16,
+                                             size_t length) {
+  JSIScope scope(isolate_, context_);
+
+  return make<jsi::String>(new V8PointerValue(
+      isolate_, newStringFromUtf16(isolate_, utf16, length)));
+}
+
+jsi::PropNameID V8Runtime::createPropNameIDFromUtf16(const char16_t* utf16,
+                                                     size_t length) {
+  JSIScope scope(isolate_, context_);
+
+  return make<jsi::PropNameID>(new V8PointerValue(
+      isolate_, newStringFromUtf16(isolate_, utf16, length)));
+}
+
+std::u16string V8Runtime::utf16(const jsi::String& str) {
+  JSIScope scope(isolate_, context_);
+
+  return stringToUtf16(isolate_, JSIV8ValueConverter::ToV8String(*this, str));
+}
+
+std::u16string V8Runtime::utf16(const jsi::PropNameID& sym) {
+  JSIScope scope(isolate_, context_);
+
+  return stringToUtf16(isolate_, JSIV8ValueConverter::ToV8String(*this, sym));
+}
+
+void V8Runtime::getStringData(const jsi::String& str, void* ctx,
+                              void (*cb)(void* ctx, bool ascii,
+                                         const void* data, size_t num)) {
+  JSIScope scope(isolate_, context_);
+
+  forStringData(isolate_, JSIV8ValueConverter::ToV8String(*this, str), ctx,
+                cb);
+}
+
+void V8Runtime::getPropNameIdData(const jsi::PropNameID& sym, void* ctx,
+                                  void (*cb)(void* ctx, bool ascii,
+                                             const void* data, size_t num)) {
+  JSIScope scope(isolate_, context_);
+
+  forStringData(isolate_, JSIV8ValueConverter::ToV8String(*this, sym), ctx,
+                cb);
+}
+
 jsi::Object V8Runtime::createObject() {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> object = v8::Object::New(isolate_);
   return make<jsi::Object>(new V8PointerValue(isolate_, object));
@@ -877,10 +994,7 @@ jsi::Object V8Runtime::createObject() {
 
 jsi::Object V8Runtime::createObject(
     std::shared_ptr<jsi::HostObject> hostObject) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   HostObjectProxy* hostObjectProxy =
       new HostObjectProxy(*this, isolate_, hostObject);
@@ -915,10 +1029,7 @@ std::shared_ptr<jsi::HostObject> V8Runtime::getHostObject(
 
   // We are guarenteed at this point to have isHostObject(obj) == true
   // so the internal data should be HostObjectMetadata
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -935,10 +1046,7 @@ jsi::HostFunctionType& V8Runtime::getHostFunction(
   assert(isHostFunction(function));
 
   // We know that isHostFunction(function) is true here, so its safe to proceed
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(function));
@@ -961,11 +1069,8 @@ jsi::HostFunctionType& V8Runtime::getHostFunction(
 }
 
 jsi::Object V8Runtime::createObjectWithPrototype(const jsi::Value& prototype) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Local<v8::Context> context = context_.Get(isolate_);
-  v8::Context::Scope scopedContext(context);
+  JSIScope scope(isolate_, context_);
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
 
   v8::Local<v8::ObjectTemplate> objectTemplate =
       v8::ObjectTemplate::New(isolate_);
@@ -991,10 +1096,7 @@ jsi::Object V8Runtime::createObjectWithPrototype(const jsi::Value& prototype) {
 }
 
 bool V8Runtime::hasNativeState(const jsi::Object& object) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1009,18 +1111,17 @@ bool V8Runtime::hasNativeState(const jsi::Object& object) {
 
 std::shared_ptr<jsi::NativeState> V8Runtime::getNativeState(
     const jsi::Object& object) {
-  if (isHostObject(object)) {
-    throw jsi::JSINativeException("native state unsupported on HostObject");
-  }
-  assert(hasNativeState(object));
-
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
+  InternalFieldType type = GetInternalFieldType(v8Object);
+  if (type == InternalFieldType::kHostObject) {
+    throw jsi::JSINativeException("native state unsupported on HostObject");
+  }
+  if (type != InternalFieldType::kNativeState) {
+    return nullptr;
+  }
   auto* holder = reinterpret_cast<NativeStateHolder*>(
       v8Object->GetAlignedPointerFromInternalField(
           1, v8::kEmbedderDataTypeTagDefault));
@@ -1033,11 +1134,8 @@ void V8Runtime::setNativeState(const jsi::Object& object,
     throw jsi::JSINativeException("native state unsupported on HostObject");
   }
 
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Local<v8::Context> context = context_.Get(isolate_);
-  v8::Context::Scope scopedContext(context);
+  JSIScope scope(isolate_, context_);
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
 
   v8::Local<v8::Object> v8ObjectOriginal =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1127,11 +1225,8 @@ void V8Runtime::setNativeState(const jsi::Object& object,
 
 void V8Runtime::setPrototypeOf(const jsi::Object& object,
                                const jsi::Value& prototype) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Local<v8::Context> context = context_.Get(isolate_);
-  v8::Context::Scope scopedContext(context);
+  JSIScope scope(isolate_, context_);
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1143,10 +1238,7 @@ void V8Runtime::setPrototypeOf(const jsi::Object& object,
 }
 
 jsi::Value V8Runtime::getPrototypeOf(const jsi::Object& object) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1155,10 +1247,7 @@ jsi::Value V8Runtime::getPrototypeOf(const jsi::Object& object) {
 
 jsi::Value V8Runtime::getProperty(const jsi::Object& object,
                                   const jsi::PropNameID& name) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8Object =
@@ -1179,10 +1268,7 @@ jsi::Value V8Runtime::getProperty(const jsi::Object& object,
 
 jsi::Value V8Runtime::getProperty(const jsi::Object& object,
                                   const jsi::String& name) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8Object =
@@ -1202,10 +1288,7 @@ jsi::Value V8Runtime::getProperty(const jsi::Object& object,
 
 bool V8Runtime::hasProperty(const jsi::Object& object,
                             const jsi::PropNameID& name) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8Object =
@@ -1226,10 +1309,7 @@ bool V8Runtime::hasProperty(const jsi::Object& object,
 
 bool V8Runtime::hasProperty(const jsi::Object& object,
                             const jsi::String& name) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8Object =
@@ -1251,10 +1331,7 @@ bool V8Runtime::hasProperty(const jsi::Object& object,
 void V8Runtime::setPropertyValue(const jsi::Object& object,
                                  const jsi::PropNameID& name,
                                  const jsi::Value& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1271,10 +1348,7 @@ void V8Runtime::setPropertyValue(const jsi::Object& object,
 void V8Runtime::setPropertyValue(const jsi::Object& object,
                                  const jsi::String& name,
                                  const jsi::Value& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1288,11 +1362,114 @@ void V8Runtime::setPropertyValue(const jsi::Object& object,
   }
 }
 
+jsi::Value V8Runtime::getProperty(const jsi::Object& object,
+                                  const jsi::Value& name) {
+  JSIScope scope(isolate_, context_);
+
+  v8::TryCatch tryCatch(isolate_);
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  v8::MaybeLocal<v8::Value> result =
+      v8Object->Get(isolate_->GetCurrentContext(),
+                    JSIV8ValueConverter::ToV8Value(*this, name));
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  if (result.IsEmpty()) {
+    return jsi::Value::undefined();
+  }
+  return JSIV8ValueConverter::ToJSIValue(isolate_, result.ToLocalChecked());
+}
+
+bool V8Runtime::hasProperty(const jsi::Object& object,
+                            const jsi::Value& name) {
+  JSIScope scope(isolate_, context_);
+
+  v8::TryCatch tryCatch(isolate_);
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  v8::Maybe<bool> result =
+      v8Object->Has(isolate_->GetCurrentContext(),
+                    JSIV8ValueConverter::ToV8Value(*this, name));
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  return result.FromMaybe(false);
+}
+
+void V8Runtime::setPropertyValue(const jsi::Object& object,
+                                 const jsi::Value& name,
+                                 const jsi::Value& value) {
+  JSIScope scope(isolate_, context_);
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  if (v8Object
+          ->Set(isolate_->GetCurrentContext(),
+                JSIV8ValueConverter::ToV8Value(*this, name),
+                JSIV8ValueConverter::ToV8Value(*this, value))
+          .IsNothing()) {
+    throw jsi::JSError(*this, "V8Runtime::setPropertyValue failed.");
+  }
+}
+
+void V8Runtime::DeleteV8Property(v8::Local<v8::Object> object,
+                                 v8::Local<v8::Value> key) {
+  v8::TryCatch tryCatch(isolate_);
+  v8::Maybe<bool> result = object->Delete(isolate_->GetCurrentContext(), key);
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  if (!result.FromMaybe(false)) {
+    throw jsi::JSError(*this, "Failed to delete property");
+  }
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::PropNameID& name) {
+  JSIScope scope(isolate_, context_);
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8String(*this, name));
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::String& name) {
+  JSIScope scope(isolate_, context_);
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8String(*this, name));
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::Value& name) {
+  JSIScope scope(isolate_, context_);
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8Value(*this, name));
+}
+
+void V8Runtime::setRuntimeDataImpl(const jsi::UUID& uuid, const void* data,
+                                   void (*deleter)(const void* data)) {
+  auto [it, inserted] =
+      runtimeData_.try_emplace(uuid, RuntimeDataEntry{data, deleter});
+  if (!inserted) {
+    RuntimeDataEntry previous = it->second;
+    it->second = {data, deleter};
+    previous.deleter(previous.data);
+  }
+}
+
+const void* V8Runtime::getRuntimeDataImpl(const jsi::UUID& uuid) {
+  auto it = runtimeData_.find(uuid);
+  return it != runtimeData_.end() ? it->second.data : nullptr;
+}
+
 bool V8Runtime::isArray(const jsi::Object& object) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1300,10 +1477,7 @@ bool V8Runtime::isArray(const jsi::Object& object) const {
 }
 
 bool V8Runtime::isArrayBuffer(const jsi::Object& object) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1311,10 +1485,7 @@ bool V8Runtime::isArrayBuffer(const jsi::Object& object) const {
 }
 
 bool V8Runtime::isFunction(const jsi::Object& object) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1322,10 +1493,7 @@ bool V8Runtime::isFunction(const jsi::Object& object) const {
 }
 
 bool V8Runtime::isHostObject(const jsi::Object& object) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1333,10 +1501,7 @@ bool V8Runtime::isHostObject(const jsi::Object& object) const {
 }
 
 bool V8Runtime::isHostFunction(const jsi::Function& function) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Function> v8Function =
       JSIV8ValueConverter::ToV8Function(*this, function);
@@ -1349,10 +1514,7 @@ bool V8Runtime::isHostFunction(const jsi::Function& function) const {
 }
 
 jsi::Array V8Runtime::getPropertyNames(const jsi::Object& object) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
@@ -1372,10 +1534,7 @@ jsi::Array V8Runtime::getPropertyNames(const jsi::Object& object) {
 }
 
 jsi::WeakObject V8Runtime::createWeakObject(const jsi::Object& weakObject) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(weakObject));
@@ -1389,10 +1548,7 @@ jsi::WeakObject V8Runtime::createWeakObject(const jsi::Object& weakObject) {
 }
 
 jsi::Value V8Runtime::lockWeakObject(const jsi::WeakObject& weakObject) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   const V8PointerValue* v8PointerValue =
       static_cast<const V8PointerValue*>(getPointerValue(weakObject));
@@ -1402,10 +1558,7 @@ jsi::Value V8Runtime::lockWeakObject(const jsi::WeakObject& weakObject) {
 }
 
 jsi::Array V8Runtime::createArray(size_t length) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Array> v8Array =
       v8::Array::New(isolate_, static_cast<int>(length));
@@ -1415,10 +1568,7 @@ jsi::Array V8Runtime::createArray(size_t length) {
 
 jsi::ArrayBuffer V8Runtime::createArrayBuffer(
     std::shared_ptr<jsi::MutableBuffer> buffer) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   if (!buffer) {
     throw jsi::JSINativeException(
@@ -1429,13 +1579,28 @@ jsi::ArrayBuffer V8Runtime::createArrayBuffer(
   size_t byteLength = buffer->size();
   auto* retainedBuffer =
       new std::shared_ptr<jsi::MutableBuffer>(std::move(buffer));
+  if (data != nullptr) {
+    auto& retained = RetainedMutableBuffers::shared();
+    std::lock_guard<std::mutex> lock(retained.mutex);
+    retained.byData[data] = retainedBuffer;
+  }
 
   std::unique_ptr<v8::BackingStore> backingStore =
       v8::ArrayBuffer::NewBackingStore(
           data, byteLength,
-          [](void* /*data*/, size_t /*length*/, void* deleterData) {
-            delete static_cast<std::shared_ptr<jsi::MutableBuffer>*>(
-                deleterData);
+          [](void* data, size_t /*length*/, void* deleterData) {
+            auto* retainedBuffer =
+                static_cast<std::shared_ptr<jsi::MutableBuffer>*>(deleterData);
+            {
+              auto& retained = RetainedMutableBuffers::shared();
+              std::lock_guard<std::mutex> lock(retained.mutex);
+              auto it = retained.byData.find(data);
+              if (it != retained.byData.end() &&
+                  it->second == retainedBuffer) {
+                retained.byData.erase(it);
+              }
+            }
+            delete retainedBuffer;
           },
           retainedBuffer);
 
@@ -1446,20 +1611,14 @@ jsi::ArrayBuffer V8Runtime::createArrayBuffer(
 }
 
 size_t V8Runtime::size(const jsi::Array& array) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Array> v8Array = JSIV8ValueConverter::ToV8Array(*this, array);
   return v8Array->Length();
 }
 
 size_t V8Runtime::size(const jsi::ArrayBuffer& arrayBuffer) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
@@ -1469,10 +1628,7 @@ size_t V8Runtime::size(const jsi::ArrayBuffer& arrayBuffer) {
 }
 
 uint8_t* V8Runtime::data(const jsi::ArrayBuffer& arrayBuffer) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
@@ -1481,11 +1637,56 @@ uint8_t* V8Runtime::data(const jsi::ArrayBuffer& arrayBuffer) {
   return reinterpret_cast<uint8_t*>(v8ArrayBuffer->GetBackingStore()->Data());
 }
 
+std::shared_ptr<jsi::MutableBuffer> V8Runtime::tryGetMutableBuffer(
+    const jsi::ArrayBuffer& arrayBuffer) {
+  JSIScope scope(isolate_, context_);
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
+  v8::ArrayBuffer* v8ArrayBuffer = v8::ArrayBuffer::Cast(*v8Object);
+  const void* data = v8ArrayBuffer->Data();
+  if (data == nullptr) {
+    return nullptr;
+  }
+
+  auto& retained = RetainedMutableBuffers::shared();
+  std::lock_guard<std::mutex> lock(retained.mutex);
+  auto it = retained.byData.find(data);
+  if (it == retained.byData.end() ||
+      (*it->second)->size() != v8ArrayBuffer->ByteLength()) {
+    return nullptr;
+  }
+  return *it->second;
+}
+
+bool V8Runtime::detached(const jsi::ArrayBuffer& arrayBuffer) {
+  JSIScope scope(isolate_, context_);
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
+  return v8::ArrayBuffer::Cast(*v8Object)->WasDetached();
+}
+
+size_t V8Runtime::push(const jsi::Array& array, const jsi::Value* elements,
+                       size_t count) {
+  JSIScope scope(isolate_, context_);
+
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
+  v8::Local<v8::Array> v8Array = JSIV8ValueConverter::ToV8Array(*this, array);
+  uint32_t length = v8Array->Length();
+  for (size_t i = 0; i < count; i++) {
+    if (v8Array
+            ->Set(context, length + static_cast<uint32_t>(i),
+                  JSIV8ValueConverter::ToV8Value(*this, elements[i]))
+            .IsNothing()) {
+      throw jsi::JSError(*this, "V8Runtime::push failed.");
+    }
+  }
+  return length + count;
+}
+
 jsi::Value V8Runtime::getValueAtIndex(const jsi::Array& array, size_t i) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Array> v8Array = JSIV8ValueConverter::ToV8Array(*this, array);
   v8::MaybeLocal<v8::Value> result =
@@ -1498,10 +1699,7 @@ jsi::Value V8Runtime::getValueAtIndex(const jsi::Array& array, size_t i) {
 
 void V8Runtime::setValueAtIndexImpl(const jsi::Array& array, size_t i,
                                     const jsi::Value& value) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Array> v8Array = JSIV8ValueConverter::ToV8Array(*this, array);
   v8::Maybe<bool> result =
@@ -1515,10 +1713,7 @@ void V8Runtime::setValueAtIndexImpl(const jsi::Array& array, size_t i,
 jsi::Function V8Runtime::createFunctionFromHostFunction(
     const jsi::PropNameID& name, unsigned int paramCount,
     jsi::HostFunctionType func) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   HostFunctionProxy* hostFunctionProxy =
       new HostFunctionProxy(*this, isolate_, std::move(func));
@@ -1557,10 +1752,7 @@ jsi::Function V8Runtime::createFunctionFromHostFunction(
 jsi::Value V8Runtime::call(const jsi::Function& function,
                            const jsi::Value& jsThis, const jsi::Value* args,
                            size_t count) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Function> v8Function =
@@ -1597,10 +1789,7 @@ jsi::Value V8Runtime::call(const jsi::Function& function,
 
 jsi::Value V8Runtime::callAsConstructor(const jsi::Function& function,
                                         const jsi::Value* args, size_t count) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Function> v8Function =
@@ -1628,10 +1817,7 @@ jsi::Value V8Runtime::callAsConstructor(const jsi::Function& function,
 }
 
 bool V8Runtime::strictEquals(const jsi::Symbol& a, const jsi::Symbol& b) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Symbol> v8SymbolA = JSIV8ValueConverter::ToV8Symbol(*this, a);
@@ -1645,10 +1831,7 @@ bool V8Runtime::strictEquals(const jsi::Symbol& a, const jsi::Symbol& b) const {
 }
 
 bool V8Runtime::strictEquals(const jsi::BigInt& a, const jsi::BigInt& b) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Value> v8ValueA =
@@ -1664,10 +1847,7 @@ bool V8Runtime::strictEquals(const jsi::BigInt& a, const jsi::BigInt& b) const {
 }
 
 bool V8Runtime::strictEquals(const jsi::String& a, const jsi::String& b) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::String> v8StringA = JSIV8ValueConverter::ToV8String(*this, a);
@@ -1681,10 +1861,7 @@ bool V8Runtime::strictEquals(const jsi::String& a, const jsi::String& b) const {
 }
 
 bool V8Runtime::strictEquals(const jsi::Object& a, const jsi::Object& b) const {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8ObjectA = JSIV8ValueConverter::ToV8Object(*this, a);
@@ -1698,10 +1875,7 @@ bool V8Runtime::strictEquals(const jsi::Object& a, const jsi::Object& b) const {
 }
 
 bool V8Runtime::instanceOf(const jsi::Object& o, const jsi::Function& f) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Context::Scope scopedContext(context_.Get(isolate_));
+  JSIScope scope(isolate_, context_);
 
   v8::TryCatch tryCatch(isolate_);
   v8::Local<v8::Object> v8Object = JSIV8ValueConverter::ToV8Object(*this, o);
@@ -1717,11 +1891,8 @@ bool V8Runtime::instanceOf(const jsi::Object& o, const jsi::Function& f) {
 
 void V8Runtime::setExternalMemoryPressure(const jsi::Object& obj,
                                           size_t amount) {
-  v8::Locker locker(isolate_);
-  v8::Isolate::Scope scopedIsolate(isolate_);
-  v8::HandleScope scopedHandle(isolate_);
-  v8::Local<v8::Context> context = context_.Get(isolate_);
-  v8::Context::Scope scopedContext(context);
+  JSIScope scope(isolate_, context_);
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
 
   v8::Local<v8::Object> v8Object = JSIV8ValueConverter::ToV8Object(*this, obj);
   v8::Local<v8::Private> privateKey = v8::Private::ForApi(
@@ -1812,13 +1983,20 @@ void V8Runtime::OnHostFuncionContainerCallback(
 
   v8::Local<v8::Function> v8HostFunction =
       v8::Local<v8::Function>::Cast(args.Data());
-  std::vector<v8::Local<v8::Value>> argv;
-  for (size_t i = 0; i < args.Length(); ++i) {
-    argv.push_back(args[(int)i]);
+  constexpr int kStackArgCount = 8;
+  const int argc = args.Length();
+  v8::Local<v8::Value> stackArgv[kStackArgCount];
+  std::vector<v8::Local<v8::Value>> heapArgv;
+  v8::Local<v8::Value>* argv = stackArgv;
+  if (argc > kStackArgCount) {
+    heapArgv.resize(argc);
+    argv = heapArgv.data();
   }
-  v8::MaybeLocal<v8::Value> result =
-      v8HostFunction->Call(args.GetIsolate()->GetCurrentContext(), args.This(),
-                           args.Length(), argv.data());
+  for (int i = 0; i < argc; ++i) {
+    argv[i] = args[i];
+  }
+  v8::MaybeLocal<v8::Value> result = v8HostFunction->Call(
+      args.GetIsolate()->GetCurrentContext(), args.This(), argc, argv);
 
   if (!result.IsEmpty()) {
     args.GetReturnValue().Set(result.ToLocalChecked());
