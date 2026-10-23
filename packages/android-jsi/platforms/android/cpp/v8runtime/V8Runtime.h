@@ -255,7 +255,6 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   v8::Isolate* isolate_;
   v8::Global<v8::Context> context_;
   std::shared_ptr<InspectorClient> inspectorClient_;
-  bool isSharedRuntime_ = false;
 
   struct RuntimeDataEntry {
     const void* data;

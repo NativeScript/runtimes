@@ -273,9 +273,7 @@ V8Runtime::~V8Runtime() {
 
     context_.Reset();
   }
-  if (!isSharedRuntime_) {
-    isolate_->Dispose();
-  }
+  // The isolate belongs to the NativeScript runtime; never dispose it here.
   // v8::V8::Dispose();
   // v8::V8::DisposePlatform();
 }
