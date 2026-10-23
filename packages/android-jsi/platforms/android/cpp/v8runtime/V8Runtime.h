@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 // #include <cxxreact/MessageQueueThread.h>
 #include "V8RuntimeConfig.h"
 #include "jsi/jsi.h"
@@ -39,6 +41,7 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
                                      const v8::Local<v8::String>& script,
                                      const std::string& sourceURL);
   void ReportException(v8::Isolate* isolate, v8::TryCatch* tryCatch) const;
+  void DeleteV8Property(v8::Local<v8::Object> object, v8::Local<v8::Value> key);
 
   std::unique_ptr<v8::ScriptCompiler::CachedData> LoadCodeCacheIfNeeded(
       const std::string& sourceURL);
@@ -154,6 +157,23 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   void setPropertyValue(const facebook::jsi::Object&,
                         const facebook::jsi::String& name,
                         const facebook::jsi::Value& value) override;
+  facebook::jsi::Value getProperty(const facebook::jsi::Object&,
+                                   const facebook::jsi::Value& name) override;
+  bool hasProperty(const facebook::jsi::Object&,
+                   const facebook::jsi::Value& name) override;
+  void setPropertyValue(const facebook::jsi::Object&,
+                        const facebook::jsi::Value& name,
+                        const facebook::jsi::Value& value) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::PropNameID& name) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::String& name) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::Value& name) override;
+
+  void setRuntimeDataImpl(const facebook::jsi::UUID& uuid, const void* data,
+                          void (*deleter)(const void* data)) override;
+  const void* getRuntimeDataImpl(const facebook::jsi::UUID& uuid) override;
 
   bool isArray(const facebook::jsi::Object&) const override;
   bool isArrayBuffer(const facebook::jsi::Object&) const override;
@@ -173,6 +193,11 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   size_t size(const facebook::jsi::Array&) override;
   size_t size(const facebook::jsi::ArrayBuffer&) override;
   uint8_t* data(const facebook::jsi::ArrayBuffer&) override;
+  std::shared_ptr<facebook::jsi::MutableBuffer> tryGetMutableBuffer(
+      const facebook::jsi::ArrayBuffer&) override;
+  bool detached(const facebook::jsi::ArrayBuffer&) override;
+  size_t push(const facebook::jsi::Array&, const facebook::jsi::Value* elements,
+              size_t count) override;
   facebook::jsi::Value getValueAtIndex(const facebook::jsi::Array&,
                                        size_t i) override;
   void setValueAtIndexImpl(const facebook::jsi::Array&, size_t i,
@@ -231,6 +256,15 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   v8::Global<v8::Context> context_;
   std::shared_ptr<InspectorClient> inspectorClient_;
   bool isSharedRuntime_ = false;
+
+  struct RuntimeDataEntry {
+    const void* data;
+    void (*deleter)(const void* data);
+  };
+  // Only touched on the runtime's JS thread, so it needs no lock.
+  std::unordered_map<facebook::jsi::UUID, RuntimeDataEntry,
+                     facebook::jsi::UUID::Hash>
+      runtimeData_;
   //   std::shared_ptr<facebook::react::MessageQueueThread> jsQueue_;
 };
 

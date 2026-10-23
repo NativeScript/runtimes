@@ -111,6 +111,21 @@ struct ExternalMemoryTracker {
   }
 };
 
+// Maps a createArrayBuffer() backing store's data pointer to the MutableBuffer
+// that owns it, so tryGetMutableBuffer() can hand it back without copying. V8
+// does not expose a backing store's deleter data, and runs deleters on
+// arbitrary threads. Leaked so deleters running during exit never see it
+// destroyed.
+struct RetainedMutableBuffers {
+  std::mutex mutex;
+  std::unordered_map<const void*, std::shared_ptr<jsi::MutableBuffer>*> byData;
+
+  static RetainedMutableBuffers& shared() {
+    static auto* instance = new RetainedMutableBuffers();
+    return *instance;
+  }
+};
+
 }  // namespace
 
 // static
@@ -247,6 +262,11 @@ V8Runtime::~V8Runtime() {
     v8::Locker locker(isolate_);
     v8::Isolate::Scope scopedIsolate(isolate_);
     v8::HandleScope scopedHandle(isolate_);
+    // Runtime data can hold jsi::Values, which need the isolate to release.
+    for (auto& [uuid, entry] : runtimeData_) {
+      entry.deleter(entry.data);
+    }
+    runtimeData_.clear();
     if (inspectorClient_) {
       inspectorClient_.reset();
     }
@@ -523,7 +543,13 @@ jsi::Value V8Runtime::evaluatePreparedJavaScript(
 }
 
 void V8Runtime::queueMicrotask(const jsi::Function& callback) {
-  // TODO: add this when we revisit new architecture support
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  isolate_->EnqueueMicrotask(
+      JSIV8ValueConverter::ToV8Function(*this, callback));
 }
 
 bool V8Runtime::drainMicrotasks(int maxMicrotasksHint) {
@@ -1288,6 +1314,130 @@ void V8Runtime::setPropertyValue(const jsi::Object& object,
   }
 }
 
+jsi::Value V8Runtime::getProperty(const jsi::Object& object,
+                                  const jsi::Value& name) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::TryCatch tryCatch(isolate_);
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  v8::MaybeLocal<v8::Value> result =
+      v8Object->Get(isolate_->GetCurrentContext(),
+                    JSIV8ValueConverter::ToV8Value(*this, name));
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  if (result.IsEmpty()) {
+    return jsi::Value::undefined();
+  }
+  return JSIV8ValueConverter::ToJSIValue(isolate_, result.ToLocalChecked());
+}
+
+bool V8Runtime::hasProperty(const jsi::Object& object,
+                            const jsi::Value& name) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::TryCatch tryCatch(isolate_);
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  v8::Maybe<bool> result =
+      v8Object->Has(isolate_->GetCurrentContext(),
+                    JSIV8ValueConverter::ToV8Value(*this, name));
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  return result.FromMaybe(false);
+}
+
+void V8Runtime::setPropertyValue(const jsi::Object& object,
+                                 const jsi::Value& name,
+                                 const jsi::Value& value) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, object);
+
+  if (v8Object
+          ->Set(isolate_->GetCurrentContext(),
+                JSIV8ValueConverter::ToV8Value(*this, name),
+                JSIV8ValueConverter::ToV8Value(*this, value))
+          .IsNothing()) {
+    throw jsi::JSError(*this, "V8Runtime::setPropertyValue failed.");
+  }
+}
+
+void V8Runtime::DeleteV8Property(v8::Local<v8::Object> object,
+                                 v8::Local<v8::Value> key) {
+  v8::TryCatch tryCatch(isolate_);
+  v8::Maybe<bool> result = object->Delete(isolate_->GetCurrentContext(), key);
+  if (tryCatch.HasCaught()) {
+    ReportException(isolate_, &tryCatch);
+  }
+  if (!result.FromMaybe(false)) {
+    throw jsi::JSError(*this, "Failed to delete property");
+  }
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::PropNameID& name) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8String(*this, name));
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::String& name) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8String(*this, name));
+}
+
+void V8Runtime::deleteProperty(const jsi::Object& object,
+                               const jsi::Value& name) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  DeleteV8Property(JSIV8ValueConverter::ToV8Object(*this, object),
+                   JSIV8ValueConverter::ToV8Value(*this, name));
+}
+
+void V8Runtime::setRuntimeDataImpl(const jsi::UUID& uuid, const void* data,
+                                   void (*deleter)(const void* data)) {
+  auto [it, inserted] =
+      runtimeData_.try_emplace(uuid, RuntimeDataEntry{data, deleter});
+  if (!inserted) {
+    RuntimeDataEntry previous = it->second;
+    it->second = {data, deleter};
+    previous.deleter(previous.data);
+  }
+}
+
+const void* V8Runtime::getRuntimeDataImpl(const jsi::UUID& uuid) {
+  auto it = runtimeData_.find(uuid);
+  return it != runtimeData_.end() ? it->second.data : nullptr;
+}
+
 bool V8Runtime::isArray(const jsi::Object& object) const {
   v8::Locker locker(isolate_);
   v8::Isolate::Scope scopedIsolate(isolate_);
@@ -1429,13 +1579,28 @@ jsi::ArrayBuffer V8Runtime::createArrayBuffer(
   size_t byteLength = buffer->size();
   auto* retainedBuffer =
       new std::shared_ptr<jsi::MutableBuffer>(std::move(buffer));
+  if (data != nullptr) {
+    auto& retained = RetainedMutableBuffers::shared();
+    std::lock_guard<std::mutex> lock(retained.mutex);
+    retained.byData[data] = retainedBuffer;
+  }
 
   std::unique_ptr<v8::BackingStore> backingStore =
       v8::ArrayBuffer::NewBackingStore(
           data, byteLength,
-          [](void* /*data*/, size_t /*length*/, void* deleterData) {
-            delete static_cast<std::shared_ptr<jsi::MutableBuffer>*>(
-                deleterData);
+          [](void* data, size_t /*length*/, void* deleterData) {
+            auto* retainedBuffer =
+                static_cast<std::shared_ptr<jsi::MutableBuffer>*>(deleterData);
+            {
+              auto& retained = RetainedMutableBuffers::shared();
+              std::lock_guard<std::mutex> lock(retained.mutex);
+              auto it = retained.byData.find(data);
+              if (it != retained.byData.end() &&
+                  it->second == retainedBuffer) {
+                retained.byData.erase(it);
+              }
+            }
+            delete retainedBuffer;
           },
           retainedBuffer);
 
@@ -1479,6 +1644,63 @@ uint8_t* V8Runtime::data(const jsi::ArrayBuffer& arrayBuffer) {
   assert(v8Object->IsArrayBuffer());
   v8::ArrayBuffer* v8ArrayBuffer = v8::ArrayBuffer::Cast(*v8Object);
   return reinterpret_cast<uint8_t*>(v8ArrayBuffer->GetBackingStore()->Data());
+}
+
+std::shared_ptr<jsi::MutableBuffer> V8Runtime::tryGetMutableBuffer(
+    const jsi::ArrayBuffer& arrayBuffer) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
+  v8::ArrayBuffer* v8ArrayBuffer = v8::ArrayBuffer::Cast(*v8Object);
+  const void* data = v8ArrayBuffer->Data();
+  if (data == nullptr) {
+    return nullptr;
+  }
+
+  auto& retained = RetainedMutableBuffers::shared();
+  std::lock_guard<std::mutex> lock(retained.mutex);
+  auto it = retained.byData.find(data);
+  if (it == retained.byData.end() ||
+      (*it->second)->size() != v8ArrayBuffer->ByteLength()) {
+    return nullptr;
+  }
+  return *it->second;
+}
+
+bool V8Runtime::detached(const jsi::ArrayBuffer& arrayBuffer) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::Local<v8::Object> v8Object =
+      JSIV8ValueConverter::ToV8Object(*this, arrayBuffer);
+  return v8::ArrayBuffer::Cast(*v8Object)->WasDetached();
+}
+
+size_t V8Runtime::push(const jsi::Array& array, const jsi::Value* elements,
+                       size_t count) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Context::Scope scopedContext(context_.Get(isolate_));
+
+  v8::Local<v8::Context> context = isolate_->GetCurrentContext();
+  v8::Local<v8::Array> v8Array = JSIV8ValueConverter::ToV8Array(*this, array);
+  uint32_t length = v8Array->Length();
+  for (size_t i = 0; i < count; i++) {
+    if (v8Array
+            ->Set(context, length + static_cast<uint32_t>(i),
+                  JSIV8ValueConverter::ToV8Value(*this, elements[i]))
+            .IsNothing()) {
+      throw jsi::JSError(*this, "V8Runtime::push failed.");
+    }
+  }
+  return length + count;
 }
 
 jsi::Value V8Runtime::getValueAtIndex(const jsi::Array& array, size_t i) {
