@@ -60,7 +60,9 @@ V8PointerValue* V8PointerValue::createFromUtf8(v8::Isolate* isolate,
 }
 
 void V8PointerValue::invalidate() noexcept {
-  {
+  if (v8::Isolate::TryGetCurrent() == isolate_) {
+    value_.Reset();
+  } else {
     v8::Locker locker(isolate_);
     v8::Isolate::Scope scopedIsolate(isolate_);
     value_.Reset();
