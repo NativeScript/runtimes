@@ -1111,15 +1111,17 @@ bool V8Runtime::hasNativeState(const jsi::Object& object) {
 
 std::shared_ptr<jsi::NativeState> V8Runtime::getNativeState(
     const jsi::Object& object) {
-  if (isHostObject(object)) {
-    throw jsi::JSINativeException("native state unsupported on HostObject");
-  }
-  assert(hasNativeState(object));
-
   JSIScope scope(isolate_, context_);
 
   v8::Local<v8::Object> v8Object =
       JSIV8ValueConverter::ToV8Object(*this, object);
+  InternalFieldType type = GetInternalFieldType(v8Object);
+  if (type == InternalFieldType::kHostObject) {
+    throw jsi::JSINativeException("native state unsupported on HostObject");
+  }
+  if (type != InternalFieldType::kNativeState) {
+    return nullptr;
+  }
   auto* holder = reinterpret_cast<NativeStateHolder*>(
       v8Object->GetAlignedPointerFromInternalField(
           1, v8::kEmbedderDataTypeTagDefault));
@@ -1981,13 +1983,20 @@ void V8Runtime::OnHostFuncionContainerCallback(
 
   v8::Local<v8::Function> v8HostFunction =
       v8::Local<v8::Function>::Cast(args.Data());
-  std::vector<v8::Local<v8::Value>> argv;
-  for (size_t i = 0; i < args.Length(); ++i) {
-    argv.push_back(args[(int)i]);
+  constexpr int kStackArgCount = 8;
+  const int argc = args.Length();
+  v8::Local<v8::Value> stackArgv[kStackArgCount];
+  std::vector<v8::Local<v8::Value>> heapArgv;
+  v8::Local<v8::Value>* argv = stackArgv;
+  if (argc > kStackArgCount) {
+    heapArgv.resize(argc);
+    argv = heapArgv.data();
   }
-  v8::MaybeLocal<v8::Value> result =
-      v8HostFunction->Call(args.GetIsolate()->GetCurrentContext(), args.This(),
-                           args.Length(), argv.data());
+  for (int i = 0; i < argc; ++i) {
+    argv[i] = args[i];
+  }
+  v8::MaybeLocal<v8::Value> result = v8HostFunction->Call(
+      args.GetIsolate()->GetCurrentContext(), args.This(), argc, argv);
 
   if (!result.IsEmpty()) {
     args.GetReturnValue().Set(result.ToLocalChecked());
