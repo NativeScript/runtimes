@@ -39,6 +39,28 @@ void installBindings() {
 
 Each V8 isolate (the main UI thread and any NativeScript Worker threads) lazily owns its own `std::shared_ptr<facebook::jsi::Runtime>` keyed by `v8::Isolate::GetCurrent()`, resolving V8 symbols exported by `libNativeScript.so`.
 
+## Scheduling work on the JS thread
+
+`tns::GetJSICallInvoker()` returns a `tns::JSICallInvoker` (the equivalent of React Native's `CallInvoker`) for the calling thread's runtime, backed by that thread's `ALooper`. Grab it on the JS thread, then call `invokeAsync` from any thread to run work back on it, for example to settle a promise from a background queue:
+
+```cpp
+#include "JSIRuntime.h"
+
+auto invoker = tns::GetJSICallInvoker();
+std::thread([invoker, resolve] {
+  double result = expensiveWork();
+  invoker->invokeAsync([resolve, result](facebook::jsi::Runtime& rt) {
+    resolve->call(rt, result);
+  });
+}).detach();
+```
+
+Each task runs as a top-level JS entry followed by a microtask checkpoint, so `await`ing code continues immediately. Errors thrown by a task are reported through NativeScript's uncaught error handling.
+
+## JSI version
+
+The bundled `facebook::jsi` headers match React Native 0.88.0, which is what Nitro Modules v1 (`nitro-core`) and other current JSI libraries compile against. Install Nitro with `margelo::nitro::install(*runtime, dispatcher)`, where the dispatcher forwards `runAsync` to `JSICallInvoker::invokeAsync` and `isOnDispatcher` to `isOnJSThread`.
+
 ## JavaScript / TypeScript Usage
 
 ```ts

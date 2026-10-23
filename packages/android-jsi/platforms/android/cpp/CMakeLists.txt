@@ -49,6 +49,7 @@ target_compile_options(
 )
 
 find_library(android-log-lib log)
+find_library(android-lib android)
 
 # V8 symbols are exported by libNativeScript.so which is already loaded in the
 # Android process by the NativeScript runtime. Allow unresolved shared-library
@@ -62,6 +63,7 @@ if(DEFINED NATIVESCRIPT_SO_PATH AND EXISTS "${NATIVESCRIPT_SO_PATH}")
   target_link_libraries(
     nativescript-jsi
     ${android-log-lib}
+    ${android-lib}
     NativeScriptRuntime
   )
 else()
@@ -75,5 +77,6 @@ else()
   target_link_libraries(
     nativescript-jsi
     ${android-log-lib}
+    ${android-lib}
   )
 endif()

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <unordered_map>
 
 // #include <cxxreact/MessageQueueThread.h>
@@ -34,6 +35,11 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
 
   // Calling this function when the platform main runloop is idle
   void OnMainLoopIdle();
+
+  // Runs `task` as a top-level entry into JS from the runtime's thread, then
+  // drains microtasks. An exception escaping `task` goes to NativeScript's
+  // uncaught error handling instead of propagating to the caller.
+  void ExecuteTask(const std::function<void(facebook::jsi::Runtime&)>& task);
 
  private:
   v8::Local<v8::Context> CreateGlobalContext(v8::Isolate* isolate);
@@ -264,6 +270,9 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   std::unordered_map<facebook::jsi::UUID, RuntimeDataEntry,
                      facebook::jsi::UUID::Hash>
       runtimeData_;
+
+  v8::Global<v8::Function> taskTrampoline_;
+  const std::function<void(facebook::jsi::Runtime&)>* currentTask_ = nullptr;
   //   std::shared_ptr<facebook::react::MessageQueueThread> jsQueue_;
 };
 

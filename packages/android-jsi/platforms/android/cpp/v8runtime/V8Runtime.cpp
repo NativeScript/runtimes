@@ -267,6 +267,7 @@ V8Runtime::~V8Runtime() {
       entry.deleter(entry.data);
     }
     runtimeData_.clear();
+    taskTrampoline_.Reset();
     if (inspectorClient_) {
       inspectorClient_.reset();
     }
@@ -276,6 +277,43 @@ V8Runtime::~V8Runtime() {
   // The isolate belongs to the NativeScript runtime; never dispose it here.
   // v8::V8::Dispose();
   // v8::V8::DisposePlatform();
+}
+
+void V8Runtime::ExecuteTask(
+    const std::function<void(jsi::Runtime&)>& task) {
+  v8::Locker locker(isolate_);
+  v8::Isolate::Scope scopedIsolate(isolate_);
+  v8::HandleScope scopedHandle(isolate_);
+  v8::Local<v8::Context> context = context_.Get(isolate_);
+  v8::Context::Scope scopedContext(context);
+
+  // Running the task inside a host function turns C++ exceptions into JS
+  // exceptions, which the verbose TryCatch below then reports.
+  if (taskTrampoline_.IsEmpty()) {
+    jsi::Function trampoline = createFunctionFromHostFunction(
+        jsi::PropNameID::forAscii(*this, "executeTask"), 0,
+        [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value*,
+               size_t) {
+          (*currentTask_)(runtime);
+          return jsi::Value::undefined();
+        });
+    taskTrampoline_.Reset(isolate_,
+                          JSIV8ValueConverter::ToV8Function(*this, trampoline));
+  }
+
+  const auto* outerTask = currentTask_;
+  currentTask_ = &task;
+  {
+    // Verbose hands the exception to the isolate's message listeners, which
+    // NativeScript uses for uncaught errors.
+    v8::TryCatch tryCatch(isolate_);
+    tryCatch.SetVerbose(true);
+    (void)taskTrampoline_.Get(isolate_)->Call(context, context->Global(), 0,
+                                              nullptr);
+  }
+  currentTask_ = outerTask;
+
+  isolate_->PerformMicrotaskCheckpoint();
 }
 
 void V8Runtime::OnMainLoopIdle() {
