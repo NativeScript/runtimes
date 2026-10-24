@@ -403,6 +403,9 @@ class NativeApiCallback final
         threadPolicy_(threadPolicy),
         bindThis_(bindThis),
         roundTripValidationKey_(roundTripValidationKey) {
+    if (bridge_ != nullptr) {
+      bridge_->holdRuntimeValue(function_);
+    }
     closure_ = static_cast<ffi_closure*>(
         ffi_closure_alloc(sizeof(ffi_closure), &executable_));
     if (closure_ == nullptr || executable_ == nullptr ||
@@ -483,7 +486,7 @@ class NativeApiCallback final
     }
     auto self = shared_from_this();
     if (bridge_ != nullptr && runtime_ != nullptr && function_ != nullptr &&
-        blockPointer != nullptr) {
+        blockPointer != nullptr && !bridge_->runtimeValuesReleased()) {
       bridge_->rememberRoundTripValue(*runtime_, blockPointer,
                                       Value(*runtime_, *function_), false,
                                       roundTripValidationKey_);
@@ -553,7 +556,7 @@ class NativeApiCallback final
       }
 
       if (bridge != nullptr && runtime != nullptr &&
-          pointerToForget != nullptr) {
+          pointerToForget != nullptr && !bridge->runtimeValuesReleased()) {
         NativeApiRuntimeScope runtimeScope(*runtime);
         bridge->forgetRoundTripValue(*runtime, pointerToForget);
       }
@@ -577,6 +580,9 @@ class NativeApiCallback final
   }
 
   void invoke(void* ret, void* args[]) {
+    if (runtimeDestroyed(ret)) {
+      return;
+    }
     if (runtime_ == nullptr || function_ == nullptr || signature_ == nullptr) {
       throwNativeApiCallbackException("Invalid callback.");
     }
@@ -735,7 +741,27 @@ class NativeApiCallback final
   }
 
  private:
+  // A native caller can keep a block or method implementation past its
+  // runtime (e.g. across a JavaScript reload); it gets a zero result instead.
+  bool runtimeDestroyed(void* ret) {
+    if (bridge_ == nullptr || !bridge_->runtimeValuesReleased()) {
+      return false;
+    }
+    std::string name = signature_ != nullptr ? signature_->selectorName : "";
+    if (name.empty()) {
+      name = block_ ? "block" : "native callback";
+    }
+    NSLog(@"NativeScript: %s called after its JavaScript runtime was "
+          @"destroyed; returning zero/nil.",
+          name.c_str());
+    zeroReturnValue(ret);
+    return true;
+  }
+
   void invokeOnCurrentThread(void* ret, void* args[], std::string* error) {
+    if (runtimeDestroyed(ret)) {
+      return;
+    }
     try {
       NativeApiRuntimeScope runtimeScope(*runtime_);
       size_t nativeArgOffset = signature_->implicitArgumentCount;

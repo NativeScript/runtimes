@@ -10,7 +10,11 @@ class NativeApiPointerHostObject final
         pointer_(pointer),
         kind_(std::move(kind)),
         adopted_(adopted),
-        backingValue_(std::move(backingValue)) {}
+        backingValue_(std::move(backingValue)) {
+    if (bridge_ != nullptr) {
+      bridge_->holdRuntimeValue(backingValue_);
+    }
+  }
 
   ~NativeApiPointerHostObject() override {
     if (adopted_ && pointer_ != nullptr) {
@@ -26,6 +30,9 @@ class NativeApiPointerHostObject final
   std::shared_ptr<Value> backingValue() const { return backingValue_; }
   void setBackingValue(Runtime& runtime, const Value& value) {
     backingValue_ = std::make_shared<Value>(runtime, value);
+    if (bridge_ != nullptr) {
+      bridge_->holdRuntimeValue(backingValue_);
+    }
   }
   bool adopted() const { return adopted_; }
   void adopt() { adopted_ = true; }
@@ -183,7 +190,12 @@ class NativeApiReferenceHostObject final : public HostObject {
         ownsData_(ownsData),
         byteLength_(byteLength),
         pendingValue_(std::move(pendingValue)),
-        backingValue_(std::move(backingValue)) {}
+        backingValue_(std::move(backingValue)) {
+    if (bridge_ != nullptr) {
+      bridge_->holdRuntimeValue(pendingValue_);
+      bridge_->holdRuntimeValue(backingValue_);
+    }
+  }
 
   ~NativeApiReferenceHostObject() override {
     for (id object : retainedObjects_) {

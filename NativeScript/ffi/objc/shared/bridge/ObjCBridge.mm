@@ -545,6 +545,79 @@ class NativeApiBridge {
     }
   }
 
+  // Called while the bridge's runtime is being destroyed, when its Values can
+  // still be released. Host objects can be shared into another runtime and
+  // outlive this one, so from here on the bridge holds no Values.
+  void releaseRuntimeValues() {
+    decltype(roundTripValues_) roundTripValues;
+    decltype(roundTripCacheFramesByThread_) roundTripFrames;
+    decltype(recentRoundTripValues_) recentRoundTripValues;
+#ifdef TARGET_ENGINE_HERMES
+    std::shared_ptr<Value> roundTripRoot;
+#endif
+    {
+      std::lock_guard<std::mutex> lock(roundTripValuesMutex_);
+      runtimeValuesReleased_.store(true, std::memory_order_release);
+      roundTripValues.swap(roundTripValues_);
+      roundTripFrames.swap(roundTripCacheFramesByThread_);
+      recentRoundTripValues.swap(recentRoundTripValues_);
+      recentRoundTripValueOrder_.clear();
+#ifdef TARGET_ENGINE_HERMES
+      rootedRoundTripValues_.clear();
+      roundTripRoot.swap(roundTripRootCache_);
+#endif
+      roundTripValuesGeneration_.fetch_add(1, std::memory_order_release);
+    }
+    classValues_.clear();
+    classPrototypes_.clear();
+    pointerValues_.clear();
+    objectExpandos_.clear();
+    objectExpandoOwnerCounts_.clear();
+    objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
+
+    std::vector<HeldRuntimeValue> heldValues;
+    {
+      std::lock_guard<std::mutex> lock(heldRuntimeValuesMutex_);
+      heldValues.swap(heldRuntimeValues_);
+    }
+    for (auto& held : heldValues) {
+      if (auto value = held.value.lock()) {
+        held.release(value.get());
+      }
+    }
+  }
+
+  bool runtimeValuesReleased() const {
+    return runtimeValuesReleased_.load(std::memory_order_acquire);
+  }
+
+  // For Values owned outside the bridge's caches. They are released in place
+  // with the bridge's runtime, leaving the holder an empty Value or Function.
+  template <typename T>
+  void holdRuntimeValue(const std::shared_ptr<T>& value) {
+#ifdef TARGET_ENGINE_HERMES
+    if (value == nullptr) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(heldRuntimeValuesMutex_);
+    if (runtimeValuesReleased()) {
+      return;
+    }
+    if (heldRuntimeValues_.size() >= heldRuntimeValuesPruneSize_) {
+      heldRuntimeValues_.erase(
+          std::remove_if(heldRuntimeValues_.begin(), heldRuntimeValues_.end(),
+                         [](const HeldRuntimeValue& held) {
+                           return held.value.expired();
+                         }),
+          heldRuntimeValues_.end());
+      heldRuntimeValuesPruneSize_ =
+          std::max<size_t>(256, heldRuntimeValues_.size() * 2);
+    }
+    heldRuntimeValues_.push_back(HeldRuntimeValue{
+        value, [](void* held) { T released(std::move(*static_cast<T*>(held))); }});
+#endif
+  }
+
   MDMetadataReader* metadata() const { return metadata_.get(); }
 
   void* selfDl() const { return selfDl_; }
@@ -621,7 +694,7 @@ class NativeApiBridge {
                               const Value& value,
                               bool stringLikeNative = false,
                               uintptr_t validationKey = 0) {
-    if (native == nullptr) {
+    if (native == nullptr || runtimeValuesReleased()) {
       return;
     }
     uintptr_t key =
@@ -666,7 +739,7 @@ class NativeApiBridge {
                                                      bool stringLikeNative,
                                                      bool persistBeyondFrame,
                                                      uintptr_t validationKey) {
-    if (native == nullptr) {
+    if (native == nullptr || runtimeValuesReleased()) {
       return;
     }
     uintptr_t key =
@@ -890,7 +963,7 @@ class NativeApiBridge {
   }
 
   void rememberClassValue(Runtime& runtime, Class cls, const Value& value) {
-    if (cls == Nil) {
+    if (cls == Nil || runtimeValuesReleased()) {
       return;
     }
     classValues_[normalizeRuntimePointer(reinterpret_cast<uintptr_t>(cls))] =
@@ -910,7 +983,7 @@ class NativeApiBridge {
   }
 
   void rememberClassPrototype(Runtime& runtime, Class cls, const Value& value) {
-    if (cls == Nil) {
+    if (cls == Nil || runtimeValuesReleased()) {
       return;
     }
     classPrototypes_[normalizeRuntimePointer(reinterpret_cast<uintptr_t>(cls))] =
@@ -931,7 +1004,7 @@ class NativeApiBridge {
 
   void setObjectExpando(Runtime& runtime, const void* native,
                         const std::string& property, const Value& value) {
-    if (native == nullptr || property.empty()) {
+    if (native == nullptr || property.empty() || runtimeValuesReleased()) {
       return;
     }
     objectExpandos_[normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native))]
@@ -1095,6 +1168,9 @@ class NativeApiBridge {
 
   void rememberPointerValue(Runtime& runtime, const void* native,
                             const Value& value) {
+    if (runtimeValuesReleased()) {
+      return;
+    }
     pointerValues_[reinterpret_cast<uintptr_t>(native)] =
         std::make_shared<Value>(runtime, value);
   }
@@ -2166,6 +2242,14 @@ class NativeApiBridge {
   std::thread::id jsThreadId_ = std::this_thread::get_id();
   std::mutex retainedLifetimesMutex_;
   std::vector<std::shared_ptr<void>> retainedLifetimes_;
+  struct HeldRuntimeValue {
+    std::weak_ptr<void> value;
+    void (*release)(void*);
+  };
+  std::mutex heldRuntimeValuesMutex_;
+  std::vector<HeldRuntimeValue> heldRuntimeValues_;
+  size_t heldRuntimeValuesPruneSize_ = 256;
+  std::atomic<bool> runtimeValuesReleased_{false};
 };
 
 class NativeApiRoundTripCacheFrameGuard final {

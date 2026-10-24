@@ -1268,6 +1268,9 @@ NativeApiHostSetResult NativeApiReferenceHostObject::set(Runtime& runtime, const
   if (data_ == nullptr) {
     if (slotIndex == 0) {
       pendingValue_ = std::make_shared<Value>(runtime, value);
+      if (bridge_ != nullptr) {
+        bridge_->holdRuntimeValue(pendingValue_);
+      }
       NATIVE_API_SET_RETURN(true);
     }
     ensureStorage(runtime, type_, frame, slotIndex + 1);
