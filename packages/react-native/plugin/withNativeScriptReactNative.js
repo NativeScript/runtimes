@@ -11,6 +11,13 @@ const DEFAULTS = {
 const BABEL_PLUGIN = '@nativescript/react-native/babel-plugin';
 const WORKLETS_BABEL_PLUGIN = 'react-native-worklets/plugin';
 const BABEL_PLUGINS = [BABEL_PLUGIN, WORKLETS_BABEL_PLUGIN];
+const EXPO_BABEL_PRESET = 'babel-preset-expo';
+// Without strictGlobal the worklets plugin captures every undeclared name into
+// the worklet's closure on the JS thread when the worklet is created, where
+// NativeScript's classes (UIView, UILabel, ...) do not exist yet.
+const WORKLETS_BABEL_PLUGIN_ENTRY = `['${WORKLETS_BABEL_PLUGIN}', { strictGlobal: true }]`;
+// babel-preset-expo adds its own worklets plugin, without strictGlobal.
+const EXPO_BABEL_PRESET_ENTRY = `['${EXPO_BABEL_PRESET}', { worklets: false }]`;
 const METADATA_CONFIG_FILE = 'nativescript.react-native.json';
 
 function readBoolean(value, fallback) {
@@ -74,6 +81,19 @@ function ensureMetadataConfig(projectRoot, metadataOptions) {
   return merged;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+}
+
+// Replaces `'name'` written as a bare array element with `entry`. Elements
+// already given options (`['name', {...}]`) are left alone.
+function replaceBareEntry(source, name, entry) {
+  const bare = new RegExp(
+    `([\\[,]\\s*)(['"])${escapeRegExp(name)}\\2(?=\\s*(?:,(?!\\s*\\{)|\\]))`,
+  );
+  return source.replace(bare, (match, prefix) => `${prefix}${entry}`);
+}
+
 function ensureBabelPlugin(projectRoot) {
   const fs = require('fs');
   const path = require('path');
@@ -90,8 +110,8 @@ function ensureBabelPlugin(projectRoot) {
         'module.exports = function(api) {',
         '  api.cache(true);',
         '  return {',
-        "    presets: ['babel-preset-expo'],",
-        `    plugins: [${BABEL_PLUGINS.map((plugin) => `'${plugin}'`).join(', ')}],`,
+        `    presets: [${EXPO_BABEL_PRESET_ENTRY}],`,
+        `    plugins: ['${BABEL_PLUGIN}', ${WORKLETS_BABEL_PLUGIN_ENTRY}],`,
         '  };',
         '};',
         '',
@@ -100,37 +120,50 @@ function ensureBabelPlugin(projectRoot) {
     return;
   }
 
-  let source = fs.readFileSync(babelConfigPath, 'utf8');
+  const original = fs.readFileSync(babelConfigPath, 'utf8');
+  let source = original;
   const missingPlugins = BABEL_PLUGINS.filter((plugin) => !source.includes(plugin));
-  if (missingPlugins.length === 0) {
-    return;
+  if (missingPlugins.length > 0) {
+    const pluginEntry = missingPlugins
+      .map((plugin) =>
+        plugin === WORKLETS_BABEL_PLUGIN ? WORKLETS_BABEL_PLUGIN_ENTRY : `'${plugin}'`,
+      )
+      .join(', ') + ', ';
+    if (/plugins\s*:\s*\[/.test(source)) {
+      source = source.replace(/plugins\s*:\s*\[/, (match) => `${match}${pluginEntry}`);
+    } else if (/return\s*\{/.test(source)) {
+      source = source.replace(
+        /return\s*\{/,
+        (match) => `${match}\n    plugins: [${pluginEntry}],`,
+      );
+    } else if (/module\.exports\s*=\s*\{/.test(source)) {
+      source = source.replace(
+        /module\.exports\s*=\s*\{/,
+        (match) => `${match}\n  plugins: [${pluginEntry}],`,
+      );
+    } else if (/export\s+default\s+\{/.test(source)) {
+      source = source.replace(
+        /export\s+default\s+\{/,
+        (match) => `${match}\n  plugins: [${pluginEntry}],`,
+      );
+    } else {
+      source += `\n// @nativescript/react-native: add ${missingPlugins.map((plugin) => `'${plugin}'`).join(' and ')} to your Babel plugins.\n`;
+    }
   }
 
-  const pluginEntry = missingPlugins
-    .map((plugin) => `'${plugin}'`)
-    .join(', ') + ', ';
-  if (/plugins\s*:\s*\[/.test(source)) {
-    source = source.replace(/plugins\s*:\s*\[/, (match) => `${match}${pluginEntry}`);
-  } else if (/return\s*\{/.test(source)) {
-    source = source.replace(
-      /return\s*\{/,
-      (match) => `${match}\n    plugins: [${pluginEntry}],`,
+  source = replaceBareEntry(source, WORKLETS_BABEL_PLUGIN, WORKLETS_BABEL_PLUGIN_ENTRY);
+  source = replaceBareEntry(source, EXPO_BABEL_PRESET, EXPO_BABEL_PRESET_ENTRY);
+
+  if (source.includes(WORKLETS_BABEL_PLUGIN) && !/strictGlobal\s*:\s*true/.test(source)) {
+    console.warn(
+      `@nativescript/react-native: pass { strictGlobal: true } to '${WORKLETS_BABEL_PLUGIN}' ` +
+        `in ${path.basename(babelConfigPath)}, or worklets that name native classes fail as their module loads.`,
     );
-  } else if (/module\.exports\s*=\s*\{/.test(source)) {
-    source = source.replace(
-      /module\.exports\s*=\s*\{/,
-      (match) => `${match}\n  plugins: [${pluginEntry}],`,
-    );
-  } else if (/export\s+default\s+\{/.test(source)) {
-    source = source.replace(
-      /export\s+default\s+\{/,
-      (match) => `${match}\n  plugins: [${pluginEntry}],`,
-    );
-  } else {
-    source += `\n// @nativescript/react-native: add ${missingPlugins.map((plugin) => `'${plugin}'`).join(' and ')} to your Babel plugins.\n`;
   }
 
-  fs.writeFileSync(babelConfigPath, source);
+  if (source !== original) {
+    fs.writeFileSync(babelConfigPath, source);
+  }
 }
 
 function withNativeScriptBabelPlugin(config) {
@@ -141,13 +174,11 @@ function withNativeScriptBabelPlugin(config) {
     return config;
   }
 
-  return withDangerousMod(config, [
-    'ios',
-    async (modConfig) => {
-      ensureBabelPlugin(modConfig.modRequest.projectRoot);
-      return modConfig;
-    },
-  ]);
+  const mod = async (modConfig) => {
+    ensureBabelPlugin(modConfig.modRequest.projectRoot);
+    return modConfig;
+  };
+  return withDangerousMod(withDangerousMod(config, ['ios', mod]), ['android', mod]);
 }
 
 function withNativeScriptMetadata(config, metadataOptions) {
