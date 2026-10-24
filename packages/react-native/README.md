@@ -642,6 +642,16 @@ const now = java.lang.System.currentTimeMillis();
 const sdk = android.os.Build.VERSION.SDK_INT;
 ```
 
+Each top-level Java package is a global named after it (`java`, `android`,
+`androidx`, `com`, ...). A package whose name is a JavaScript keyword gets a `$`
+prefix instead. So does one whose name the host has already defined as a
+read-only global, and a warning is logged. Expo defines `expo`, for example, so
+Expo's own Java classes are under `$expo`:
+
+```ts
+const modules = $expo.modules;
+```
+
 ### How it works
 
 The runtime does not bring a JavaScript engine. It binds to the
