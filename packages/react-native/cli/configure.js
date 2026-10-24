@@ -26,8 +26,9 @@ function printNextSteps() {
   console.log('  iOS     : cd ios && RCT_NEW_ARCH_ENABLED=1 USE_HERMES=1 pod install');
   console.log('  Android : npx react-native run-android');
   console.log('');
-  console.log('  Android typings are generated on demand:');
-  console.log('    cd android && ./gradlew generateNativeScriptTypingsDebug -PnsGenerateTypings=true');
+  console.log('  Android typings are written to types/android/ on the first build');
+  console.log('  (opt out with -PnsGenerateTypings=false). To generate them on their own:');
+  console.log('    cd android && ./gradlew generateNativeScriptTypingsDebug');
 }
 
 function configure(argv = process.argv.slice(2)) {
