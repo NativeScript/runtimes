@@ -12,7 +12,9 @@ import type {
   RefAttributes,
 } from "react";
 import type { ViewProps } from "react-native";
+import { Platform } from "react-native";
 import NativeScriptNativeApi from "./NativeScriptNativeApi";
+import type { Spec as NativeScriptNativeApiSpec } from "./NativeScriptNativeApi";
 import NativeScriptUIViewNativeComponent from "./NativeScriptUIViewNativeComponent";
 
 declare const require: (id: string) => any;
@@ -983,10 +985,38 @@ export function installGlobals(): boolean {
   return true;
 }
 
+function nativeModule(): NativeScriptNativeApiSpec {
+  if (NativeScriptNativeApi == null) {
+    throw new Error(
+      "@nativescript/react-native's native module (NativeScriptNativeApi) is not in this build. " +
+        "The package contains native code, so Expo Go cannot load it: install it in a development " +
+        "build and rebuild the app (npx expo run:ios / run:android, or EAS Build).",
+    );
+  }
+  return NativeScriptNativeApi;
+}
+
+// Android has no Worklets runtime to install into (see installWorkletRuntime in
+// NativeScriptNativeApiModule.java).
+function supportsWorkletRuntime(): boolean {
+  return Platform.OS === "ios";
+}
+
+function assertWorkletRuntimeSupported(): void {
+  if (!supportsWorkletRuntime()) {
+    throw new Error(
+      `NativeScript does not support Worklets on ${Platform.OS}: there is no UI runtime to install into, so runOnUI and UIKit views are iOS only.`,
+    );
+  }
+}
+
+export function isAvailable(): boolean {
+  return NativeScriptNativeApi != null;
+}
+
 export function init(metadataPath = "", options: InstallOptions = {}): boolean {
-  const installed =
-    NativeScriptNativeApi.isInstalled() ||
-    NativeScriptNativeApi.install(metadataPath);
+  const api = nativeModule();
+  const installed = api.isInstalled() || api.install(metadataPath);
   if (installed) {
     installInteropConstructors();
     installInlineFunctions();
@@ -994,7 +1024,7 @@ export function init(metadataPath = "", options: InstallOptions = {}): boolean {
   if (installed && options.globals === true) {
     installGlobals();
   }
-  if (installed) {
+  if (installed && supportsWorkletRuntime()) {
     ensureWorkletsInstalled(metadataPath);
   }
   return installed;
@@ -1003,15 +1033,15 @@ export function init(metadataPath = "", options: InstallOptions = {}): boolean {
 export const install = init;
 
 export function isInstalled(): boolean {
-  return NativeScriptNativeApi.isInstalled();
+  return NativeScriptNativeApi != null && NativeScriptNativeApi.isInstalled();
 }
 
 export function defaultMetadataPath(): string {
-  return NativeScriptNativeApi.defaultMetadataPath();
+  return nativeModule().defaultMetadataPath();
 }
 
 export function getRuntimeBackend(): string {
-  return NativeScriptNativeApi.getRuntimeBackend();
+  return nativeModule().getRuntimeBackend();
 }
 
 let workletsAdapter: NativeScriptWorklets | undefined;
@@ -1292,16 +1322,19 @@ function ensureWorkletsInstalled(metadataPath = ""): NativeScriptWorklets {
   if (workletsAdapter) {
     return workletsAdapter;
   }
+  assertWorkletRuntimeSupported();
   installWorklets(requireReactNativeWorklets(), metadataPath);
   return workletsAdapter as NativeScriptWorklets;
 }
 
 export function installWorklets(
-  worklets: NativeScriptWorklets = requireReactNativeWorklets(),
+  worklets?: NativeScriptWorklets,
   metadataPath = "",
 ): boolean {
-  if (!NativeScriptNativeApi.isInstalled()) {
-    const installed = NativeScriptNativeApi.install(metadataPath);
+  const api = nativeModule();
+  assertWorkletRuntimeSupported();
+  if (!api.isInstalled()) {
+    const installed = api.install(metadataPath);
     if (!installed) {
       throw new Error(
         "NativeScript Native API JSI host object was not installed",
@@ -1311,14 +1344,16 @@ export function installWorklets(
     installInlineFunctions();
   }
 
-  const validWorklets = validateWorkletsModule(worklets);
+  const validWorklets = validateWorkletsModule(
+    worklets ?? requireReactNativeWorklets(),
+  );
   const holder = validWorklets.getUIRuntimeHolder();
   if (holder == null || typeof holder !== "object") {
     throw workletsSetupError(
       "NativeScript.runOnUI could not resolve a Worklets UI runtime",
     );
   }
-  const installRuntime = NativeScriptNativeApi.installWorkletRuntime;
+  const installRuntime = api.installWorkletRuntime;
   if (typeof installRuntime !== "function") {
     throw workletsSetupError(
       "NativeScript Native API was built without RNWorklets runtime support",
@@ -3234,6 +3269,7 @@ const NativeScript = {
   init,
   install,
   installGlobals,
+  isAvailable,
   isInstalled,
   defaultMetadataPath,
   defineUIKitContainer,
