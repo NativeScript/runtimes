@@ -90,6 +90,11 @@ namespace tns {
 
         void Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
                     bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+
+        // Releases everything held in the host runtime and deletes `runtime`. The
+        // host runtime must still be alive with no JS running on it, and nothing
+        // may reach `runtime` through any thread once this begins.
+        static void Detach(Runtime *runtime);
 #endif
 
         jobject GetJavaRuntime() const;

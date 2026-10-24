@@ -265,6 +265,16 @@ void Runtime::Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &f
     InitCommon(filesRoot, /*callingDir*/ "", maxLogcatObjectSize, forceLog, /*guest*/ true);
 }
 
+void Runtime::Detach(Runtime *runtime) {
+    // `engineHost` is referenced by the JSEnterScope macro below.
+    std::shared_ptr<EngineHost> engineHost = runtime->GetEngineHost();
+    {
+        JSEnterScope
+        runtime->DestroyRuntime();
+    }
+    delete runtime;
+}
+
 #endif  // NS_JSI_HOST_RUNTIME
 
 // Everything both flavours install.
@@ -546,7 +556,16 @@ Runtime::~Runtime() {
         if (m_mainLooper_fd[1] != -1) {
             close(m_mainLooper_fd[1]);
         }
+
+        // A guest's main runtime is deleted when its host runtime goes away, and
+        // the next one attached may run on a different thread.
+        m_mainLooper = nullptr;
+        m_mainLooper_fd[0] = m_mainLooper_fd[1] = -1;
+        s_main_rt = nullptr;
+        s_mainThreadInitialized = false;
     }
+
+    JEnv().DeleteGlobalRef(m_runtime);
 }
 
 std::string Runtime::ReadFileText(const std::string &filePath) {

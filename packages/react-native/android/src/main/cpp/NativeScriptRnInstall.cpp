@@ -18,15 +18,6 @@
 
 using namespace tns;
 
-namespace {
-
-// Set once the first attach succeeds. React Native can reload the JS bundle,
-// which builds a fresh jsi::Runtime; the module checks this before installing
-// so a reload rebinds rather than stacking a second runtime on the first.
-bool g_attached = false;
-
-}  // namespace
-
 extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
         JNIEnv* env, jobject obj, jint runtimeId, jstring metadataPath, jlong hostRuntimePtr,
         jboolean verboseLoggingEnabled, jint maxLogcatObjectSize, jboolean forceLog,
@@ -58,8 +49,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
                 runtime->GetEngineHost()->ExecuteScript(source, "internal/ts_helpers.js");
             }
         }
-
-        g_attached = true;
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(nullptr);
     } catch (std::exception& e) {
@@ -71,9 +60,19 @@ extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
     }
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_org_nativescript_reactnative_NativeScriptNativeApiModule_nativeIsInstalled(JNIEnv*, jobject) {
-    return g_attached ? JNI_TRUE : JNI_FALSE;
+extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_detachNativeScript(JNIEnv*, jobject,
+                                                                         jint runtimeId) {
+    try {
+        Runtime::Detach(Runtime::GetRuntime(runtimeId));
+    } catch (NativeScriptException& e) {
+        e.ReThrowToJava(nullptr);
+    } catch (std::exception& e) {
+        NativeScriptException nsEx(std::string("Error: c++ exception: ") + e.what());
+        nsEx.ReThrowToJava(nullptr);
+    } catch (...) {
+        NativeScriptException nsEx(std::string("Error: c++ exception!"));
+        nsEx.ReThrowToJava(nullptr);
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL

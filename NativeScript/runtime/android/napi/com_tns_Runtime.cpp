@@ -253,8 +253,12 @@ extern "C" JNIEXPORT jint Java_com_tns_Runtime_generateNewObjectIdLegacy(JNIEnv*
 
 // @FastNative ABI: standard JNI signature (registered via RegisterNatives).
 static jboolean notifyGcFast_impl(JNIEnv* jEnv, jobject obj, jint runtimeId, jintArray object_ids) {
-    auto runtime = TryGetRuntime(runtimeId);
-    if (runtime == nullptr) {
+    // Not TryGetRuntime: on the GC listener's thread a Java exception goes
+    // uncaught, and a runtime that is gone has nothing left to release.
+    Runtime* runtime = nullptr;
+    try {
+        runtime = Runtime::GetRuntime(runtimeId);
+    } catch (NativeScriptException&) {
         return JNI_FALSE;
     }
     NapiScope scope(runtime->GetNapiEnv(), false);

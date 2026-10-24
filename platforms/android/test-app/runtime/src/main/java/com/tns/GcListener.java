@@ -60,7 +60,13 @@ public class GcListener {
                                     for (int i =0; i < objIds.length; i++) {
                                         objIds[i] = collectedObjectIds.get(i);
                                     }
-                                    runtime.notifyGc(objIds);
+                                    // unsubscribe() takes this lock too, so once it returns
+                                    // no batch is still on its way into that runtime.
+                                    synchronized (instance) {
+                                        if (subscribers.get(runtime) == subscriber) {
+                                            runtime.notifyGc(objIds);
+                                        }
+                                    }
                                     if (runtime.getLogger().isEnabled()) {
                                         runtime.getLogger().write("GC", "GC triggered for " + String.valueOf(objIds.length) + " objects");
                                         runtime.getLogger().write("NS.GCListener","Objects referenced after GC: " + subscriber.referencesMap.size());
