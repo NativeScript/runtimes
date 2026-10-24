@@ -24,6 +24,7 @@
 #include "Metadata.h"
 #include "MetadataReader.h"
 #include "ffi.h"
+#include "ffi/objc/shared/EnumMemberAliases.h"
 
 #include "jsi/jsc/JSCRuntime.h"
 
