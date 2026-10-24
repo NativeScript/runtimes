@@ -832,6 +832,25 @@ is no Worklets UI runtime on Android yet, so `runOnUI()` and the UIKit view
 helpers are iOS only, and touching an `android.view.View` from JavaScript throws
 `CalledFromWrongThreadException`. Every non-UI Android API is available.
 
+### Reloads
+
+A reload (Fast Refresh's full reload, `DevSettings.reload()`, or
+`expo-updates`' `reloadAsync()`) creates a new JavaScript runtime. NativeScript
+lets go of the old one and installs its globals into the new one, so
+`NativeScript.init()` works the same after a reload.
+
+Java objects that the old runtime created or extended stay bound to it. If one of
+them calls back into JavaScript after the reload, for example a delayed `Runnable`
+or a listener that was never removed, the call throws:
+
+```
+Cannot call com.tns.gen.java.lang.Runnable.run(): the JavaScript runtime it belonged to was reloaded or shut down.
+```
+
+If this happens on the main thread, the app crashes. To avoid it, remove
+listeners and cancel posted callbacks when the component that registered them
+unmounts.
+
 ### What a guest does not install
 
 React Native already provides `console`, timers, `queueMicrotask`,
