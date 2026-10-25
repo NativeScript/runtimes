@@ -142,9 +142,9 @@ put the same `metadata` object under a `nativeScriptReactNative` key in
 `package.json`. An `android` block written into `nativescript.react-native.json`
 by hand is kept unless the options set one.
 
-Importing the package in a build without its native module is safe:
-`NativeScript.isAvailable()` returns `false` there, and `init()` and the other
-functions that need the module throw an error saying what to rebuild.
+Importing the package in a build without its native module (Expo Go, or a build
+made before the package was added) throws an error that says to use a
+development build or rebuild the app.
 
 ## Usage
 
@@ -644,9 +644,9 @@ const sdk = android.os.Build.VERSION.SDK_INT;
 
 Each top-level Java package is a global named after it (`java`, `android`,
 `androidx`, `com`, ...). A package whose name is a JavaScript keyword gets a `$`
-prefix instead. So does one whose name the host has already defined as a
-read-only global, and a warning is logged. Expo defines `expo`, for example, so
-Expo's own Java classes are under `$expo`:
+prefix instead. So does one whose name is already a global when NativeScript
+installs, and a warning is logged. Expo defines `expo`, for example, so Expo's
+own Java classes are under `$expo`:
 
 ```ts
 const modules = $expo.modules;
