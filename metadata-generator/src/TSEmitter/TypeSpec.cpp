@@ -66,7 +66,8 @@ std::string TSFile::typeToString(const TypeSpec& type, bool isStatic, bool isRet
       result += ") => ";
       result += typeToString(*type.callbackReturn, false, true);
       if (type.isNullable) {
-        result += " | null";
+        // `() => T | null` would make the return type nullable instead.
+        result = "(" + result + ") | null";
       }
       break;
     }

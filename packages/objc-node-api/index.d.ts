@@ -9,6 +9,27 @@ declare global {
 
   class NativeObject implements interop.PointerObject {
     readonly __brand__: interop.PointerObject["__brand__"];
+
+    /**
+     * Registers an Objective-C subclass of this class. Functions in `methods`
+     * override the same-named members of this class and of
+     * `options.protocols`; other names are only callable from Objective-C
+     * when listed in `options.exposedMethods`. The returned class cannot
+     * itself be extended.
+     */
+    static extend<
+      // deno-lint-ignore no-explicit-any
+      This extends abstract new (...args: any) => any,
+      // Inferred rather than annotated so that names absent from the class
+      // (protocol and exposed methods) are not excess properties. `& object`
+      // keeps literals sharing no name with the class from failing the weak
+      // type check against the all-optional Partial.
+      Methods extends Partial<InstanceType<This>> & object,
+    >(
+      this: This,
+      methods: Methods & ThisType<InstanceType<This> & Methods>,
+      options?: objc.ExtendOptions,
+    ): This;
   }
 
   namespace objc {
@@ -25,6 +46,19 @@ declare global {
       ptr: interop.Pointer,
       size: number,
     ): ArrayBuffer;
+
+    export interface ExposedMethod {
+      returns?: unknown;
+      params?: unknown[];
+    }
+
+    export interface ExtendOptions {
+      /** Objective-C class name; a numeric suffix is added if it is taken. */
+      name?: string;
+      protocols?: unknown[];
+      /** Keyed by method name in `methods`. */
+      exposedMethods?: Record<string, ExposedMethod>;
+    }
   }
 
   namespace interop {
