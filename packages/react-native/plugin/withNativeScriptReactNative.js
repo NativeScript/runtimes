@@ -17,16 +17,23 @@ function readBoolean(value, fallback) {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string') : undefined;
+}
+
 function normalizeMetadataOptions(options = {}) {
   const metadata = options.metadata || {};
-  return {
-    includePods: Array.isArray(metadata.includePods)
-      ? metadata.includePods.filter((value) => typeof value === 'string')
-      : [],
-    includeSystemFrameworks: Array.isArray(metadata.includeSystemFrameworks)
-      ? metadata.includeSystemFrameworks.filter((value) => typeof value === 'string')
-      : [],
+  const normalized = {
+    includePods: stringList(metadata.includePods) || [],
+    includeSystemFrameworks: stringList(metadata.includeSystemFrameworks) || [],
   };
+  // Omitted unless given, so ensureMetadataConfig keeps an `android` block
+  // written by hand into nativescript.react-native.json.
+  const androidInclude = stringList(metadata.android && metadata.android.include);
+  if (androidInclude) {
+    normalized.android = {include: androidInclude};
+  }
+  return normalized;
 }
 
 function normalizeOptions(options = {}) {
@@ -60,11 +67,16 @@ function ensureMetadataConfig(projectRoot, metadataOptions) {
     }
   }
 
+  const existingReactNative = existing.reactNative || {};
+  const existingMetadata =
+    existingReactNative.metadata && typeof existingReactNative.metadata === 'object'
+      ? existingReactNative.metadata
+      : {};
   const merged = {
     ...existing,
     reactNative: {
-      ...(existing.reactNative || {}),
-      metadata: metadataOptions,
+      ...existingReactNative,
+      metadata: {...existingMetadata, ...metadataOptions},
     },
   };
   const nextSource = `${JSON.stringify(merged, null, 2)}\n`;
@@ -158,13 +170,11 @@ function withNativeScriptMetadata(config, metadataOptions) {
     return config;
   }
 
-  return withDangerousMod(config, [
-    'ios',
-    async (modConfig) => {
-      ensureMetadataConfig(modConfig.modRequest.projectRoot, metadataOptions);
-      return modConfig;
-    },
-  ]);
+  const mod = async (modConfig) => {
+    ensureMetadataConfig(modConfig.modRequest.projectRoot, metadataOptions);
+    return modConfig;
+  };
+  return withDangerousMod(withDangerousMod(config, ['ios', mod]), ['android', mod]);
 }
 
 /**

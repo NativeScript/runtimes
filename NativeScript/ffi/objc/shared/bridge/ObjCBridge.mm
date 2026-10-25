@@ -768,7 +768,7 @@ class NativeApiBridge {
             ? validationKey
             : (nativeIsObject ? nativeObjectClassKey(native) : 0);
     struct RoundTripCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       uintptr_t key = 0;
       uint64_t generation = 0;
       std::weak_ptr<Value> value;
@@ -782,7 +782,7 @@ class NativeApiBridge {
     const size_t firstSlot = (key >> 4) & 3;
     for (size_t i = 0; i < 4; i++) {
       RoundTripCacheEntry& entry = cache[(firstSlot + i) & 3];
-      if (entry.bridge == this && entry.key == key &&
+      if (entry.bridgeId == instanceId_ && entry.key == key &&
           entry.generation == generation) {
         if (entry.validationKey != expectedValidationKey) {
           break;
@@ -837,13 +837,13 @@ class NativeApiBridge {
       }
       if (entry == nullptr) {
         cache[firstSlot] = RoundTripCacheEntry{
-            this, key, generation, {}, true, false, expectedValidationKey};
+            instanceId_, key, generation, {}, true, false, expectedValidationKey};
         return Value::undefined();
       }
       storedValue = entry->value;
       cachedStringLike = entry->stringLikeNative;
       cache[firstSlot] = RoundTripCacheEntry{
-          this, key, generation, storedValue, false, cachedStringLike,
+          instanceId_, key, generation, storedValue, false, cachedStringLike,
           entry->validationKey};
     }
     if (stringLikeNative != nullptr) {
@@ -1033,7 +1033,7 @@ class NativeApiBridge {
       return Value::undefined();
     }
     struct ObjectExpandoCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       uintptr_t key = 0;
       uint64_t generation = 0;
       std::string property;
@@ -1048,7 +1048,7 @@ class NativeApiBridge {
     const uint64_t generation =
         objectExpandosGeneration_.load(std::memory_order_acquire);
     for (auto& entry : cache) {
-      if (entry.bridge == this && entry.key == key &&
+      if (entry.bridgeId == instanceId_ && entry.key == key &&
           entry.generation == generation && entry.property == property) {
         if (entry.miss) {
           return Value::undefined();
@@ -1064,17 +1064,17 @@ class NativeApiBridge {
     const size_t slot = nextSlot++ & 7;
     if (objectIt == objectExpandos_.end()) {
       cache[slot] =
-          ObjectExpandoCacheEntry{this, key, generation, property, {}, true};
+          ObjectExpandoCacheEntry{instanceId_, key, generation, property, {}, true};
       return Value::undefined();
     }
     auto propertyIt = objectIt->second.find(property);
     if (propertyIt == objectIt->second.end() || propertyIt->second == nullptr) {
       cache[slot] =
-          ObjectExpandoCacheEntry{this, key, generation, property, {}, true};
+          ObjectExpandoCacheEntry{instanceId_, key, generation, property, {}, true};
       return Value::undefined();
     }
     cache[slot] = ObjectExpandoCacheEntry{
-        this, key, generation, property, propertyIt->second, false};
+        instanceId_, key, generation, property, propertyIt->second, false};
     return Value(runtime, *propertyIt->second);
   }
 
@@ -1105,7 +1105,7 @@ class NativeApiBridge {
       return nullptr;
     }
     struct PropertyGetterCacheEntry {
-      const NativeApiBridge* bridge = nullptr;
+      uint64_t bridgeId = 0;
       Class cls = Nil;
       uint64_t generation = 0;
       std::string property;
@@ -1118,7 +1118,7 @@ class NativeApiBridge {
     const uint64_t generation =
         propertyGetterCacheGeneration_.load(std::memory_order_acquire);
     for (auto& entry : cache) {
-      if (entry.bridge == this && entry.cls == cls &&
+      if (entry.bridgeId == instanceId_ && entry.cls == cls &&
           entry.generation == generation && entry.property == property) {
         return entry.miss ? nullptr : entry.getter;
       }
@@ -1128,17 +1128,17 @@ class NativeApiBridge {
     const size_t slot = nextSlot++ & 7;
     if (classIt == propertyGetterCache_.end()) {
       cache[slot] = PropertyGetterCacheEntry{
-          this, cls, generation, property, nullptr, true};
+          instanceId_, cls, generation, property, nullptr, true};
       return nullptr;
     }
     auto propIt = classIt->second.find(property);
     if (propIt == classIt->second.end()) {
       cache[slot] = PropertyGetterCacheEntry{
-          this, cls, generation, property, nullptr, true};
+          instanceId_, cls, generation, property, nullptr, true};
       return nullptr;
     }
     cache[slot] =
-        PropertyGetterCacheEntry{this, cls, generation, property,
+        PropertyGetterCacheEntry{instanceId_, cls, generation, property,
                                  &propIt->second, false};
     return &propIt->second;
   }
@@ -2196,6 +2196,13 @@ class NativeApiBridge {
       objectExpandos_;
   std::unordered_map<uintptr_t, size_t> objectExpandoOwnerCounts_;
   std::atomic<uint64_t> objectExpandosGeneration_{1};
+  // Identifies this bridge in the thread_local lookup caches. Its address
+  // cannot: a bridge allocated where a destroyed one lived would match that
+  // one's entries, and the property-getter cache holds raw pointers into it.
+  const uint64_t instanceId_ = [] {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+  }();
   std::unordered_map<Class, std::unordered_map<std::string, CachedPropertyGetter>>
       propertyGetterCache_;
   std::atomic<uint64_t> propertyGetterCacheGeneration_{1};
