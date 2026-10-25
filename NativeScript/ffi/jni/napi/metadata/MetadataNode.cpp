@@ -1584,6 +1584,12 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         callbackData->candidates.push_back(std::move(entry));
         callbackData->objectManager = objectManager;
     }
+    for (const auto &extension: collectedExtensionMethods) {
+        if (std::find(instanceMethodData.begin(), instanceMethodData.end(), extension.second) ==
+            instanceMethodData.end()) {
+            GetMetadataNodeCache(env)->methodCallbackData.push_back(extension.second);
+        }
+    }
     auto instanceFieldCount = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
     for (auto i = 0; i < instanceFieldCount; i++) {
@@ -1657,6 +1663,7 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         auto &methodName = entry.getName();
         if (methodName != lastMethodName) {
             callbackData = new MethodCallbackData(this);
+            GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
             napi_value method;
             NAPI_GUARD(napi_create_function(env, methodName.c_str(), methodName.size(), MethodCallback,
                                  callbackData, &method)) {}
@@ -3054,6 +3061,7 @@ void MetadataNode::SetMissingBaseMethods(
 
             if (callbackData == nullptr) {
                 callbackData = new MethodCallbackData(this);
+                GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
                 napi_value proto = napi_util::get_prototype(env, constructor);
                 napi_value method;
                 NAPI_GUARD(napi_create_function(env, methodName.c_str(), NAPI_AUTO_LENGTH, MethodCallback,
@@ -3103,6 +3111,9 @@ void MetadataNode::onDisposeEnv(napi_env env) {
             it->ExtendedCtorFuncCache.clear();
 
             for (const auto &entry: it->fieldCallbackData) {
+                delete entry;
+            }
+            for (const auto &entry: it->methodCallbackData) {
                 delete entry;
             }
         }
