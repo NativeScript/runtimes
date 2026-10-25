@@ -557,6 +557,15 @@ std::string Runtime::ReadFileText(const std::string &filePath) {
 }
 
 void Runtime::DestroyRuntime() {
+    // Flush still-queued finalizer cleanup before is_destroying is set: with it
+    // set, the cleanup leaks the engine handles it would release, and a quit
+    // looper never drains it. Finalizers firing during teardown below run
+    // inline (Runtime::PostFinalizer's fallback).
+    if (m_finalizerQueue != nullptr) {
+        m_finalizerQueue->Destroy();
+        delete m_finalizerQueue;
+        m_finalizerQueue = nullptr;
+    }
     is_destroying = true;
     engine::Runtime &rt = engineHost->GetRuntime();
     if (m_looperTasks != nullptr) {
@@ -578,14 +587,6 @@ void Runtime::DestroyRuntime() {
 #endif
     CallbackHandlers::RemoveEnvEntries(rt);
     this->m_objectManager->OnDisposeRuntime();
-    // Release the finalizer handler and flush any still-queued cleanup while the
-    // runtime is still valid; finalizers firing during teardown below then run
-    // inline (Runtime::PostFinalizer's fallback).
-    if (m_finalizerQueue != nullptr) {
-        m_finalizerQueue->Destroy();
-        delete m_finalizerQueue;
-        m_finalizerQueue = nullptr;
-    }
     // Every engine handle this runtime still owns must go while the VM is up.
     m_gcFunc = engine::Value::undefined();
     // Last, because everything above may still call a js_util helper on its way
