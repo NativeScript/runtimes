@@ -841,10 +841,11 @@ lets go of the old one and installs its globals into the new one, so
 
 Java objects that the old runtime created or extended stay bound to it. If one of
 them calls back into JavaScript after the reload, for example a delayed `Runnable`
-or a listener that was never removed, the call throws:
+or a listener that was never removed, the call throws a `NativeScriptException`,
+the same as a callback into a terminated worker:
 
 ```
-Cannot call com.tns.gen.java.lang.Runnable.run(): the JavaScript runtime it belonged to was reloaded or shut down.
+com.tns.NativeScriptException: Cannot find runtime for instance=com.tns.gen.java.lang.Runnable@708609e
 ```
 
 If this happens on the main thread, the app crashes. To avoid it, remove
