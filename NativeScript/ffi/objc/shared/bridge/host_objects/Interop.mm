@@ -42,6 +42,7 @@ class NativeApiPointerHostObject final
   }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "kind") {
       return makeString(runtime, kind_);
@@ -147,6 +148,7 @@ class NativeApiPointerHostObject final
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     names.reserve(3);
     addPropertyName(runtime, names, "kind");
@@ -212,6 +214,7 @@ class NativeApiReferenceHostObject final : public HostObject {
   Value get(Runtime& runtime, const PropNameID& name) override;
   NativeApiHostSetResult set(Runtime& runtime, const PropNameID& name, const Value& value) override;
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     addPropertyName(runtime, names, "kind");
     addPropertyName(runtime, names, "value");

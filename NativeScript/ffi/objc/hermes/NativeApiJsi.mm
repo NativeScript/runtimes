@@ -283,6 +283,7 @@ constexpr facebook::jsi::UUID kNativeApiRuntimeBridgesUUID{
 
 void BindNativeApiBridgeToRuntime(Runtime& runtime,
                                   std::shared_ptr<NativeApiBridge> bridge) {
+  bridge->setOwnerRuntime(runtime);
   auto bridges = std::static_pointer_cast<NativeApiRuntimeBridges>(
       runtime.getRuntimeData(kNativeApiRuntimeBridgesUUID));
   if (bridges == nullptr) {

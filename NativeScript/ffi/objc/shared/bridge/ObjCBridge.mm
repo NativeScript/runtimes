@@ -590,6 +590,21 @@ class NativeApiBridge {
     value.reset();
   }
 
+  void setOwnerRuntime(const Runtime& runtime) { ownerRuntime_ = &runtime; }
+
+  // Worklets shares host objects between runtimes by reference. Using one in
+  // a runtime other than its bridge's would mix the two heaps.
+  void requireOwnerRuntime(Runtime& runtime) const {
+    if (ownerRuntime_ != nullptr && ownerRuntime_ != &runtime) {
+      throw JSError(
+          runtime,
+          "This NativeScript object belongs to another JavaScript runtime, "
+          "such as the Worklets UI runtime. Pass a handle instead: "
+          "interop.handleof(object).toHexString() in the runtime that owns "
+          "it, then interop.object(handle) in this one.");
+    }
+  }
+
   MDMetadataReader* metadata() const { return metadata_.get(); }
 
   void* selfDl() const { return selfDl_; }
@@ -2215,6 +2230,7 @@ class NativeApiBridge {
   std::mutex retainedLifetimesMutex_;
   std::vector<std::shared_ptr<void>> retainedLifetimes_;
   std::atomic<bool> runtimeValuesReleased_{false};
+  const Runtime* ownerRuntime_ = nullptr;
 };
 
 class NativeApiRoundTripCacheFrameGuard final {
