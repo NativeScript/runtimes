@@ -403,9 +403,6 @@ class NativeApiCallback final
         threadPolicy_(threadPolicy),
         bindThis_(bindThis),
         roundTripValidationKey_(roundTripValidationKey) {
-    if (bridge_ != nullptr) {
-      bridge_->holdRuntimeValue(function_);
-    }
     closure_ = static_cast<ffi_closure*>(
         ffi_closure_alloc(sizeof(ffi_closure), &executable_));
     if (closure_ == nullptr || executable_ == nullptr ||
@@ -458,6 +455,9 @@ class NativeApiCallback final
   }
 
   ~NativeApiCallback() {
+    if (bridge_ != nullptr) {
+      bridge_->releaseOrAbandonValue(function_);
+    }
     if (closure_ != nullptr) {
       ffi_closure_free(closure_);
       closure_ = nullptr;

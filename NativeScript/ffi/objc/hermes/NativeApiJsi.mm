@@ -257,6 +257,41 @@ Function CreateNativeApiSelectorGroupFunctionImpl(
       });
 }
 
+#define NATIVESCRIPT_NATIVE_API_HAS_ENGINE_RUNTIME_TEARDOWN 1
+
+// Runtime data is destroyed with the runtime while its Values can still be
+// released: Hermes frees it before tearing down its heap, and jsi's default
+// implementation frees it from a finalizer of that runtime's own global.
+class NativeApiRuntimeBridges final {
+ public:
+  ~NativeApiRuntimeBridges() {
+    for (auto& bridge : bridges_) {
+      bridge->releaseRuntimeValues();
+    }
+  }
+
+  void add(std::shared_ptr<NativeApiBridge> bridge) {
+    bridges_.push_back(std::move(bridge));
+  }
+
+ private:
+  std::vector<std::shared_ptr<NativeApiBridge>> bridges_;
+};
+
+constexpr facebook::jsi::UUID kNativeApiRuntimeBridgesUUID{
+    0x5f0e2c71, 0x8b3d, 0x4a6e, 0x9c41, 0x2d7a6b13e8f4};
+
+void BindNativeApiBridgeToRuntime(Runtime& runtime,
+                                  std::shared_ptr<NativeApiBridge> bridge) {
+  auto bridges = std::static_pointer_cast<NativeApiRuntimeBridges>(
+      runtime.getRuntimeData(kNativeApiRuntimeBridgesUUID));
+  if (bridges == nullptr) {
+    bridges = std::make_shared<NativeApiRuntimeBridges>();
+    runtime.setRuntimeData(kNativeApiRuntimeBridgesUUID, bridges);
+  }
+  bridges->add(std::move(bridge));
+}
+
 }  // namespace
 
 #include "../shared/bridge/Install.mm"

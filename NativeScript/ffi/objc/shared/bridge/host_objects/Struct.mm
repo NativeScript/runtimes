@@ -11,9 +11,6 @@ class NativeApiStructObjectHostObject final : public HostObject {
         ownedData_(std::move(storageOwner)),
         backingValue_(std::move(backingValue)),
         ownsData_(ownsData) {
-    if (bridge_ != nullptr) {
-      bridge_->holdRuntimeValue(backingValue_);
-    }
     size_t size = info_ != nullptr ? info_->size : 0;
     if (ownedData_ != nullptr) {
       data_ = const_cast<void*>(data);
@@ -26,6 +23,12 @@ class NativeApiStructObjectHostObject final : public HostObject {
       data_ = ownedData_->empty() ? nullptr : ownedData_->data();
     } else {
       data_ = const_cast<void*>(data);
+    }
+  }
+
+  ~NativeApiStructObjectHostObject() override {
+    if (bridge_ != nullptr) {
+      bridge_->releaseOrAbandonValue(backingValue_);
     }
   }
 

@@ -574,48 +574,20 @@ class NativeApiBridge {
     objectExpandos_.clear();
     objectExpandoOwnerCounts_.clear();
     objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
-
-    std::vector<HeldRuntimeValue> heldValues;
-    {
-      std::lock_guard<std::mutex> lock(heldRuntimeValuesMutex_);
-      heldValues.swap(heldRuntimeValues_);
-    }
-    for (auto& held : heldValues) {
-      if (auto value = held.value.lock()) {
-        held.release(value.get());
-      }
-    }
   }
 
   bool runtimeValuesReleased() const {
     return runtimeValuesReleased_.load(std::memory_order_acquire);
   }
 
-  // For Values owned outside the bridge's caches. They are released in place
-  // with the bridge's runtime, leaving the holder an empty Value or Function.
+  // A destroyed runtime freed its Values with its heap; releasing one would
+  // touch freed memory.
   template <typename T>
-  void holdRuntimeValue(const std::shared_ptr<T>& value) {
-#ifdef TARGET_ENGINE_HERMES
-    if (value == nullptr) {
-      return;
+  void releaseOrAbandonValue(std::shared_ptr<T>& value) {
+    if (value != nullptr && runtimeValuesReleased()) {
+      new std::shared_ptr<T>(std::move(value));
     }
-    std::lock_guard<std::mutex> lock(heldRuntimeValuesMutex_);
-    if (runtimeValuesReleased()) {
-      return;
-    }
-    if (heldRuntimeValues_.size() >= heldRuntimeValuesPruneSize_) {
-      heldRuntimeValues_.erase(
-          std::remove_if(heldRuntimeValues_.begin(), heldRuntimeValues_.end(),
-                         [](const HeldRuntimeValue& held) {
-                           return held.value.expired();
-                         }),
-          heldRuntimeValues_.end());
-      heldRuntimeValuesPruneSize_ =
-          std::max<size_t>(256, heldRuntimeValues_.size() * 2);
-    }
-    heldRuntimeValues_.push_back(HeldRuntimeValue{
-        value, [](void* held) { T released(std::move(*static_cast<T*>(held))); }});
-#endif
+    value.reset();
   }
 
   MDMetadataReader* metadata() const { return metadata_.get(); }
@@ -2242,13 +2214,6 @@ class NativeApiBridge {
   std::thread::id jsThreadId_ = std::this_thread::get_id();
   std::mutex retainedLifetimesMutex_;
   std::vector<std::shared_ptr<void>> retainedLifetimes_;
-  struct HeldRuntimeValue {
-    std::weak_ptr<void> value;
-    void (*release)(void*);
-  };
-  std::mutex heldRuntimeValuesMutex_;
-  std::vector<HeldRuntimeValue> heldRuntimeValues_;
-  size_t heldRuntimeValuesPruneSize_ = 256;
   std::atomic<bool> runtimeValuesReleased_{false};
 };
 
