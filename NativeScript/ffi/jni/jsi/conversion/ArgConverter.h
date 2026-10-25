@@ -131,7 +131,7 @@ namespace tns {
          * dealing with operations concerning java long -> javascript number.
          */
         // Keyed by JsRuntime::identity(); &rt is not stable across callbacks.
-        static robin_hood::unordered_map<const void *, TypeLongOperationsCache *> s_type_long_operations_cache;
+        static tns::ConcurrentMap<const void *, TypeLongOperationsCache *> s_type_long_operations_cache;
     };
 }
 

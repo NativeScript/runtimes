@@ -130,7 +130,7 @@ namespace tns {
          * "s_type_long_operations_cache" used to keep function
          * dealing with operations concerning java long -> javascript number.
          */
-        static robin_hood::unordered_map<napi_env, TypeLongOperationsCache *> s_type_long_operations_cache;
+        static tns::ConcurrentMap<napi_env, TypeLongOperationsCache *> s_type_long_operations_cache;
     };
 }
 
