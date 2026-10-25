@@ -98,4 +98,44 @@ withTempProject((projectRoot) => {
   });
 });
 
+withTempProject((projectRoot) => {
+  const configPath = path.join(projectRoot, 'nativescript.react-native.json');
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      reactNative: {
+        metadata: {
+          includePods: ['StalePod'],
+          android: {include: ['com.example.Worker']},
+        },
+      },
+    }),
+  );
+  ensureMetadataConfig(projectRoot, normalizeMetadataOptions({}));
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.deepStrictEqual(config.reactNative.metadata, {
+    includePods: [],
+    includeSystemFrameworks: [],
+    android: {include: ['com.example.Worker']},
+  });
+});
+
+withTempProject((projectRoot) => {
+  const configPath = path.join(projectRoot, 'nativescript.react-native.json');
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({reactNative: {metadata: {android: {include: ['com.example.Old']}}}}),
+  );
+  ensureMetadataConfig(
+    projectRoot,
+    normalizeMetadataOptions({
+      metadata: {android: {include: ['com.example.Worker', 7, 'com.example.views.*']}},
+    }),
+  );
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.deepStrictEqual(config.reactNative.metadata.android, {
+    include: ['com.example.Worker', 'com.example.views.*'],
+  });
+});
+
 console.log('config plugin tests passed');
