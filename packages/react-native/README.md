@@ -180,6 +180,12 @@ as a UI-thread shim is not supported. `installWorklets()` is still exported for
 custom initialization, but it throws when Worklets is unavailable or
 incompatible.
 
+Native objects the worklet returns, at the top level or inside plain arrays and
+objects, come back as objects of the React Native runtime. Each runtime has its
+own wrapper for a native object, and using a wrapper from the other runtime
+throws. To hand one across yourself, pass `interop.handleof(object).toHexString()`
+and turn it back with `interop.object(handle)`.
+
 For non-UI APIs on the JavaScript thread (Foundation, file system, networking),
 either look classes up explicitly or opt into JS-thread globals:
 
