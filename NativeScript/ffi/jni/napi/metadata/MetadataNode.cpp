@@ -1096,27 +1096,6 @@ MetadataNode::MetadataNode(MetadataTreeNode *treeNode) : m_treeNode(treeNode) {
     }
 }
 
-// Engines differ on assigning to a read-only property: some fail the call,
-// others ignore the write. Either way the global does not end up holding value.
-static bool SetGlobalIfWritable(napi_env env, napi_value global, const string &name,
-                                napi_value value) {
-    if (napi_set_named_property(env, global, name.c_str(), value) == napi_ok) {
-        napi_value assigned;
-        bool same = false;
-        if (napi_get_named_property(env, global, name.c_str(), &assigned) == napi_ok &&
-            napi_strict_equals(env, assigned, value, &same) == napi_ok && same) {
-            return true;
-        }
-    }
-    bool pending = false;
-    napi_is_exception_pending(env, &pending);
-    if (pending) {
-        napi_value error;
-        napi_get_and_clear_last_exception(env, &error);
-    }
-    return false;
-}
-
 void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
     napi_status status;
     napi_value global;
@@ -1142,15 +1121,15 @@ void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
             }
-            if (!SetGlobalIfWritable(env, global, nameSpace, packageObj)) {
-                // The host already owns the name as a read-only global (Expo's
-                // `expo`), so the package takes the same $ prefix as keywords.
+            bool exists = false;
+            if (napi_has_named_property(env, global, nameSpace.c_str(), &exists) == napi_ok && exists) {
                 string fallback = "$" + nameSpace;
                 __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
-                                    "Java package '%s' is exposed as '%s': the global '%s' is read-only.",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
                                     nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
-                NAPI_GUARD(napi_set_named_property(env, global, fallback.c_str(), packageObj)) {}
+                nameSpace = fallback;
             }
+            NAPI_GUARD(napi_set_named_property(env, global, nameSpace.c_str(), packageObj)) {}
         }
     }
 }

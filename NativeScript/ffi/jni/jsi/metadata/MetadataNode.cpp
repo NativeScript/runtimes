@@ -888,17 +888,14 @@ void MetadataNode::CreateTopLevelNamespaces(JsRuntime &rt) {
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
             }
-            try {
-                global.setProperty(rt, nameSpace.c_str(), packageObj);
-            } catch (JsError &) {
-                // The host already owns the name as a read-only global (Expo's
-                // `expo`), so the package takes the same $ prefix as keywords.
+            if (global.hasProperty(rt, nameSpace.c_str())) {
                 string fallback = "$" + nameSpace;
                 __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
-                                    "Java package '%s' is exposed as '%s': the global '%s' is read-only.",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
                                     nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
-                global.setProperty(rt, fallback.c_str(), packageObj);
+                nameSpace = fallback;
             }
+            global.setProperty(rt, nameSpace.c_str(), packageObj);
         }
     }
 }
