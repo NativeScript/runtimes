@@ -373,6 +373,9 @@ private:
         std::vector<FieldCallbackData *> fieldCallbackData;
         std::vector<PropertyCallbackData *> propertyCallbackData;
         std::vector<ExtendedClassCallbackData *> extendedClassCallbackData;
+        // Method callback data no CtorFuncCache entry owns: static methods,
+        // extension-only methods and methods copied from a skipped base class.
+        std::vector<MethodCallbackData *> methodCallbackData;
     };
 
     static bool s_profilerEnabled;

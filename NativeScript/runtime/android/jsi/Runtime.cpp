@@ -547,6 +547,8 @@ Runtime::~Runtime() {
             close(m_mainLooper_fd[1]);
         }
     }
+
+    JEnv().DeleteGlobalRef(m_runtime);
 }
 
 std::string Runtime::ReadFileText(const std::string &filePath) {
