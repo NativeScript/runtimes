@@ -1337,6 +1337,75 @@ export function installWorklets(
   return true;
 }
 
+const nativeObjectHandleKey = "__nativeScriptObjectHandle";
+
+// Worklets hands a returned native object to this runtime by reference, still
+// bound to the UI runtime. Only its handle crosses; the +1 retained here keeps
+// it alive until nativeObjectsFromHandles adopts it.
+function nativeObjectsToHandles(value: unknown): unknown {
+  "worklet";
+
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(nativeObjectsToHandles);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === Object.prototype || prototype === null) {
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      result[key] = nativeObjectsToHandles(
+        (value as Record<string, unknown>)[key],
+      );
+    }
+    return result;
+  }
+  const { NSObject, CFRetain } = globalThis as Record<string, any>;
+  if (typeof NSObject !== "function" || !(value instanceof NSObject)) {
+    return value;
+  }
+  const handle = nativeHandleForNSObject(value);
+  if (handle === undefined) {
+    return value;
+  }
+  CFRetain(value);
+  return { [nativeObjectHandleKey]: handle };
+}
+
+function nativeObjectsFromHandles(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(nativeObjectsFromHandles);
+  }
+  const handle = (value as Record<string, unknown>)[nativeObjectHandleKey];
+  if (typeof handle === "string") {
+    const interop = (globalThis as Record<string, any>).interop;
+    return interop.Pointer(Number(handle)).takeRetainedValue();
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    return value;
+  }
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    result[key] = nativeObjectsFromHandles(
+      (value as Record<string, unknown>)[key],
+    );
+  }
+  return result;
+}
+
+function runWorkletReturningHandles<Args extends unknown[], ReturnValue>(
+  callback: (...args: Args) => ReturnValue,
+  args: Args,
+): unknown {
+  "worklet";
+
+  return nativeObjectsToHandles(callback(...args));
+}
+
 export function runOnUI<Args extends unknown[], ReturnValue>(
   callback: (...args: Args) => ReturnValue | Promise<ReturnValue>,
   ...args: Args
@@ -1352,7 +1421,9 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
       "NativeScript.runOnUI requires a worklet callback",
     );
   }
-  return worklets.runOnUIAsync(callback, ...args);
+  return worklets
+    .runOnUIAsync(runWorkletReturningHandles, callback, args)
+    .then(nativeObjectsFromHandles) as Promise<ReturnValue>;
 }
 
 function callbackInvoker<T extends AnyFunction>(
