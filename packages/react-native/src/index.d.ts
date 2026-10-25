@@ -273,12 +273,6 @@ export type UIViewControllerDefinition<
 export function init(metadataPath?: string, options?: InstallOptions): boolean;
 export const install: typeof init;
 export function installGlobals(): boolean;
-/**
- * Whether this build contains the package's native module. False in Expo Go
- * and in builds made before the package was added; every other function that
- * needs the module throws there.
- */
-export function isAvailable(): boolean;
 export function isInstalled(): boolean;
 export function defaultMetadataPath(): string;
 export function getRuntimeBackend(): string;
@@ -348,7 +342,6 @@ declare const NativeScript: {
   init: typeof init;
   install: typeof install;
   installGlobals: typeof installGlobals;
-  isAvailable: typeof isAvailable;
   isInstalled: typeof isInstalled;
   defaultMetadataPath: typeof defaultMetadataPath;
   defineUIKitContainer: typeof defineUIKitContainer;

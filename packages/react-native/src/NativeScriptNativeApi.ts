@@ -14,7 +14,17 @@ export interface Spec extends TurboModule {
   readonly __writeTestMarker: (content: string) => boolean;
 }
 
-// `get`, not `getEnforcing`: a build without the native module (Expo Go, or a
-// build made before the package was added) must still be able to import the
-// package and decide what to do without it.
-export default TurboModuleRegistry.get<Spec>('NativeScriptNativeApi');
+function loadNativeApi(): Spec {
+  const nativeApi = TurboModuleRegistry.get<Spec>('NativeScriptNativeApi');
+  if (nativeApi == null) {
+    throw new Error(
+      "@nativescript/react-native: the native module 'NativeScriptNativeApi' is not in this app binary. " +
+        'The package contains native code, so it cannot run in Expo Go: use a development build ' +
+        '(npx expo run:ios / npx expo run:android, or EAS Build). ' +
+        'If the package was added after the app was built, rebuild the app.',
+    );
+  }
+  return nativeApi;
+}
+
+export default loadNativeApi();
