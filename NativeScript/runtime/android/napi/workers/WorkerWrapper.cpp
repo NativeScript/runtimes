@@ -502,7 +502,7 @@ void WorkerWrapper::BackgroundLooper(std::shared_ptr<WorkerWrapper> self) {
 
         // Enters the engine scope, tears down the runtime and frees the env,
         // then deletes the Runtime (which frees the underlying engine runtime).
-        Runtime::DisposeWorkerRuntime(runtime_);
+        Runtime::DisposeRuntime(runtime_);
         runtime_ = nullptr;
     }
 
