@@ -5,11 +5,13 @@ import android.util.Log;
 import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 class GCSubscriber {
     ConcurrentHashMap<PhantomReference<Object>, Integer> referencesMap = new ConcurrentHashMap<>();
     public final ReferenceQueue<Object> referenceQueue = new ReferenceQueue<>();
+    boolean unsubscribed; // guarded by this
 }
 
 public class GcListener {
@@ -60,7 +62,11 @@ public class GcListener {
                                     for (int i =0; i < objIds.length; i++) {
                                         objIds[i] = collectedObjectIds.get(i);
                                     }
-                                    runtime.notifyGc(objIds);
+                                    synchronized (subscriber) {
+                                        if (!subscriber.unsubscribed) {
+                                            runtime.notifyGc(objIds);
+                                        }
+                                    }
                                     if (runtime.getLogger().isEnabled()) {
                                         runtime.getLogger().write("GC", "GC triggered for " + String.valueOf(objIds.length) + " objects");
                                         runtime.getLogger().write("NS.GCListener","Objects referenced after GC: " + subscriber.referencesMap.size());
@@ -152,9 +158,17 @@ public class GcListener {
         }
     }
 
+    /**
+     * Once this returns, no GC thread is inside the runtime's notifyGc and none
+     * will enter it. Must not be called from inside that runtime's JS scope:
+     * delivery holds the subscriber's lock while it waits to enter the runtime.
+     */
     public static void unsubscribe(Runtime runtime) {
-        synchronized (instance) {
-            instance.subscribers.remove(runtime);
+        GCSubscriber subscriber = instance.subscribers.remove(runtime);
+        if (subscriber != null) {
+            synchronized (subscriber) {
+                subscriber.unsubscribed = true;
+            }
         }
     }
 
@@ -168,15 +182,18 @@ public class GcListener {
     }
 
     private void notifyGc() {
-        synchronized (instance) {
-//            ManualInstrumentation.Frame frame = ManualInstrumentation.start("GcListener.notifyGc");
-            try {
-                for (Runtime runtime : instance.subscribers.keySet()) {
-                    runtime.notifyGc();
+//        ManualInstrumentation.Frame frame = ManualInstrumentation.start("GcListener.notifyGc");
+        try {
+            for (Map.Entry<Runtime, GCSubscriber> entry : subscribers.entrySet()) {
+                GCSubscriber subscriber = entry.getValue();
+                synchronized (subscriber) {
+                    if (!subscriber.unsubscribed) {
+                        entry.getKey().notifyGc();
+                    }
                 }
-            } finally {
-//                frame.close();
             }
+        } finally {
+//            frame.close();
         }
     }
 }
