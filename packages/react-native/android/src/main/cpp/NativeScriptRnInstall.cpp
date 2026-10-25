@@ -63,7 +63,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_attachNativeScript(
 extern "C" JNIEXPORT void JNICALL Java_com_tns_Runtime_detachNativeScript(JNIEnv*, jobject,
                                                                          jint runtimeId) {
     try {
-        Runtime::Detach(Runtime::GetRuntime(runtimeId));
+        Runtime::DisposeRuntime(Runtime::GetRuntime(runtimeId));
     } catch (NativeScriptException& e) {
         e.ReThrowToJava(nullptr);
     } catch (std::exception& e) {

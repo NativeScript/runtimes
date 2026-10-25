@@ -11,7 +11,7 @@
 // EngineHost is held by shared_ptr and JSScope keeps a strong reference for its
 // lifetime. That is what makes teardown safe by construction: the VM, and the
 // recursive mutex the scope holds, cannot be freed while a scope is still
-// unwinding over them. See Runtime::DisposeWorkerRuntime.
+// unwinding over them. See Runtime::DisposeRuntime.
 
 #include <memory>
 #include <mutex>
@@ -58,7 +58,7 @@ public:
 #if defined(NS_JSI_HOST_RUNTIME)
     // Adopts a runtime the embedder owns. The reference must outlive this host:
     // React Native tears its runtime down only after the TurboModule that holds
-    // us has been invalidated, which is what Runtime::Detach is wired to.
+    // us has been invalidated, which is where Runtime::DisposeRuntime runs.
     static std::shared_ptr<EngineHost> Adopt(::facebook::jsi::Runtime &runtime);
 #else
     static std::shared_ptr<EngineHost> Create();

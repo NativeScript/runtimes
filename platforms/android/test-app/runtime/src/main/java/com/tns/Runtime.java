@@ -53,7 +53,7 @@ public class Runtime {
                                            boolean verboseLoggingEnabled, int maxLogcatObjectSize, boolean forceLog,
                                            String bootstrapScript);
 
-    // Implemented alongside attachNativeScript; see detach().
+    // Implemented alongside attachNativeScript.
     private native void detachNativeScript(int runtimeId);
 
     private native void runModule(int runtimeId, String filePath) throws NativeScriptException;
@@ -228,10 +228,6 @@ public class Runtime {
     private static AtomicInteger nextRuntimeId = new AtomicInteger(0);
     private final static ThreadLocal<Runtime> currentRuntime = new ThreadLocal<Runtime>();
     private final static Map<Integer, Runtime> runtimeCache = new ConcurrentHashMap<>();
-    // Objects owned by a detached runtime, so a call into one can say why it
-    // fails. Outlives every Runtime by design; the weak keys pin nothing.
-    private final static Map<Object, Integer> orphanedObjects =
-            Collections.synchronizedMap(new NativeScriptWeakHashMap<Object, Integer>());
     public static boolean nativeLibraryLoaded;
 
     private static final ClassStorageService classStorageService = new ClassStorageServiceImpl(ClassCacheImpl.INSTANCE, ClassLoadersCollectionImpl.INSTANCE);
@@ -528,39 +524,12 @@ public class Runtime {
     }
 
     /*
-        Unbinds from the embedder's runtime and frees everything NativeScript
-        holds for it. Must run while that runtime is still alive and not running
-        JS: React Native's module invalidation is such a point. Idempotent. The
-        instance cannot be attached again; a new host runtime gets a new Runtime.
+        Unbinds from the embedder's runtime and frees what NativeScript holds in
+        it. Must run while that runtime is still alive and not running JS.
      */
     public void detach() {
-        if (!initialized) {
-            return;
-        }
-        initialized = false;
-
-        // Returns only once no GC batch is being delivered to this runtime.
-        GcListener.unsubscribe(this);
-
-        for (Object instance : strongJavaObjectToID.keySet()) {
-            orphanedObjects.put(instance, runtimeId);
-        }
-        for (Object instance : weakJavaObjectToID.keySet()) {
-            if (instance != null) {
-                orphanedObjects.put(instance, runtimeId);
-            }
-        }
-        runtimeCache.remove(runtimeId);
-        if (currentRuntime.get() == this) {
-            currentRuntime.remove();
-        }
-
+        detachRuntime(runtimeId);
         detachNativeScript(runtimeId);
-
-        strongInstances.clear();
-        strongJavaObjectToID.clear();
-        weakInstances.clear();
-        weakJavaObjectToID.clear();
     }
 
     /*
@@ -605,11 +574,11 @@ public class Runtime {
     }
 
     /*
-        Called via JNI from the native worker thread during shutdown, before the
-        worker's runtime is disposed.
+        Called before a runtime is disposed: via JNI from the native worker
+        thread during shutdown, and by detach().
      */
     @RuntimeCallable
-    public static void detachWorkerRuntime(int runtimeId) {
+    public static void detachRuntime(int runtimeId) {
         Runtime runtime = runtimeCache.remove(runtimeId);
         if (runtime != null) {
             GcListener.unsubscribe(runtime);
@@ -1268,11 +1237,6 @@ public class Runtime {
             javaObjectID = (runtime != null) ? runtime.getJavaObjectID(javaObject) : null;
         }
 
-        if (runtime == null && javaObject != null && orphanedObjects.containsKey(javaObject)) {
-            throw new NativeScriptException("Cannot call " + javaObject.getClass().getName() + "." + methodName
-                    + "(): the JavaScript runtime it belonged to was reloaded or shut down.");
-        }
-
         if (runtime == null) {
             runtime = Runtime.getCurrentRuntime();
             javaObjectID = (runtime != null) ? runtime.getJavaObjectID(javaObject) : null;
@@ -1453,18 +1417,17 @@ public class Runtime {
                 }
             }
 
-            if (!threadScheduler.post(r)) {
-                throw new NativeScriptException("Cannot call " + claz.getName() + "." + methodName
-                        + "(): the JavaScript thread it runs on has stopped.");
-            }
+            boolean success = threadScheduler.post(r);
 
-            synchronized (r) {
-                try {
-                    if (arr[1] == null) {
-                        r.wait();
+            if (success) {
+                synchronized (r) {
+                    try {
+                        if (arr[1] == null) {
+                            r.wait();
+                        }
+                    } catch (InterruptedException e) {
+                        ret = e;
                     }
-                } catch (InterruptedException e) {
-                    ret = e;
                 }
             }
 

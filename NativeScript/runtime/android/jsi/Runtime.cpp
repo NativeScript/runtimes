@@ -265,16 +265,6 @@ void Runtime::Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &f
     InitCommon(filesRoot, /*callingDir*/ "", maxLogcatObjectSize, forceLog, /*guest*/ true);
 }
 
-void Runtime::Detach(Runtime *runtime) {
-    // `engineHost` is referenced by the JSEnterScope macro below.
-    std::shared_ptr<EngineHost> engineHost = runtime->GetEngineHost();
-    {
-        JSEnterScope
-        runtime->DestroyRuntime();
-    }
-    delete runtime;
-}
-
 #endif  // NS_JSI_HOST_RUNTIME
 
 // Everything both flavours install.
@@ -564,8 +554,6 @@ Runtime::~Runtime() {
         s_main_rt = nullptr;
         s_mainThreadInitialized = false;
     }
-
-    JEnv().DeleteGlobalRef(m_runtime);
 }
 
 std::string Runtime::ReadFileText(const std::string &filePath) {
@@ -622,6 +610,19 @@ void Runtime::DestroyRuntime() {
     // exactly what made the napi path SIGSEGV on Hermes and hang on JSC. The
     // scope holds a shared_ptr to the host, so the VM outlives it either way,
     // and ~EngineHost does the teardown once nothing is standing on it.
+}
+
+void Runtime::DisposeRuntime(Runtime *runtime) {
+    // `engineHost` is referenced by the JSEnterScope macro below.
+    std::shared_ptr<EngineHost> engineHost = runtime->GetEngineHost();
+    {
+        JSEnterScope
+        runtime->DestroyRuntime();
+    }
+    // Both this scope's reference and the runtime's are gone by the end of the
+    // next line, and whichever drops last runs ~EngineHost. Nothing frees the VM
+    // while the scope above is still unwinding over it.
+    delete runtime;
 }
 
 bool Runtime::NotifyGC(JNIEnv *jEnv, jobject obj, jintArray object_ids) {
@@ -690,19 +691,6 @@ void Runtime::RunModule(const char *moduleName) {
 
 void Runtime::RunWorker(const std::string &filePath) {
     m_module.LoadWorker(engineHost->GetRuntime(), filePath);
-}
-
-void Runtime::DisposeWorkerRuntime(Runtime *runtime) {
-    // `engineHost` is referenced by the JSEnterScope macro below.
-    std::shared_ptr<EngineHost> engineHost = runtime->GetEngineHost();
-    {
-        JSEnterScope
-        runtime->DestroyRuntime();
-    }
-    // Both this scope's reference and the runtime's are gone by the end of the
-    // next line, and whichever drops last runs ~EngineHost. Nothing frees the VM
-    // while the scope above is still unwinding over it.
-    delete runtime;
 }
 
 jobject Runtime::RunScript(JNIEnv *_env, jobject obj, jstring scriptFile) {

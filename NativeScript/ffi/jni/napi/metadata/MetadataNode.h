@@ -360,9 +360,6 @@ private:
         robin_hood::unordered_map<MetadataTreeNode *, CtorCacheData> CtorFuncCache;
         robin_hood::unordered_map<std::string, MetadataNode::ExtendedClassCacheData> ExtendedCtorFuncCache;
         std::vector<FieldCallbackData *> fieldCallbackData;
-        // Method callback data no CtorFuncCache entry owns: static methods,
-        // extension-only methods and methods copied from a skipped base class.
-        std::vector<MethodCallbackData *> methodCallbackData;
     };
 
     static bool s_profilerEnabled;

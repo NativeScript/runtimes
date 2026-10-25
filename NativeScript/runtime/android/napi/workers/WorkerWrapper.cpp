@@ -604,7 +604,7 @@ void WorkerWrapper::EnsureJniCached() {
             env.GetStaticMethodID(RUNTIME_CLASS, "initWorkerRuntime", "(ILjava/lang/String;)I");
     RUN_WORKER_LOOP_METHOD_ID = env.GetStaticMethodID(RUNTIME_CLASS, "runWorkerLoop", "()V");
     DETACH_WORKER_RUNTIME_METHOD_ID =
-            env.GetStaticMethodID(RUNTIME_CLASS, "detachWorkerRuntime", "(I)V");
+            env.GetStaticMethodID(RUNTIME_CLASS, "detachRuntime", "(I)V");
 
     LOOPER_CLASS = env.FindClass("android/os/Looper");
     assert(LOOPER_CLASS != nullptr);

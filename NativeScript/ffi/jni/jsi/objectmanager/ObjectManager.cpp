@@ -85,10 +85,6 @@ void ObjectManager::OnDisposeRuntime() {
     m_idToObject.clear();
     m_jsObjectCtor = JsFunction();
 
-    // Its destructor leaves the weak global refs alive, and the process-wide
-    // weak reference table is finite.
-    m_cache.clear();
-
     // The host-object proxies are owned by the *engine*, and each holds an owned
     // handle to the instance it wraps. Nothing above reaches them: they are only
     // destroyed when the engine tears its heap down, at which point
