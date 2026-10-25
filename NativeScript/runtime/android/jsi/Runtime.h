@@ -104,11 +104,10 @@ namespace tns {
         void RunWorker(const std::string &filePath);
 #endif
 
-        // Tears down a worker's Runtime (engine scope + engine state release) and
-        // deletes it. Called from the native worker thread during shutdown.
-#if !defined(NS_JSI_HOST_RUNTIME)
-        static void DisposeWorkerRuntime(Runtime *runtime);
-#endif
+        // Tears down a Runtime inside its engine scope and deletes it. The engine
+        // must still be alive with no JS running on it, and nothing may reach
+        // `runtime` from another thread once this begins.
+        static void DisposeRuntime(Runtime *runtime);
 
         jobject RunScript(JNIEnv *_env, jobject obj, jstring scriptFile);
 

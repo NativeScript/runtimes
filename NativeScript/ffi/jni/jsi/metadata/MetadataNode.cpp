@@ -2582,6 +2582,11 @@ void MetadataNode::SetMissingBaseMethods(
 }
 
 void MetadataNode::BuildMetadata(const std::string &filesPath) {
+    // Once per process: the static node caches point into this tree, and it
+    // outlives any one main runtime.
+    if (s_metadataReader.GetRoot() != nullptr) {
+        return;
+    }
     s_metadataReader = MetadataBuilder::BuildMetadata(filesPath);
 }
 

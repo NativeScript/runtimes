@@ -53,6 +53,9 @@ public class Runtime {
                                            boolean verboseLoggingEnabled, int maxLogcatObjectSize, boolean forceLog,
                                            String bootstrapScript);
 
+    // Implemented alongside attachNativeScript.
+    private native void detachNativeScript(int runtimeId);
+
     private native void runModule(int runtimeId, String filePath) throws NativeScriptException;
 
     private native Object runScript(int runtimeId, String filePath) throws NativeScriptException;
@@ -521,6 +524,15 @@ public class Runtime {
     }
 
     /*
+        Unbinds from the embedder's runtime and frees what NativeScript holds in
+        it. Must run while that runtime is still alive and not running JS.
+     */
+    public void detach() {
+        detachRuntime(runtimeId);
+        detachNativeScript(runtimeId);
+    }
+
+    /*
         Called via JNI from a native-spawned worker thread (WorkerWrapper), after
         the thread has attached to the JVM and before the worker script runs.
         Prepares the thread's Java Looper - this must happen before initRuntime so
@@ -562,11 +574,11 @@ public class Runtime {
     }
 
     /*
-        Called via JNI from the native worker thread during shutdown, before the
-        worker's runtime is disposed.
+        Called before a runtime is disposed: via JNI from the native worker
+        thread during shutdown, and by detach().
      */
     @RuntimeCallable
-    public static void detachWorkerRuntime(int runtimeId) {
+    public static void detachRuntime(int runtimeId) {
         Runtime runtime = runtimeCache.remove(runtimeId);
         if (runtime != null) {
             GcListener.unsubscribe(runtime);
