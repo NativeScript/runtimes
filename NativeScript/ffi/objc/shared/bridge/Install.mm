@@ -1,5 +1,11 @@
+#ifndef NATIVESCRIPT_NATIVE_API_HAS_ENGINE_RUNTIME_TEARDOWN
+inline void BindNativeApiBridgeToRuntime(Runtime&,
+                                         std::shared_ptr<NativeApiBridge>) {}
+#endif
+
 Object CreateNativeApi(Runtime& runtime, const NativeApiConfig& config) {
   auto bridge = std::make_shared<NativeApiBridge>(config);
+  BindNativeApiBridgeToRuntime(runtime, bridge);
   return Object::createFromHostObject(runtime,
                                       std::make_shared<NativeApiHostObject>(std::move(bridge)));
 }

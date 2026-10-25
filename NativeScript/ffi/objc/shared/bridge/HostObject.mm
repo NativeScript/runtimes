@@ -24,6 +24,7 @@ class NativeApiHostObject final : public HostObject {
       : bridge_(std::move(bridge)) {}
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "runtime") {
       return makeString(runtime, NATIVESCRIPT_NATIVE_API_RUNTIME_NAME);
@@ -507,6 +508,7 @@ class NativeApiHostObject final : public HostObject {
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     names.reserve(11);
     addPropertyName(runtime, names, "runtime");
