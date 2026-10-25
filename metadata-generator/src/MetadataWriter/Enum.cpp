@@ -10,11 +10,25 @@ void MDMetadataWriter::write(EnumDecl &decl) {
   MDEnum *mdEnum = new MDEnum();
 
   mdEnum->name = strings.add(decl.name, decl.name);
+  mdEnum->memberPrefix = strings.add(decl.memberPrefix, decl.memberPrefix);
+  mdEnum->memberSuffix = strings.add(decl.memberSuffix, decl.memberSuffix);
   mdEnum->members.reserve(decl.constants.size());
 
   for (const EnumConstDecl &c : decl.constants) {
     MDEnumMember member;
     member.name = strings.add(c.name, c.name);
+    if ((member.name & mdSectionOffsetEnumMemberCName) != 0) {
+      std::cerr << "Strings section too large to flag enum member names"
+                << std::endl;
+      exit(1);
+    }
+    member.nameIsCName = c.name == c.cName;
+    if (!member.nameIsCName &&
+        decl.memberPrefix + c.name + decl.memberSuffix != c.cName) {
+      std::cerr << "Enum " << decl.name << ": cannot encode the C name of "
+                << c.cName << std::endl;
+      exit(1);
+    }
     member.value = c.value;
     mdEnum->members.push_back(member);
   }
@@ -33,7 +47,11 @@ size_t MDEnumMemberSerde::size(MDEnumMember *value) {
 
 void MDEnumMemberSerde::serialize(MDEnumMember *value, void *data) {
   // Name
-  binwrite(value->name);
+  MDSectionOffset name = value->name;
+  if (value->nameIsCName) {
+    name |= mdSectionOffsetEnumMemberCName;
+  }
+  binwrite(name);
   // Value
   binwrite(value->value);
 }
@@ -42,6 +60,8 @@ size_t MDEnumSerde::size(MDEnum *value) {
   size_t size = 0;
   // Name
   addsize(value->name);
+  addsize(value->memberPrefix);
+  addsize(value->memberSuffix);
   // Members
   MDEnumMemberSerde memberSerde;
   if (!value->members.empty()) {
@@ -53,6 +73,8 @@ size_t MDEnumSerde::size(MDEnum *value) {
 void MDEnumSerde::serialize(MDEnum *value, void *data) {
   // Name
   binwrite(value->name);
+  binwrite(value->memberPrefix);
+  binwrite(value->memberSuffix);
   // Members
   size_t membersSize = value->members.size();
   MDEnumMemberSerde memberSerde;

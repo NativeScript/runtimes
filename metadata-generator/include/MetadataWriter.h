@@ -40,11 +40,14 @@ struct MDVariable {
 
 struct MDEnumMember {
   MDSectionOffset name;
+  bool nameIsCName;
   int64_t value;
 };
 
 struct MDEnum {
   MDSectionOffset name;
+  MDSectionOffset memberPrefix;
+  MDSectionOffset memberSuffix;
   std::vector<MDEnumMember> members;
 };
 

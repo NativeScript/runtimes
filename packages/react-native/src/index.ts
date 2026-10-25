@@ -31,6 +31,7 @@ type NativeApiHost = {
   getClass?: (name: string) => unknown;
   getProtocol?: (name: string) => unknown;
   getEnum?: (name: string) => unknown;
+  getEnumGlobalNames?: (name: string) => string[];
   getStruct?: (name: string) => unknown;
   getUnion?: (name: string) => unknown;
   [name: string]: unknown;
@@ -943,18 +944,13 @@ export function installGlobals(): boolean {
       api.getEnum?.(enumName) ?? api[enumName];
     defineLazyNativeGlobal(name, resolveEnum);
 
-    const enumValue = resolveEnum(name);
-    if (!enumValue || typeof enumValue !== "object") {
-      continue;
-    }
-    for (const memberName of Object.keys(enumValue)) {
-      if (/^-?\d+$/.test(memberName)) {
-        continue;
-      }
-      defineLazyNativeGlobal(
-        memberName,
-        () => (enumValue as Record<string, unknown>)[memberName],
-      );
+    for (const memberName of api.getEnumGlobalNames?.(name) ?? []) {
+      defineLazyNativeGlobal(memberName, () => {
+        const enumValue = resolveEnum(name) as
+          | Record<string, unknown>
+          | undefined;
+        return enumValue?.[memberName];
+      });
     }
   }
 
