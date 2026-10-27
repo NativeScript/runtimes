@@ -485,6 +485,23 @@ Value makeNativeClassValue(Runtime& runtime,
       std::make_shared<NativeApiClassHostObject>(bridge, std::move(symbol)));
 }
 
+// For a class the runtime just registered. Unlike makeNativeClassValue this
+// never resolves by name: a global of the same name whose `kind` reads "class"
+// may be the JS constructor being extended (it inherits that from its base
+// wrapper through extendStatics), and taking it would hand back the base class.
+Value makeExtendedNativeClassValue(Runtime& runtime,
+                                   const std::shared_ptr<NativeApiBridge>& bridge,
+                                   NativeApiSymbol symbol) {
+  Class cls = objc_lookUpClass(symbol.runtimeName.c_str());
+  Value cachedClass = bridge->findClassValue(runtime, cls);
+  if (!cachedClass.isUndefined()) {
+    return cachedClass;
+  }
+  return Object::createFromHostObject(
+      runtime,
+      std::make_shared<NativeApiClassHostObject>(bridge, std::move(symbol)));
+}
+
 Protocol* lookupProtocolByNativeName(const std::string& name) {
   Protocol* protocol = objc_getProtocol(name.c_str());
   if (protocol != nullptr) {

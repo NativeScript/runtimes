@@ -594,6 +594,42 @@ void Runtime::RunModule(const char *moduleName) {
 
 void Runtime::RunWorker(const std::string &filePath) {
     m_module.LoadWorker(env, filePath);
+    js_execute_pending_jobs(env);
+}
+
+void Runtime::EnterJsCall() {
+    m_jsCallDepth++;
+}
+
+void Runtime::LeaveJsCall() {
+    m_jsCallDepth--;
+}
+
+// Engines with an explicit job queue (Hermes, QuickJS, PrimJS) run promise
+// reactions only when asked; V8 and JavaScriptCore do it themselves as soon as
+// the JS stack empties. This reproduces that moment: the queue is drained after
+// the outermost call from Java into JS and never inside a nested one, so jobs
+// cannot interleave with a JS frame that is still on the stack.
+void Runtime::RunMicrotaskCheckpoint() {
+    if (m_jsCallDepth > 1) {
+        return;
+    }
+
+    napi_status status = js_execute_pending_jobs(env);
+    bool pendingException = false;
+    napi_is_exception_pending(env, &pendingException);
+    if (status == napi_ok && !pendingException) {
+        return;
+    }
+
+    napi_value error = nullptr;
+    if (pendingException) {
+        napi_get_and_clear_last_exception(env, &error);
+    }
+    if (error != nullptr) {
+        throw NativeScriptException(env, error, "Error running microtasks");
+    }
+    throw NativeScriptException("Error running microtasks");
 }
 
 void Runtime::DisposeWorkerRuntime(Runtime *runtime) {
