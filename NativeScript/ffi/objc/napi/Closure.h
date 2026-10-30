@@ -48,6 +48,9 @@ bool rethrowNapiNativeCallbackException(
 // Must run while JS is on the stack (e.g. from module init): it allocates JS
 // objects, which needs an entered V8 context.
 void initHostCallbackScope(napi_env env);
+
+// Must run on the JS thread before any closure can be invoked from another one.
+void initForeignThreadCallbacks(napi_env env);
 #endif
 
 class Closure {
@@ -56,7 +59,8 @@ class Closure {
                                       void* context, void* data);
   static void destroyOnOwningThread(Closure* closure);
 
-  Closure(napi_env env, std::string typeEncoding, bool isBlock, bool isMethod = false);
+  Closure(napi_env env, std::string typeEncoding, bool isBlock,
+          bool isMethod = false);
   Closure(napi_env env, MDMetadataReader* reader, MDSectionOffset offset,
           bool isBlock = false, std::string* encoding = nullptr,
           bool isMethod = false, bool isGetter = false, bool isSetter = false);
@@ -74,7 +78,6 @@ class Closure {
   bool isSetter = false;
   std::string propertyName;
   SEL selector = nullptr;
-  napi_threadsafe_function tsfn = nullptr;
 
   std::thread::id jsThreadId = std::this_thread::get_id();
   CFRunLoopRef jsRunLoop = CFRunLoopGetCurrent();

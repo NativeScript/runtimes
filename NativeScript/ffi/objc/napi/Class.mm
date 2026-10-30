@@ -111,6 +111,8 @@ void ObjCBridgeState::registerClassGlobals(napi_env env, napi_value global) {
     auto nativeClass = objc_getClass(runtimeName);
     if (nativeClass != nil) {
       mdClassesByPointer[nativeClass] = originalOffset;
+    } else {
+      unresolvedMdClassesByName.emplace(runtimeName, originalOffset);
     }
 
     napi_property_descriptor prop = {
@@ -125,6 +127,37 @@ void ObjCBridgeState::registerClassGlobals(napi_env env, napi_value global) {
 
     napi_define_properties(env, global, 1, &prop);
   }
+}
+
+bool ObjCBridgeState::findMetadataClassOffset(Class cls, MDSectionOffset* offset) {
+  if (cls == nil) {
+    return false;
+  }
+
+  auto find = mdClassesByPointer.find(cls);
+  if (find != mdClassesByPointer.end()) {
+    *offset = find->second;
+    return true;
+  }
+
+  if (unresolvedMdClassesByName.empty()) {
+    return false;
+  }
+
+  const char* runtimeName = class_getName(cls);
+  if (runtimeName == nullptr) {
+    return false;
+  }
+
+  auto unresolved = unresolvedMdClassesByName.find(runtimeName);
+  if (unresolved == unresolvedMdClassesByName.end() || objc_getClass(runtimeName) != cls) {
+    return false;
+  }
+
+  *offset = unresolved->second;
+  mdClassesByPointer[cls] = unresolved->second;
+  unresolvedMdClassesByName.erase(unresolved);
+  return true;
 }
 
 NAPI_FUNCTION(registerClass) {
@@ -267,9 +300,9 @@ NAPI_FUNCTION(classSuperclassFallback) {
     return get_ref_value(env, find->second->constructor);
   }
 
-  auto mdClass = bridgeState->mdClassesByPointer.find(superClass);
-  if (mdClass != bridgeState->mdClassesByPointer.end()) {
-    auto bridgedClass = bridgeState->getClass(env, mdClass->second);
+  MDSectionOffset superClassOffset = MD_SECTION_OFFSET_NULL;
+  if (bridgeState->findMetadataClassOffset(superClass, &superClassOffset)) {
+    auto bridgedClass = bridgeState->getClass(env, superClassOffset);
     return get_ref_value(env, bridgedClass->constructor);
   }
 

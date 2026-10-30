@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 #include "Interop.h"
-#include "runtime/apple/NativeScriptException.h"
 #include "ObjCBridge.h"
 #include "SignatureDispatch.h"
 #include "TypeConv.h"
@@ -17,6 +16,7 @@
 #include "js_native_api_types.h"
 #include "node_api_util.h"
 #include "objc/runtime.h"
+#include "runtime/apple/NativeScriptException.h"
 
 struct Block_descriptor_1 {
   unsigned long int reserved;  // NULL
@@ -87,11 +87,9 @@ inline nativescript::BlockPreparedInvoker ensureFunctionPointerPreparedInvoker(
     return nullptr;
   }
 
-  if (!ref->dispatchLookupCached ||
-      ref->dispatchLookupSignatureHash != ref->cif->signatureHash) {
+  if (!ref->dispatchLookupCached || ref->dispatchLookupSignatureHash != ref->cif->signatureHash) {
     ref->dispatchLookupSignatureHash = ref->cif->signatureHash;
-    ref->dispatchId =
-        nativescript::composeSignatureDispatchId(ref->cif->signatureHash, kind, 0);
+    ref->dispatchId = nativescript::composeSignatureDispatchId(ref->cif->signatureHash, kind, 0);
     if (kind == nativescript::SignatureCallKind::BlockInvoke) {
       ref->preparedInvoker =
           reinterpret_cast<void*>(nativescript::lookupBlockPreparedInvoker(ref->dispatchId));
@@ -105,12 +103,9 @@ inline nativescript::BlockPreparedInvoker ensureFunctionPointerPreparedInvoker(
   return reinterpret_cast<nativescript::BlockPreparedInvoker>(ref->preparedInvoker);
 }
 
-inline const napi_value* prepareFunctionPointerInvocationArgs(napi_env env, nativescript::Cif* cif,
-                                                              size_t actualArgc,
-                                                              const napi_value* rawArgs,
-                                                              napi_value* stackArgs,
-                                                              size_t stackCapacity,
-                                                              std::vector<napi_value>* heapArgs) {
+inline const napi_value* prepareFunctionPointerInvocationArgs(
+    napi_env env, nativescript::Cif* cif, size_t actualArgc, const napi_value* rawArgs,
+    napi_value* stackArgs, size_t stackCapacity, std::vector<napi_value>* heapArgs) {
   if (cif == nullptr || cif->argc == 0) {
     return nullptr;
   }
@@ -138,8 +133,7 @@ inline const napi_value* prepareFunctionPointerInvocationArgs(napi_env env, nati
 }
 
 napi_value callFunctionPointerAsCFunctionDirect(napi_env env, nativescript::FunctionPointer* ref,
-                                                size_t actualArgc,
-                                                const napi_value* rawArgs) {
+                                                size_t actualArgc, const napi_value* rawArgs) {
   if (ref == nullptr || ref->cif == nullptr || ref->function == nullptr) {
     napi_throw_error(env, "NativeScriptException", "Missing native function pointer.");
     return nullptr;
@@ -171,8 +165,7 @@ napi_value callFunctionPointerAsCFunctionDirect(napi_env env, nativescript::Func
   for (unsigned int i = 0; i < cif->argc; i++) {
     avalues[i] = cif->avalues[i];
     bool shouldFreeArg = false;
-    cif->argTypes[i]->toNative(env, invocationArgs[i], avalues[i], &shouldFreeArg,
-                               &shouldFreeAny);
+    cif->argTypes[i]->toNative(env, invocationArgs[i], avalues[i], &shouldFreeArg, &shouldFreeAny);
     shouldFree[i] = shouldFreeArg ? 1 : 0;
   }
 
@@ -205,8 +198,7 @@ napi_value callFunctionPointerAsCFunctionDirect(napi_env env, nativescript::Func
 }
 
 napi_value callFunctionPointerAsBlockDirect(napi_env env, nativescript::FunctionPointer* ref,
-                                            size_t actualArgc,
-                                            const napi_value* rawArgs) {
+                                            size_t actualArgc, const napi_value* rawArgs) {
   if (ref == nullptr || ref->cif == nullptr || ref->function == nullptr) {
     napi_throw_error(env, "NativeScriptException", "Missing native block pointer.");
     return nullptr;
@@ -251,8 +243,8 @@ napi_value callFunctionPointerAsBlockDirect(napi_env env, nativescript::Function
   }
 
   void* rvalue = cif->rvalue;
-  nativescript::BlockPreparedInvoker preparedInvoker = ensureFunctionPointerPreparedInvoker(
-      ref, nativescript::SignatureCallKind::BlockInvoke);
+  nativescript::BlockPreparedInvoker preparedInvoker =
+      ensureFunctionPointerPreparedInvoker(ref, nativescript::SignatureCallKind::BlockInvoke);
 
   @try {
     if (preparedInvoker != nullptr) {
@@ -436,18 +428,6 @@ id registerBlock(napi_env env, Closure* closure, napi_value callback) {
   napi_create_external(env, block, nullptr, nullptr, &ptrExternal);
   napi_set_named_property(env, callback, "__ns_native_ptr", ptrExternal);
 
-  auto bridgeState = ObjCBridgeState::InstanceData(env);
-
-#ifndef ENABLE_JS_RUNTIME
-  if (napiSupportsThreadsafeFunctions(bridgeState->self_dl)) {
-    napi_value workName;
-    napi_create_string_utf8(env, "Block", NAPI_AUTO_LENGTH, &workName);
-    napi_create_threadsafe_function(env, nullptr, nullptr, workName, 0, 1, nullptr, nullptr,
-                                    closure, Closure::callBlockFromMainThread, &closure->tsfn);
-    if (closure->tsfn) napi_unref_threadsafe_function(env, closure->tsfn);
-  }
-#endif  // ENABLE_JS_RUNTIME
-
   cacheBlockJsFunction(env, block, callback, closure);
 
   return (id)block;
@@ -481,7 +461,8 @@ bool isObjCBlockObject(id obj) {
 
   // Runtime block classes are typically internal names like
   // __NSGlobalBlock__, __NSMallocBlock__, __NSStackBlock__.
-  bool isBlock = className[0] == '_' && className[1] == '_' && strstr(className, "Block") != nullptr;
+  bool isBlock =
+      className[0] == '_' && className[1] == '_' && strstr(className, "Block") != nullptr;
   blockClassCache.emplace(cls, isBlock);
   return isBlock;
 }

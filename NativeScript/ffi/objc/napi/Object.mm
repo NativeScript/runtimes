@@ -67,8 +67,8 @@ static SEL ObjCLifecycleAssociationKey = @selector(ObjCLifecycleAssociationKey);
   if (self.env != nullptr && self.ref != nullptr &&
       (self.bridgeState == nullptr ||
        nativescript::IsBridgeStateLive(self.bridgeState, self.bridgeStateToken))) {
-    nativescript::DeleteReferenceOnOwningThread(self.env, self.bridgeState,
-                                                self.bridgeStateToken, self.ref);
+    nativescript::DeleteReferenceOnOwningThread(self.env, self.bridgeState, self.bridgeStateToken,
+                                                self.ref);
     self.ref = nullptr;
   }
   self.bridgeState = nullptr;
@@ -128,6 +128,38 @@ namespace nativescript {
 napi_value findConstructorForObject(napi_env env, ObjCBridgeState* bridgeState, id object,
                                     Class cls = nil);
 
+napi_value interop_releaseNativeObject(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+
+  napi_value result = nullptr;
+  napi_get_boolean(env, false, &result);
+
+  id object = nil;
+  auto bridgeState = ObjCBridgeState::InstanceData(env);
+  if (argc == 0 || arg == nullptr || bridgeState == nullptr ||
+      napi_unwrap(env, arg, (void**)&object) != napi_ok || object == nil) {
+    return result;
+  }
+
+  // Instances of classes defined in JS keep their state on the JS object, so
+  // the native object must not outlive it.
+  for (Class cls = object_getClass(object); cls != nil; cls = class_getSuperclass(cls)) {
+    auto bridgedClass = bridgeState->classesByPointer.find(cls);
+    if (bridgedClass != bridgeState->classesByPointer.end() && bridgedClass->second != nullptr &&
+        bridgedClass->second->metadataOffset == MD_SECTION_OFFSET_NULL) {
+      napi_throw_error(env, nullptr,
+                       "interop.releaseNativeObject cannot release an instance of a class "
+                       "defined in JavaScript");
+      return nullptr;
+    }
+  }
+
+  napi_get_boolean(env, bridgeState->releaseObjectWrapper(env, object, arg), &result);
+  return result;
+}
+
 void transferOwnershipToNative(napi_env env, napi_value value, id object) {
   if (env == nullptr || value == nullptr || object == nil) {
     return;
@@ -158,9 +190,9 @@ napi_value findConstructorForClassObject(napi_env env, ObjCBridgeState* bridgeSt
     }
   }
 
-  auto metadataClass = bridgeState->mdClassesByPointer.find(cls);
-  if (metadataClass != bridgeState->mdClassesByPointer.end()) {
-    auto bridgedMetadataClass = bridgeState->getClass(env, metadataClass->second);
+  MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+  if (bridgeState->findMetadataClassOffset(cls, &metadataOffset)) {
+    auto bridgedMetadataClass = bridgeState->getClass(env, metadataOffset);
     if (bridgedMetadataClass != nullptr) {
       return get_ref_value(env, bridgedMetadataClass->constructor);
     }
@@ -640,9 +672,9 @@ napi_value findConstructorForObject(napi_env env, ObjCBridgeState* bridgeState, 
 
   // Look up if there is a metadata-defined class
   {
-    auto find = bridgeState->mdClassesByPointer.find(cls);
-    if (find != bridgeState->mdClassesByPointer.end()) {
-      auto cls = bridgeState->getClass(env, find->second);
+    MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+    if (bridgeState->findMetadataClassOffset(cls, &metadataOffset)) {
+      auto cls = bridgeState->getClass(env, metadataOffset);
       return get_ref_value(env, cls->constructor);
     }
   }
@@ -737,9 +769,9 @@ napi_value ObjCBridgeState::getObject(napi_env env, id obj, ObjectOwnership owne
 
   auto cls = objectClass;
 
-  auto mdFindByPointer = mdClassesByPointer.find(cls);
-  if (mdFindByPointer != mdClassesByPointer.end()) {
-    classOffset = mdFindByPointer->second;
+  MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+  if (findMetadataClassOffset(cls, &metadataOffset)) {
+    classOffset = metadataOffset;
   }
 
   auto findByPointer = classesByPointer.find(cls);
@@ -799,6 +831,29 @@ bool ObjCBridgeState::unregisterObjectIfRefMatches(id object, napi_ref ref) noex
 
   removeRecentObjectWrapper(env, object);
   removeCachedHandleObject(env, (void*)object);
+  [object release];
+  return true;
+}
+
+bool ObjCBridgeState::releaseObjectWrapper(napi_env env, id object, napi_value wrapper) {
+  napi_value registered = getNormalizedObjectRef(env, object);
+  bool isRegisteredWrapper = false;
+  if (registered == nullptr ||
+      napi_strict_equals(env, registered, wrapper, &isRegisteredWrapper) != napi_ok ||
+      !isRegisteredWrapper || takeObjectRef(object) == nullptr) {
+    return false;
+  }
+
+  detachObject(object);
+
+  // Without its wrap and native pointer the wrapper no longer resolves to the
+  // object, so passing it back to native code cannot reach freed memory.
+  napi_remove_wrap(env, wrapper, nullptr);
+  napi_value key = nullptr;
+  napi_create_string_utf8(env, kNativePointerProperty, NAPI_AUTO_LENGTH, &key);
+  bool deleted = false;
+  napi_delete_property(env, wrapper, key, &deleted);
+
   [object release];
   return true;
 }

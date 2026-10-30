@@ -144,5 +144,12 @@ declare global {
     export function alloc(size: number): Pointer;
     export function handleof(obj: unknown): Pointer;
     export function bufferFromData(data: NativeObject): ArrayBuffer;
+    /**
+     * Drops the wrapper's reference to its native object now instead of when
+     * the wrapper is garbage collected. The wrapper is unusable afterwards.
+     * Returns false if `obj` is not (or no longer) a native object wrapper.
+     * Throws for instances of classes defined in JavaScript.
+     */
+    export function releaseNativeObject(obj: unknown): boolean;
   }
 }
