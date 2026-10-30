@@ -6,15 +6,16 @@
 #include "ObjCBridge.h"
 #include "TypeConv.h"
 #include "Util.h"
-#include "runtime/apple/NativeScriptException.h"
 #include "js_native_api.h"
 #include "js_native_api_types.h"
+#include "runtime/apple/NativeScriptException.h"
 #ifdef ENABLE_JS_RUNTIME
 #include "jsr.h"
 #endif
 #include "node_api_util.h"
 #include "objc/message.h"
 
+#include <Block.h>
 #include <CoreFoundation/CFRunLoop.h>
 #include <Foundation/Foundation.h>
 #include <dispatch/dispatch.h>
@@ -42,6 +43,7 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_make_callback(napi_env env,
                                                       const napi_value* argv, napi_value* result);
 NAPI_EXTERN napi_status NAPI_CDECL napi_add_env_cleanup_hook(node_api_basic_env env,
                                                              napi_cleanup_hook fun, void* arg);
+NAPI_EXTERN napi_status NAPI_CDECL napi_fatal_exception(napi_env env, napi_value err);
 }
 #endif
 
@@ -126,10 +128,250 @@ void runInHostCallbackScope(napi_env env, Fn&& fn) {
     @throw exception;
   }
 }
+
+// A closure invoked on a thread other than the JS thread is forwarded to it
+// through one threadsafe function per env. Void callbacks whose arguments can
+// all be copied or retained are queued and the native caller returns at once;
+// waiting for the JS thread there deadlocks whenever the JS thread is itself
+// blocked on that caller (e.g. a synchronous native call whose completion
+// handler fires on a worker thread). Everything else blocks until JS returns.
+using ClosureInvoker = void (*)(ffi_cif* cif, void* ret, void* args[], void* data);
+
+enum class ForeignCallKind { Method, Function, Block };
+
+std::mutex gForeignCallDispatchersMutex;
+std::unordered_map<napi_env, napi_threadsafe_function> gForeignCallDispatchers;
+
+enum class QueuedArgOwnership { Copy, Retain, CopyBlock, Unsupported };
+
+QueuedArgOwnership queuedArgOwnership(MDTypeKind kind) {
+  switch (kind) {
+    case mdTypeAnyObject:
+    case mdTypeProtocolObject:
+    case mdTypeClassObject:
+    case mdTypeInstanceObject:
+    case mdTypeNSStringObject:
+    case mdTypeNSMutableStringObject:
+      return QueuedArgOwnership::Retain;
+    case mdTypeBlock:
+      return QueuedArgOwnership::CopyBlock;
+    // Memory behind these may be gone once the native caller returns.
+    case mdTypeString:
+    case mdTypePointer:
+    case mdTypeOpaquePointer:
+    case mdTypeArray:
+      return QueuedArgOwnership::Unsupported;
+    default:
+      return QueuedArgOwnership::Copy;
+  }
+}
+
+// The block literal itself (argument 0 of a block invoke) has no TypeConv.
+TypeConv* foreignCallArgType(Closure* closure, ForeignCallKind kind, unsigned index) {
+  if (kind == ForeignCallKind::Block) {
+    if (index == 0) {
+      return nullptr;
+    }
+    index -= 1;
+  }
+  return index < closure->argTypes.size() ? closure->argTypes[index].get() : nullptr;
+}
+
+bool canQueueForeignCall(Closure* closure, ForeignCallKind kind, ffi_cif* cif) {
+  if (closure->returnType == nullptr || closure->returnType->kind != mdTypeVoid ||
+      closure->isSetter) {
+    return false;
+  }
+
+  for (unsigned i = 0; i < cif->nargs; i++) {
+    TypeConv* type = foreignCallArgType(closure, kind, i);
+    if (type == nullptr) {
+      if (kind == ForeignCallKind::Block && i == 0) {
+        continue;
+      }
+      return false;
+    }
+    if (queuedArgOwnership(type->kind) == QueuedArgOwnership::Unsupported) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct ForeignCall {
+  Closure* closure = nullptr;
+  ClosureInvoker invoke = nullptr;
+  ffi_cif* cif = nullptr;
+  void* ret = nullptr;
+  void** args = nullptr;
+  bool queued = false;
+
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool done = false;
+  NSException* exception = nil;
+
+  std::vector<std::max_align_t> argStorage;
+  std::vector<void*> argValues;
+  std::vector<std::pair<void*, QueuedArgOwnership>> ownedArgs;
+  std::max_align_t returnStorage[2];
+
+  ~ForeignCall() {
+    for (auto& owned : ownedArgs) {
+      if (owned.second == QueuedArgOwnership::CopyBlock) {
+        Block_release(owned.first);
+      } else {
+        CFRelease((CFTypeRef)owned.first);
+      }
+    }
+    if (queued && closure != nullptr) {
+      closure->release();
+    }
+  }
+
+  // Copies the argument values so the call can outlive the native caller's
+  // frame, retaining object arguments and copying block arguments.
+  void captureArgs(ForeignCallKind kind, void* sourceArgs[]) {
+    size_t slots = 0;
+    for (unsigned i = 0; i < cif->nargs; i++) {
+      slots += (cif->arg_types[i]->size + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
+    }
+    argStorage.resize(slots > 0 ? slots : 1);
+    argValues.resize(cif->nargs);
+
+    std::max_align_t* cursor = argStorage.data();
+    for (unsigned i = 0; i < cif->nargs; i++) {
+      size_t size = cif->arg_types[i]->size;
+      memcpy(cursor, sourceArgs[i], size);
+      argValues[i] = cursor;
+
+      TypeConv* type = foreignCallArgType(closure, kind, i);
+      QueuedArgOwnership ownership =
+          type != nullptr ? queuedArgOwnership(type->kind) : QueuedArgOwnership::Copy;
+      void** value = (void**)cursor;
+      if (ownership == QueuedArgOwnership::Retain && *value != nullptr) {
+        CFRetain((CFTypeRef)*value);
+        ownedArgs.emplace_back(*value, ownership);
+      } else if (ownership == QueuedArgOwnership::CopyBlock && *value != nullptr) {
+        *value = Block_copy(*value);
+        ownedArgs.emplace_back(*value, ownership);
+      }
+
+      cursor += (size + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
+    }
+    args = argValues.data();
+    ret = returnStorage;
+  }
+};
+
+void runForeignCall(napi_env env, napi_value /*jsCallback*/, void* /*context*/, void* data) {
+  auto call = static_cast<ForeignCall*>(data);
+
+  // env is null when the env is being torn down with calls still queued.
+  if (env != nullptr) {
+    // A queued call has no native caller left to receive the error, so an
+    // uncaught JS error is reported as a process 'uncaughtException'.
+    NapiNativeCallbackExceptionCapture capture;
+    @autoreleasepool {
+      @try {
+        if (call->queued) {
+          ScopedNapiNativeCallbackExceptionCapture captureScope(&capture);
+          call->invoke(call->cif, call->ret, call->args, call->closure);
+        } else {
+          call->invoke(call->cif, call->ret, call->args, call->closure);
+        }
+      } @catch (NSException* exception) {
+        call->exception = [exception retain];
+      }
+    }
+    if (capture.errorRef != nullptr) {
+      napi_value error = nullptr;
+      napi_get_reference_value(env, capture.errorRef, &error);
+      capture.clear();
+      if (error != nullptr) {
+        napi_fatal_exception(env, error);
+      }
+    }
+  } else if (!call->queued && call->ret != nullptr && call->cif->rtype->size > 0) {
+    memset(call->ret, 0, call->cif->rtype->size);
+  }
+
+  if (call->queued) {
+    if (call->exception != nil) {
+      NSLog(@"Uncaught Objective-C exception in a JS callback invoked from a background "
+            @"thread: %@",
+            call->exception);
+      [call->exception release];
+    }
+    delete call;
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(call->mutex);
+    call->done = true;
+  }
+  call->cv.notify_one();
+}
+
+void finalizeForeignCallDispatcher(napi_env /*env*/, void* finalizeData, void* /*hint*/) {
+  std::lock_guard<std::mutex> lock(gForeignCallDispatchersMutex);
+  gForeignCallDispatchers.erase(static_cast<napi_env>(finalizeData));
+}
+
+bool postForeignCall(napi_env env, ForeignCall* call) {
+  std::lock_guard<std::mutex> lock(gForeignCallDispatchersMutex);
+  auto find = gForeignCallDispatchers.find(env);
+  if (find == gForeignCallDispatchers.end()) {
+    return false;
+  }
+  // The queue is unbounded, so this never waits on the JS thread.
+  return napi_call_threadsafe_function(find->second, call, napi_tsfn_nonblocking) == napi_ok;
+}
+
+void callFromForeignThread(Closure* closure, ClosureInvoker invoke, ForeignCallKind kind,
+                           ffi_cif* cif, void* ret, void* args[]) {
+  if (canQueueForeignCall(closure, kind, cif)) {
+    auto call = new ForeignCall();
+    call->closure = closure;
+    call->invoke = invoke;
+    call->cif = cif;
+    call->queued = true;
+    closure->retain();
+    call->captureArgs(kind, args);
+    if (!postForeignCall(closure->env, call)) {
+      delete call;
+    }
+    return;
+  }
+
+  ForeignCall call;
+  call.closure = closure;
+  call.invoke = invoke;
+  call.cif = cif;
+  call.ret = ret;
+  call.args = args;
+
+  std::unique_lock<std::mutex> lock(call.mutex);
+  if (!postForeignCall(closure->env, &call)) {
+    lock.unlock();
+    if (ret != nullptr && cif->rtype->size > 0) {
+      memset(ret, 0, cif->rtype->size);
+    }
+    return;
+  }
+  call.cv.wait(lock, [&call] { return call.done; });
+  lock.unlock();
+
+  if (call.exception != nil) {
+    NSException* exception = [call.exception autorelease];
+    call.exception = nil;
+    @throw exception;
+  }
+}
 #endif  // ENABLE_JS_RUNTIME
 
-thread_local std::vector<NapiNativeCallbackExceptionCapture*>
-    gNativeCallbackExceptionCaptureStack;
+thread_local std::vector<NapiNativeCallbackExceptionCapture*> gNativeCallbackExceptionCaptureStack;
 
 inline void deleteClosureOnOwningThread(Closure* closure) {
   if (closure == nullptr) {
@@ -164,9 +406,7 @@ inline void deleteClosureOnOwningThread(Closure* closure) {
 
 }  // namespace
 
-NapiNativeCallbackExceptionCapture::~NapiNativeCallbackExceptionCapture() {
-  clear();
-}
+NapiNativeCallbackExceptionCapture::~NapiNativeCallbackExceptionCapture() { clear(); }
 
 void NapiNativeCallbackExceptionCapture::clear() {
   if (env != nullptr && errorRef != nullptr) {
@@ -176,15 +416,13 @@ void NapiNativeCallbackExceptionCapture::clear() {
   errorRef = nullptr;
 }
 
-ScopedNapiNativeCallbackExceptionCapture::
-    ScopedNapiNativeCallbackExceptionCapture(
-        NapiNativeCallbackExceptionCapture* capture)
+ScopedNapiNativeCallbackExceptionCapture::ScopedNapiNativeCallbackExceptionCapture(
+    NapiNativeCallbackExceptionCapture* capture)
     : capture_(capture) {
   gNativeCallbackExceptionCaptureStack.push_back(capture_);
 }
 
-ScopedNapiNativeCallbackExceptionCapture::
-    ~ScopedNapiNativeCallbackExceptionCapture() {
+ScopedNapiNativeCallbackExceptionCapture::~ScopedNapiNativeCallbackExceptionCapture() {
   if (!gNativeCallbackExceptionCaptureStack.empty() &&
       gNativeCallbackExceptionCaptureStack.back() == capture_) {
     gNativeCallbackExceptionCaptureStack.pop_back();
@@ -192,8 +430,7 @@ ScopedNapiNativeCallbackExceptionCapture::
 }
 
 bool recordNapiNativeCallbackException(napi_env env, napi_value error) {
-  if (env == nullptr || error == nullptr ||
-      gNativeCallbackExceptionCaptureStack.empty()) {
+  if (env == nullptr || error == nullptr || gNativeCallbackExceptionCaptureStack.empty()) {
     return false;
   }
 
@@ -206,8 +443,7 @@ bool recordNapiNativeCallbackException(napi_env env, napi_value error) {
   return napi_create_reference(env, error, 1, &capture->errorRef) == napi_ok;
 }
 
-bool rethrowNapiNativeCallbackException(
-    napi_env env, NapiNativeCallbackExceptionCapture& capture) {
+bool rethrowNapiNativeCallbackException(napi_env env, NapiNativeCallbackExceptionCapture& capture) {
   if (env == nullptr || capture.errorRef == nullptr) {
     return false;
   }
@@ -220,8 +456,8 @@ bool rethrowNapiNativeCallbackException(
   capture.env = nullptr;
 
   if (error != nullptr) {
-    NativeScriptException nativeScriptException(
-        env, error, "JS implemented closure threw an exception");
+    NativeScriptException nativeScriptException(env, error,
+                                                "JS implemented closure threw an exception");
     nativeScriptException.ReThrowToJS(env);
   } else {
     NativeScriptException nativeScriptException(
@@ -440,8 +676,12 @@ void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #ifdef ENABLE_JS_RUNTIME
   invokeJSMethodCallback(cif, ret, args, data);
 #else
-  runInHostCallbackScope(((Closure*)data)->env,
-                         [&] { invokeJSMethodCallback(cif, ret, args, data); });
+  Closure* closure = (Closure*)data;
+  if (std::this_thread::get_id() != closure->jsThreadId) {
+    callFromForeignThread(closure, invokeJSMethodCallback, ForeignCallKind::Method, cif, ret, args);
+    return;
+  }
+  runInHostCallbackScope(closure->env, [&] { invokeJSMethodCallback(cif, ret, args, data); });
 #endif
 }
 
@@ -477,8 +717,13 @@ void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #ifdef ENABLE_JS_RUNTIME
   invokeJSFunctionCallback(cif, ret, args, data);
 #else
-  runInHostCallbackScope(((Closure*)data)->env,
-                         [&] { invokeJSFunctionCallback(cif, ret, args, data); });
+  Closure* closure = (Closure*)data;
+  if (std::this_thread::get_id() != closure->jsThreadId) {
+    callFromForeignThread(closure, invokeJSFunctionCallback, ForeignCallKind::Function, cif, ret,
+                          args);
+    return;
+  }
+  runInHostCallbackScope(closure->env, [&] { invokeJSFunctionCallback(cif, ret, args, data); });
 #endif
 }
 
@@ -486,10 +731,6 @@ struct JSBlockCallContext {
   ffi_cif* cif;
   void* ret;
   void** args;
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool done;
-  bool useCondvar;
 };
 
 void Closure::callBlockFromMainThread(napi_env env, napi_value js_cb, void* context, void* data) {
@@ -515,14 +756,16 @@ void Closure::callBlockFromMainThread(napi_env env, napi_value js_cb, void* cont
     js_execute_pending_jobs(env);
   }
 #endif
-  if (ctx->useCondvar) {
-    {
-      std::lock_guard<std::mutex> lock(ctx->mutex);
-      ctx->done = true;
-    }
-    ctx->cv.notify_one();
-  }
 }
+
+#ifndef ENABLE_JS_RUNTIME
+void invokeJSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+  Closure* closure = (Closure*)data;
+  JSBlockCallContext ctx{cif, ret, args};
+  Closure::callBlockFromMainThread(closure->env, get_ref_value(closure->env, closure->func),
+                                   closure, &ctx);
+}
+#endif
 
 void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
@@ -539,12 +782,7 @@ void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 
   auto currentThreadId = std::this_thread::get_id();
 
-  JSBlockCallContext ctx;
-  ctx.cif = cif;
-  ctx.ret = ret;
-  ctx.args = args;
-  ctx.done = false;
-  ctx.useCondvar = false;
+  JSBlockCallContext ctx{cif, ret, args};
 
   if (currentThreadId == closure->jsThreadId || shouldInvokeCallbackOnNativeCallerThread()) {
 #ifdef ENABLE_JS_RUNTIME
@@ -557,16 +795,7 @@ void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #endif
   } else {
 #ifndef ENABLE_JS_RUNTIME
-    if (!closure->tsfn) {
-      assert(false && "Threadsafe functions are not supported");
-    }
-
-    ctx.useCondvar = true;
-    napi_acquire_threadsafe_function(closure->tsfn);
-    std::unique_lock<std::mutex> lock(ctx.mutex);
-    napi_call_threadsafe_function(closure->tsfn, &ctx, napi_tsfn_blocking);
-    ctx.cv.wait(lock, [&ctx] { return ctx.done; });
-    napi_release_threadsafe_function(closure->tsfn, napi_tsfn_release);
+    callFromForeignThread(closure, invokeJSBlockCallback, ForeignCallKind::Block, cif, ret, args);
 #else
     auto runloop = closure->jsRunLoop;
     if (runloop == nullptr) {
@@ -706,11 +935,6 @@ Closure::~Closure() {
   }
   bridgeState = nullptr;
   bridgeStateToken = 0;
-#ifndef ENABLE_JS_RUNTIME
-  if (tsfn != nullptr) {
-    napi_release_threadsafe_function(tsfn, napi_tsfn_abort);
-  }
-#endif  // ENABLE_JS_RUNTIME
   if (atypes != nullptr) {
     free(atypes);
   }
@@ -749,6 +973,26 @@ void initHostCallbackScope(napi_env env) {
   napi_create_reference(env, receiver, 1, &state.receiver);
   gHostCallbackStates[env] = state;
   napi_add_env_cleanup_hook(env, destroyHostCallbackState, env);
+}
+
+void initForeignThreadCallbacks(napi_env env) {
+  auto bridgeState = ObjCBridgeState::InstanceData(env);
+  if (bridgeState == nullptr || !napiSupportsThreadsafeFunctions(bridgeState->self_dl)) {
+    return;
+  }
+
+  napi_value name = nullptr;
+  napi_threadsafe_function tsfn = nullptr;
+  napi_create_string_utf8(env, "NativeScriptForeignThreadCallback", NAPI_AUTO_LENGTH, &name);
+  if (napi_create_threadsafe_function(env, nullptr, nullptr, name, 0, 1, env,
+                                      finalizeForeignCallDispatcher, nullptr, runForeignCall,
+                                      &tsfn) != napi_ok) {
+    return;
+  }
+  napi_unref_threadsafe_function(env, tsfn);
+
+  std::lock_guard<std::mutex> lock(gForeignCallDispatchersMutex);
+  gForeignCallDispatchers[env] = tsfn;
 }
 #endif  // ENABLE_JS_RUNTIME
 

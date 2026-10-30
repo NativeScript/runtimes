@@ -462,9 +462,9 @@ ClassBuilder::ClassBuilder(napi_env env, napi_value constructor, Class explicitS
   if (superClassIt != bridgeState->classesByPointer.end()) {
     superclass = superClassIt->second;
   } else {
-    auto mdClassIt = bridgeState->mdClassesByPointer.find(superClassNative);
-    if (mdClassIt != bridgeState->mdClassesByPointer.end()) {
-      superclass = bridgeState->getClass(env, mdClassIt->second);
+    MDSectionOffset superClassOffset = MD_SECTION_OFFSET_NULL;
+    if (bridgeState->findMetadataClassOffset(superClassNative, &superClassOffset)) {
+      superclass = bridgeState->getClass(env, superClassOffset);
     } else {
       superclass = nullptr;
     }

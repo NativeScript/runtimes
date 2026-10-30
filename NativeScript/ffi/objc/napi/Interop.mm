@@ -813,9 +813,18 @@ void registerInterop(napi_env env, napi_value global) {
           .attributes = napi_enumerable,
           .data = nullptr,
       },
+      {
+          .utf8name = "releaseNativeObject",
+          .method = interop_releaseNativeObject,
+          .getter = nullptr,
+          .setter = nullptr,
+          .value = nullptr,
+          .attributes = napi_enumerable,
+          .data = nullptr,
+      },
   };
 
-  napi_define_properties(env, interop, 13, properties);
+  napi_define_properties(env, interop, sizeof(properties) / sizeof(properties[0]), properties);
 
   napi_set_named_property(env, global, "interop", interop);
 }

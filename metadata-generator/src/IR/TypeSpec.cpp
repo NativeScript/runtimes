@@ -1,4 +1,5 @@
 #include <assert.h>
+
 #include <unordered_set>
 
 #include "IR.h"
@@ -14,6 +15,29 @@ static const std::unordered_set<std::string> KNOWN_BRIDGED_TYPES = {
 };
 
 namespace metagen {
+
+// The canonical function type of a block has lost its parameters' typedef
+// names (CMSampleBufferRef becomes struct opaqueCMSampleBuffer *), and with
+// them the CF bridging, so parameters are read from the sugared type.
+static CXType sugaredBlockFunctionType(CXType type, CXType canonicalPointee) {
+  while (type.kind != CXType_BlockPointer) {
+    if (type.kind == CXType_Typedef) {
+      type = clang_getTypedefDeclUnderlyingType(clang_getTypeDeclaration(type));
+    } else if (type.kind == CXType_Attributed) {
+      type = clang_Type_getModifiedType(type);
+    } else if (type.kind == CXType_Elaborated) {
+      type = clang_Type_getNamedType(type);
+    } else {
+      return canonicalPointee;
+    }
+  }
+
+  CXType pointee = clang_getPointeeType(type);
+  if (clang_getNumArgTypes(pointee) != clang_getNumArgTypes(canonicalPointee)) {
+    return canonicalPointee;
+  }
+  return pointee;
+}
 
 TypeSpec::TypeSpec(CXType type, std::vector<std::string>* classTypeParameters) {
   auto canonicalType = clang_getCanonicalType(type);
@@ -176,7 +200,8 @@ TypeSpec::TypeSpec(CXType type, std::vector<std::string>* classTypeParameters) {
       break;
 
     case CXType_BlockPointer: {
-      auto pointeeType = clang_getPointeeType(canonicalType);
+      auto pointeeType =
+          sugaredBlockFunctionType(type, clang_getPointeeType(canonicalType));
       auto resultType = clang_getResultType(pointeeType);
       callbackReturn =
           std::make_shared<TypeSpec>(resultType, classTypeParameters);
@@ -210,8 +235,8 @@ TypeSpec::TypeSpec(CXType type, std::vector<std::string>* classTypeParameters) {
         kind = kTypePointer;
         pointee = std::make_shared<TypeSpec>();
         pointee->kind = kTypeVoid;
-      } else if (canonicalName == "Protocol *" || canonicalName == "Protocol*" ||
-                 canonicalName == "Protocol") {
+      } else if (canonicalName == "Protocol *" ||
+                 canonicalName == "Protocol*" || canonicalName == "Protocol") {
         kind = kTypePointer;
         pointee = std::make_shared<TypeSpec>();
         pointee->kind = kTypeVoid;
@@ -277,7 +302,8 @@ TypeSpec::TypeSpec(CXType type, std::vector<std::string>* classTypeParameters) {
       auto element = clang_getElementType(canonicalType);
       arrayElement = std::make_shared<TypeSpec>(element, classTypeParameters);
       long long elementsCount = clang_getNumElements(canonicalType);
-      constArraySize = elementsCount > 0 ? static_cast<size_t>(elementsCount) : 0;
+      constArraySize =
+          elementsCount > 0 ? static_cast<size_t>(elementsCount) : 0;
       break;
     }
 
@@ -286,7 +312,8 @@ TypeSpec::TypeSpec(CXType type, std::vector<std::string>* classTypeParameters) {
       auto element = clang_getElementType(canonicalType);
       arrayElement = std::make_shared<TypeSpec>(element, classTypeParameters);
       long long elementsCount = clang_getNumElements(canonicalType);
-      constArraySize = elementsCount > 0 ? static_cast<size_t>(elementsCount) : 0;
+      constArraySize =
+          elementsCount > 0 ? static_cast<size_t>(elementsCount) : 0;
       break;
     }
 

@@ -58,8 +58,10 @@ bool IsBridgeStateLive(const ObjCBridgeState* bridgeState,
                        uint64_t token) noexcept;
 void DeleteReferenceOnOwningThread(napi_env env, ObjCBridgeState* bridgeState,
                                    uint64_t bridgeStateToken, napi_ref ref);
-void ReleaseAndDeleteReferenceOnOwningThread(napi_env env, ObjCBridgeState* bridgeState,
-                                             uint64_t bridgeStateToken, napi_ref ref);
+void ReleaseAndDeleteReferenceOnOwningThread(napi_env env,
+                                             ObjCBridgeState* bridgeState,
+                                             uint64_t bridgeStateToken,
+                                             napi_ref ref);
 bool PostFinalizer(napi_env env, napi_finalize finalize_cb, void* finalize_data,
                    void* finalize_hint);
 
@@ -160,6 +162,8 @@ class ObjCBridgeState {
   void registerProtocolGlobals(napi_env env, napi_value global);
 
   ObjCClass* getClass(napi_env env, MDSectionOffset offset);
+
+  bool findMetadataClassOffset(Class cls, MDSectionOffset* offset);
 
   ObjCProtocol* getProtocol(napi_env env, MDSectionOffset offset);
 
@@ -263,10 +267,8 @@ class ObjCBridgeState {
     static thread_local LastHandleObjectRef recentHandleObjectRefs[8];
     static thread_local unsigned int nextRecentHandleObjectRefSlot = 0;
     for (const auto& entry : recentHandleObjectRefs) {
-      if (entry.bridgeState != this ||
-          entry.env != env ||
-          entry.handleKey != handleKey ||
-          entry.ref == nullptr ||
+      if (entry.bridgeState != this || entry.env != env ||
+          entry.handleKey != handleKey || entry.ref == nullptr ||
           entry.generation != generation) {
         continue;
       }
@@ -337,9 +339,11 @@ class ObjCBridgeState {
     }
 
     const uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    const uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    const uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     for (auto& entry : recentObjectWrappers) {
-      if (entry.objectKey != objectKey || entry.objectClassKey != objectClassKey) {
+      if (entry.objectKey != objectKey ||
+          entry.objectClassKey != objectClassKey) {
         continue;
       }
 
@@ -371,7 +375,8 @@ class ObjCBridgeState {
     }
 
     RecentObjectWrapperRef& replaced =
-        recentObjectWrappers[nextRecentObjectWrapperSlot++ % kRecentObjectWrapperLimit];
+        recentObjectWrappers[nextRecentObjectWrapperSlot++ %
+                             kRecentObjectWrapperLimit];
     replaced = entry;
   }
   inline napi_value getRecentObjectWrapper(napi_env env, id object) {
@@ -380,8 +385,10 @@ class ObjCBridgeState {
     }
 
     const uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    const uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
-    for (auto it = recentObjectWrappers.begin(); it != recentObjectWrappers.end();) {
+    const uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
+    for (auto it = recentObjectWrappers.begin();
+         it != recentObjectWrappers.end();) {
       if (it->objectKey != objectKey || it->objectClassKey != objectClassKey) {
         ++it;
         continue;
@@ -403,8 +410,10 @@ class ObjCBridgeState {
     }
 
     const uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    const uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
-    for (auto it = recentObjectWrappers.begin(); it != recentObjectWrappers.end();) {
+    const uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
+    for (auto it = recentObjectWrappers.begin();
+         it != recentObjectWrappers.end();) {
       if (it->objectKey == objectKey && it->objectClassKey == objectClassKey) {
         it = recentObjectWrappers.erase(it);
       } else {
@@ -415,6 +424,7 @@ class ObjCBridgeState {
 
   void unregisterObject(id object) noexcept;
   bool unregisterObjectIfRefMatches(id object, napi_ref ref) noexcept;
+  bool releaseObjectWrapper(napi_env env, id object, napi_value wrapper);
   void detachObject(id object) noexcept;
   void trackObject(id object) noexcept;
   bool isTrackedObjectAlive(id object) const noexcept;
@@ -426,10 +436,12 @@ class ObjCBridgeState {
     }
 
     uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     for (const auto& entry : objectRefs) {
       if (NormalizeHandleKey((void*)entry.first) == objectKey &&
-          NormalizeHandleKey((void*)object_getClass(entry.first)) == objectClassKey) {
+          NormalizeHandleKey((void*)object_getClass(entry.first)) ==
+              objectClassKey) {
         return true;
       }
     }
@@ -462,8 +474,8 @@ class ObjCBridgeState {
     entry.rawValue = nullptr;
   }
 
-  static inline napi_value getRoundTripEntryValue(napi_env env,
-                                                  const RoundTripCacheEntry& entry) {
+  static inline napi_value getRoundTripEntryValue(
+      napi_env env, const RoundTripCacheEntry& entry) {
     if (entry.rawValue != nullptr) {
       return entry.rawValue;
     }
@@ -480,8 +492,10 @@ class ObjCBridgeState {
     bool isTypedArray = false;
     bool isDataView = false;
     bool isBufferLike =
-        (napi_is_arraybuffer(env, value, &isArrayBuffer) == napi_ok && isArrayBuffer) ||
-        (napi_is_typedarray(env, value, &isTypedArray) == napi_ok && isTypedArray) ||
+        (napi_is_arraybuffer(env, value, &isArrayBuffer) == napi_ok &&
+         isArrayBuffer) ||
+        (napi_is_typedarray(env, value, &isTypedArray) == napi_ok &&
+         isTypedArray) ||
         (napi_is_dataview(env, value, &isDataView) == napi_ok && isDataView);
 
     auto& frame = roundTripCacheFrames.back();
@@ -490,7 +504,8 @@ class ObjCBridgeState {
     }
 
     uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     frame[object] = RoundTripCacheEntry{
         .ref = make_ref(env, value),
         .rawValue = nullptr,
@@ -506,14 +521,17 @@ class ObjCBridgeState {
     }
 
     uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     auto matchesObject = [&](const RoundTripCacheEntry& entry) {
-      return entry.objectKey == objectKey && entry.objectClassKey == objectClassKey;
+      return entry.objectKey == objectKey &&
+             entry.objectClassKey == objectClassKey;
     };
 
     if (roundTripCacheFrames.empty()) {
       auto recent = recentRoundTripCache.find(object);
-      if (recent != recentRoundTripCache.end() && matchesObject(recent->second)) {
+      if (recent != recentRoundTripCache.end() &&
+          matchesObject(recent->second)) {
         return getRoundTripEntryValue(env, recent->second);
       }
 
@@ -560,9 +578,11 @@ class ObjCBridgeState {
     }
 
     uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     auto matchesObject = [&](const RoundTripCacheEntry& entry) {
-      return entry.objectKey == objectKey && entry.objectClassKey == objectClassKey;
+      return entry.objectKey == objectKey &&
+             entry.objectClassKey == objectClassKey;
     };
     auto removeFromMap = [&](auto& map) {
       for (auto it = map.begin(); it != map.end();) {
@@ -943,6 +963,9 @@ class ObjCBridgeState {
   std::unordered_map<MDSectionOffset, ObjCProtocol*> protocols;
   std::unordered_map<Class, ObjCClass*> classesByPointer;
   std::unordered_map<Class, MDSectionOffset> mdClassesByPointer;
+  // Metadata classes whose image was not loaded yet when the class globals
+  // were registered, keyed by runtime name.
+  std::unordered_map<std::string, MDSectionOffset> unresolvedMdClassesByName;
   std::unordered_map<Protocol*, MDSectionOffset> mdProtocolsByPointer;
   std::unordered_map<void*, id> nativeObjectsByBridgeWrapper;
   std::unordered_map<Class, napi_ref> constructorsByPointer;
@@ -985,10 +1008,12 @@ class ObjCBridgeState {
     }
 
     uintptr_t objectKey = NormalizeHandleKey((void*)object);
-    uintptr_t objectClassKey = NormalizeHandleKey((void*)object_getClass(object));
+    uintptr_t objectClassKey =
+        NormalizeHandleKey((void*)object_getClass(object));
     for (const auto& entry : objectRefs) {
       if (NormalizeHandleKey((void*)entry.first) != objectKey ||
-          NormalizeHandleKey((void*)object_getClass(entry.first)) != objectClassKey) {
+          NormalizeHandleKey((void*)object_getClass(entry.first)) !=
+              objectClassKey) {
         continue;
       }
 

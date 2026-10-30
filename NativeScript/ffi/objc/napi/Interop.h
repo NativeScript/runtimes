@@ -19,6 +19,7 @@ napi_value interop_sizeof(napi_env env, napi_callback_info info);
 napi_value interop_alloc(napi_env env, napi_callback_info info);
 napi_value interop_handleof(napi_env env, napi_callback_info info);
 napi_value interop_bufferFromData(napi_env env, napi_callback_info info);
+napi_value interop_releaseNativeObject(napi_env env, napi_callback_info info);
 napi_value interop_stringFromCString(napi_env env, napi_callback_info info);
 
 class Pointer {
