@@ -9,6 +9,7 @@ VERSION_OVERRIDE=${NPM_PACKAGE_VERSION:-}
 GENERATED_SIGNATURE_DISPATCH_OVERRIDE=${NS_SIGNATURE_BINDINGS_CPP_PATH:-${TNS_SIGNATURE_BINDINGS_CPP_PATH:-}}
 GENERATED_SIGNATURE_DISPATCH=${GENERATED_SIGNATURE_DISPATCH_OVERRIDE:-"$REPO_ROOT/dist/intermediates/react-native/GeneratedSignatureDispatch.ios-sim.tmp.inc"}
 DEVICE_SIGNATURE_DISPATCH="$REPO_ROOT/dist/intermediates/react-native/GeneratedSignatureDispatch.ios-device.tmp.inc"
+MACOS_SIGNATURE_DISPATCH="$REPO_ROOT/dist/intermediates/react-native/GeneratedSignatureDispatch.macos.tmp.inc"
 SKIP_PACK=false
 
 function metadata_generator_source_hash {
@@ -49,6 +50,12 @@ checkpoint "Generating iOS device metadata for the TurboModule..."
 mkdir -p "$(dirname "$DEVICE_SIGNATURE_DISPATCH")"
 NS_SIGNATURE_BINDINGS_CPP_PATH="$DEVICE_SIGNATURE_DISPATCH" npm run metagen ios
 rm -f "$DEVICE_SIGNATURE_DISPATCH" "$DEVICE_SIGNATURE_DISPATCH.stamp"
+
+# Before ios-sim: each metagen run rewrites GeneratedGsdSignatureDispatch.inc,
+# and the staged copy has to stay the ios-sim one.
+checkpoint "Generating macOS metadata and signature dispatch bindings for the TurboModule..."
+mkdir -p "$(dirname "$MACOS_SIGNATURE_DISPATCH")"
+NS_SIGNATURE_BINDINGS_CPP_PATH="$MACOS_SIGNATURE_DISPATCH" npm run metagen macos
 
 checkpoint "Generating Hermes signature dispatch bindings for the TurboModule..."
 mkdir -p "$(dirname "$GENERATED_SIGNATURE_DISPATCH")"
@@ -98,13 +105,25 @@ cp -R "$REPO_ROOT/NativeScript/ffi/objc/hermes/." "$PACKAGE_DIR/native-api/ffi/o
 cp -R "$REPO_ROOT/NativeScript/ffi/objc/shared/." "$PACKAGE_DIR/native-api/ffi/objc/shared/"
 # Build leftovers, not sources.
 find "$PACKAGE_DIR/native-api/ffi/objc" -name '*.stamp' -delete
-cp "$GENERATED_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/hermes/GeneratedSignatureDispatch.inc"
+# One pod serves iOS and macOS, so the dispatch table is chosen per platform at
+# compile time. A signature missing from the table falls back to libffi.
+cp "$GENERATED_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/hermes/GeneratedSignatureDispatch.ios.inc"
+cp "$MACOS_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/hermes/GeneratedSignatureDispatch.macos.inc"
+cat > "$PACKAGE_DIR/native-api/ffi/objc/hermes/GeneratedSignatureDispatch.inc" <<'INC'
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include "GeneratedSignatureDispatch.macos.inc"
+#else
+#include "GeneratedSignatureDispatch.ios.inc"
+#endif
+INC
 GENERATED_GSD_SIGNATURE_DISPATCH="$(dirname "$GENERATED_SIGNATURE_DISPATCH")/GeneratedGsdSignatureDispatch.inc"
 if [ -f "$GENERATED_GSD_SIGNATURE_DISPATCH" ]; then
   cp "$GENERATED_GSD_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/hermes/GeneratedGsdSignatureDispatch.inc"
 fi
 if [ -z "$GENERATED_SIGNATURE_DISPATCH_OVERRIDE" ]; then
   rm -f "$GENERATED_SIGNATURE_DISPATCH" "$GENERATED_SIGNATURE_DISPATCH.stamp" \
+    "$MACOS_SIGNATURE_DISPATCH" "$MACOS_SIGNATURE_DISPATCH.stamp" \
     "$GENERATED_GSD_SIGNATURE_DISPATCH"
 fi
 cp metadata-generator/include/Metadata.h "$PACKAGE_DIR/native-api/metadata/include/"
@@ -115,6 +134,8 @@ cp NativeScript/libffi/iphonesimulator-universal/include/ffitarget.h "$PACKAGE_D
 cp metadata-generator/metadata/metadata.ios-sim.arm64.nsmd "$PACKAGE_DIR/metadata/"
 cp metadata-generator/metadata/metadata.ios-sim.x86_64.nsmd "$PACKAGE_DIR/metadata/"
 cp metadata-generator/metadata/metadata.ios.arm64.nsmd "$PACKAGE_DIR/metadata/"
+cp metadata-generator/metadata/metadata.macos.arm64.nsmd "$PACKAGE_DIR/metadata/"
+cp metadata-generator/metadata/metadata.macos.x86_64.nsmd "$PACKAGE_DIR/metadata/"
 
 checkpoint "Staging iOS SDK TypeScript declarations..."
 cp packages/objc-node-api/index.d.ts "$PACKAGE_DIR/types/objc-node-api/"
@@ -224,6 +245,8 @@ xcodebuild -create-xcframework \
   -headers NativeScript/libffi/iphoneos-arm64/include \
   -library NativeScript/libffi/iphonesimulator-universal/libffi.a \
   -headers NativeScript/libffi/iphonesimulator-universal/include \
+  -library NativeScript/libffi/macosx-universal/libffi.a \
+  -headers NativeScript/libffi/macosx-universal/include \
   -output "$PACKAGE_DIR/ios/vendor/Libffi.xcframework"
 
 if [[ -n "$VERSION_OVERRIDE" ]]; then
