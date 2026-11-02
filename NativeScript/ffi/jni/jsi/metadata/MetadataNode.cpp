@@ -1309,6 +1309,12 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         callbackData->candidates.push_back(std::move(entry));
         callbackData->objectManager = objectManager;
     }
+    for (const auto &extension: collectedExtensionMethods) {
+        if (std::find(instanceMethodData.begin(), instanceMethodData.end(), extension.second) ==
+            instanceMethodData.end()) {
+            cache->methodCallbackData.push_back(extension.second);
+        }
+    }
     auto instanceFieldCount = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
     for (auto i = 0; i < instanceFieldCount; i++) {
@@ -1394,6 +1400,7 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         auto &methodName = entry.getName();
         if (methodName != lastMethodName) {
             callbackData = new MethodCallbackData(this);
+            cache->methodCallbackData.push_back(callbackData);
             auto method = JsFunction::createFromHostFunction(
                     rt, engine::PropNameID::forAscii(rt, methodName), 0,
                     [callbackData](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
@@ -2558,6 +2565,7 @@ void MetadataNode::SetMissingBaseMethods(
 
             if (callbackData == nullptr) {
                 callbackData = new MethodCallbackData(this);
+                GetMetadataNodeCache(rt)->methodCallbackData.push_back(callbackData);
                 auto proto = constructor.getPropertyAsObject(rt, "prototype");
                 auto method = JsFunction::createFromHostFunction(
                         rt, engine::PropNameID::forAscii(rt, methodName), 0,
@@ -2618,6 +2626,9 @@ void MetadataNode::onDisposeRuntime(JsRuntime &rt) {
                 delete entry;
             }
             for (const auto &entry: it->extendedClassCallbackData) {
+                delete entry;
+            }
+            for (const auto &entry: it->methodCallbackData) {
                 delete entry;
             }
         }

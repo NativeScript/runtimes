@@ -100,6 +100,16 @@ class LRUCache {
             }
         }
 
+        void clear() {
+            if (m_evictCallback != nullptr) {
+                for (auto& entry : m_key_to_value) {
+                    m_evictCallback(entry.second.first, m_state);
+                }
+            }
+            m_key_to_value.clear();
+            m_key_tracker.clear();
+        }
+
         void update(const key_type& key, const value_type& value) {
             jweak ref = m_loadCallback(key, m_state);
             insert(key, ref);
