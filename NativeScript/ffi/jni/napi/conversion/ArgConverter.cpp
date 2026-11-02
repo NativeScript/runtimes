@@ -298,15 +298,10 @@ int64_t ArgConverter::ConvertToJavaLong(napi_env env, napi_value value) {
 }
 
 ArgConverter::TypeLongOperationsCache *ArgConverter::GetTypeLongCache(napi_env env) {
-    TypeLongOperationsCache *cache;
-    auto itFound = s_type_long_operations_cache.find(env);
-    if (itFound == s_type_long_operations_cache.end()) {
-        cache = new TypeLongOperationsCache;
-        s_type_long_operations_cache.emplace(env, cache);
-    } else {
-        cache = itFound->second;
-    }
-
+    auto cache = s_type_long_operations_cache.Get(env);
+    if (cache) return cache;
+    cache = new TypeLongOperationsCache;
+    s_type_long_operations_cache.Insert(env, cache);
     return cache;
 }
 
@@ -331,17 +326,17 @@ u16string ArgConverter::ConvertToUtf16String(napi_env env, napi_value s) {
 
 void ArgConverter::onDisposeEnv(napi_env env) {
     napi_status status;
-    auto itFound = s_type_long_operations_cache.find(env);
-    if (itFound != s_type_long_operations_cache.end()) {
-        if (itFound->second->LongNumberCtorFunc) {
-            NAPI_GUARD(napi_delete_reference(env, itFound->second->LongNumberCtorFunc)) {}
+    auto cache = s_type_long_operations_cache.Get(env);
+    if (cache) {
+        if (cache->LongNumberCtorFunc) {
+            NAPI_GUARD(napi_delete_reference(env, cache->LongNumberCtorFunc)) {}
         }
-        if (itFound->second->NanNumberObject) {
-            NAPI_GUARD(napi_delete_reference(env, itFound->second->NanNumberObject)) {}
+        if (cache->NanNumberObject) {
+            NAPI_GUARD(napi_delete_reference(env, cache->NanNumberObject)) {}
         }
-        delete itFound->second;
-        s_type_long_operations_cache.erase(itFound);
+        s_type_long_operations_cache.Remove(env);
+        delete cache;
     }
 }
 
-robin_hood::unordered_map<napi_env, ArgConverter::TypeLongOperationsCache *> ArgConverter::s_type_long_operations_cache;
+tns::ConcurrentMap<napi_env, ArgConverter::TypeLongOperationsCache *> ArgConverter::s_type_long_operations_cache;
