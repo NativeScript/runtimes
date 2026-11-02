@@ -413,6 +413,21 @@ class NativeApiHostObject final : public HostObject {
             return enumToObject(runtime, bridge->metadata(), *symbol);
           });
     }
+    if (property == "getEnumGlobalNames") {
+      auto bridge = bridge_;
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "getEnumGlobalNames"), 1,
+          [bridge](Runtime& runtime, const Value&, const Value* args,
+                   size_t count) -> Value {
+            std::string enumName = readStringArg(runtime, args, count, 0, "name");
+            const NativeApiSymbol* symbol = bridge->findEnum(enumName);
+            if (symbol == nullptr) {
+              return namesToArray(runtime, {});
+            }
+            return namesToArray(runtime,
+                                enumGlobalNames(bridge->metadata(), *symbol));
+          });
+    }
     if (property == "getProtocol") {
       auto bridge = bridge_;
       return Function::createFromHostFunction(
@@ -528,6 +543,7 @@ class NativeApiHostObject final : public HostObject {
     addPropertyName(runtime, names, "getFunction");
     addPropertyName(runtime, names, "getConstant");
     addPropertyName(runtime, names, "getEnum");
+    addPropertyName(runtime, names, "getEnumGlobalNames");
     addPropertyName(runtime, names, "getProtocol");
     addPropertyName(runtime, names, "getStruct");
     addPropertyName(runtime, names, "getUnion");

@@ -366,6 +366,8 @@ void MetadataFactory::processEnum(CXCursor cursor, bool required) {
   if (enumIt != enums.end()) {
     if (enumIt->second.constants.size() < decl.constants.size()) {
       enumIt->second.constants = std::move(decl.constants);
+      enumIt->second.memberPrefix = std::move(decl.memberPrefix);
+      enumIt->second.memberSuffix = std::move(decl.memberSuffix);
     }
     return;
   }

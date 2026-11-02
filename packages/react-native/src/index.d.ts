@@ -30,6 +30,8 @@ export type NativeApiHost = {
   getClass?: (name: string) => unknown;
   getProtocol?: (name: string) => unknown;
   getEnum?: (name: string) => unknown;
+  /** C constant names of the enum's members, which installGlobals() defines as globals. */
+  getEnumGlobalNames?: (name: string) => string[];
   getStruct?: (name: string) => unknown;
   getUnion?: (name: string) => unknown;
   [name: string]: unknown;

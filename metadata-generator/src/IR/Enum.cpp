@@ -13,7 +13,8 @@ namespace metagen {
 // - Deferred
 // Basically, split the name into parts (assuming camel case), and then remove
 // the repeating parts from the beginning and end of the name.
-void transformEnumMemberNames(std::vector<EnumConstDecl>& members) {
+void transformEnumMemberNames(std::vector<EnumConstDecl>& members,
+                              std::string& prefix, std::string& suffix) {
   std::vector<std::vector<std::string>> parts;
   parts.reserve(members.size());
   size_t skip_begin = 0, skip_end = 0;
@@ -69,6 +70,13 @@ void transformEnumMemberNames(std::vector<EnumConstDecl>& members) {
     }
   }
 
+  for (size_t j = 0; j < skip_begin; j++) {
+    prefix += largestPart[j];
+  }
+  for (size_t j = largestPart.size() - skip_end; j < largestPart.size(); j++) {
+    suffix += largestPart[j];
+  }
+
   for (size_t i = 0; i < members.size(); i++) {
     const auto& part = parts[i];
     std::string name;
@@ -119,6 +127,7 @@ EnumDecl::EnumDecl(CXCursor cursor) {
             auto value = clang_getEnumConstantDeclValue(cursor);
             EnumConstDecl decl;
             decl.name = nameStr;
+            decl.cName = nameStr;
             decl.value = value;
             if (gCaptureAvailability) {
               decl.availability = getAvailabilityInfo(cursor);
@@ -135,7 +144,8 @@ EnumDecl::EnumDecl(CXCursor cursor) {
       },
       this);
 
-  if (!name.empty()) transformEnumMemberNames(constants);
+  if (!name.empty())
+    transformEnumMemberNames(constants, memberPrefix, memberSuffix);
 }
 
 void MetadataFactory::processEnumRefs() {

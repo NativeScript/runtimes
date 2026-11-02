@@ -1591,15 +1591,7 @@ class NativeApiBridge {
       MDSectionOffset originalOffset = offset;
       addSymbol(NativeApiSymbolKind::Enum, originalOffset,
                 metadata_->getString(offset));
-      offset += sizeof(MDSectionOffset);
-
-      bool next = true;
-      while (next) {
-        auto nameOffset = metadata_->getOffset(offset);
-        next = (nameOffset & metagen::mdSectionOffsetNext) != 0;
-        offset += sizeof(MDSectionOffset);
-        offset += sizeof(int64_t);
-      }
+      offset = metadata_->skipEnum(originalOffset);
     }
   }
 

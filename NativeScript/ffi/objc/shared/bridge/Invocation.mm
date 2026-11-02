@@ -30,14 +30,6 @@ std::string stripEnumSuffix(const std::string& enumName) {
   return enumName;
 }
 
-bool isNSComparisonResultOrderingName(const std::string& enumName,
-                                      const std::string& member) {
-  if (enumName != "NSComparisonResult") {
-    return false;
-  }
-  return member == "Ascending" || member == "Same" || member == "Descending";
-}
-
 class NativeApiReturnStorage {
  public:
   explicit NativeApiReturnStorage(size_t size)
@@ -101,72 +93,45 @@ Value enumToObject(Runtime& runtime, MDMetadataReader* metadata,
     return result;
   }
 
-  std::string enumName = symbol.name;
+  const std::string& enumName = symbol.name;
   std::string strippedPrefix = stripEnumSuffix(enumName);
-  MDSectionOffset offset = symbol.offset + sizeof(MDSectionOffset);
-  bool next = true;
-  while (next) {
-    auto nameOffset = metadata->getOffset(offset);
-    next = (nameOffset & metagen::mdSectionOffsetNext) != 0;
-    nameOffset &= ~metagen::mdSectionOffsetNext;
-    offset += sizeof(MDSectionOffset);
+  metadata->forEachEnumMember(
+      symbol.offset, [&](const char* memberName, const std::string& cName,
+                         int64_t value) {
+        std::string storedName = memberName != nullptr ? memberName : "";
+        auto aliases = enum_members::aliasesFor(enumName, strippedPrefix,
+                                                storedName, cName);
+        for (const auto& alias : aliases) {
+          result.setProperty(runtime, alias.name.c_str(),
+                             static_cast<double>(value));
+        }
 
-    const char* memberName = metadata->resolveString(nameOffset);
-    int64_t value = metadata->getEnumValue(offset);
-    offset += sizeof(int64_t);
-
-    std::string canonicalName = memberName != nullptr ? memberName : "";
-    std::vector<std::string> aliases;
-    aliases.push_back(canonicalName);
-
-    if (!strippedPrefix.empty() && startsWith(canonicalName, strippedPrefix) &&
-        canonicalName.size() > strippedPrefix.size()) {
-      aliases.push_back(canonicalName.substr(strippedPrefix.size()));
-    } else if (!strippedPrefix.empty() &&
-               !startsWith(canonicalName, strippedPrefix)) {
-      aliases.push_back(strippedPrefix + canonicalName);
-    }
-
-    if (startsWith(enumName, "NS") && !startsWith(canonicalName, "NS")) {
-      aliases.push_back(std::string("NS") + canonicalName);
-    }
-
-    if (enumName == "NSStringCompareOptions" &&
-        !endsWith(canonicalName, "Search")) {
-      aliases.push_back(canonicalName + "Search");
-      aliases.push_back(std::string("NS") + canonicalName + "Search");
-    }
-
-    if (!startsWith(canonicalName, "k")) {
-      aliases.push_back(std::string("k") + enumName + canonicalName);
-    }
-
-    if (isNSComparisonResultOrderingName(enumName, canonicalName)) {
-      aliases.push_back(std::string("Ordered") + canonicalName);
-      aliases.push_back(std::string("NSOrdered") + canonicalName);
-    }
-
-    std::vector<std::string> uniqueAliases;
-    std::unordered_set<std::string> seenAliases;
-    for (const auto& alias : aliases) {
-      if (!alias.empty() && seenAliases.insert(alias).second) {
-        uniqueAliases.push_back(alias);
-      }
-    }
-
-    for (const auto& alias : uniqueAliases) {
-      result.setProperty(runtime, alias.c_str(), static_cast<double>(value));
-    }
-
-    char valueKey[32] = {};
-    snprintf(valueKey, sizeof(valueKey), "%lld", static_cast<long long>(value));
-    if (!result.hasProperty(runtime, valueKey)) {
-      std::string reverseName =
-          uniqueAliases.size() > 1 ? uniqueAliases[1] : canonicalName;
-      result.setProperty(runtime, valueKey, makeString(runtime, reverseName));
-    }
-  }
+        char valueKey[32] = {};
+        snprintf(valueKey, sizeof(valueKey), "%lld",
+                 static_cast<long long>(value));
+        if (!result.hasProperty(runtime, valueKey)) {
+          const std::string& reverseName =
+              aliases.size() > 1 ? aliases[1].name : storedName;
+          result.setProperty(runtime, valueKey,
+                             makeString(runtime, reverseName));
+        }
+      });
   return result;
+}
+
+std::vector<std::string> enumGlobalNames(MDMetadataReader* metadata,
+                                         const NativeApiSymbol& symbol) {
+  std::vector<std::string> names;
+  if (metadata == nullptr || symbol.offset == MD_SECTION_OFFSET_NULL) {
+    return names;
+  }
+  metadata->forEachEnumMember(
+      symbol.offset, [&](const char*, const std::string& cName, int64_t) {
+        if (!cName.empty()) {
+          names.push_back(cName);
+        }
+      });
+  return names;
 }
 
 Value constantToValue(Runtime& runtime,

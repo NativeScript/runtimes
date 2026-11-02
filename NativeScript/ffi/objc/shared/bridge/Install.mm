@@ -1754,16 +1754,10 @@ void InstallNativeApiGlobalSymbols(Runtime& runtime, const char* globalName) {
   });
   enumNameList.forEach(function(name) {
     defineLazyGlobal(name, resolveNativeApiEnum, false, 'enum');
-    var enumValue = resolveNativeApiEnum(name);
-    if (!enumValue || typeof enumValue !== 'object') {
-      return;
-    }
-    Object.keys(enumValue).forEach(function(memberName) {
-      if (/^-?\d+$/.test(memberName)) {
-        return;
-      }
+    api.getEnumGlobalNames(name).forEach(function(memberName) {
       defineLazyGlobal(memberName, function() {
-        return enumValue[memberName];
+        var enumValue = resolveNativeApiEnum(name);
+        return enumValue && enumValue[memberName];
       }, false, 'enumMember:' + name);
     });
   });

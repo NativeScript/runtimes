@@ -32,6 +32,7 @@
 #include "Metadata.h"
 #include "MetadataReader.h"
 #include "ffi.h"
+#include "ffi/objc/shared/EnumMemberAliases.h"
 #include "NativeApiJsiSignatureDispatch.h"
 #ifndef NATIVESCRIPT_REACT_NATIVE
 // js_jsr_for_runtime: maps the bridge's unsafe jsi::Runtime back to the

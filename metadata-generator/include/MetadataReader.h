@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "Metadata.h"
 
@@ -14,6 +15,7 @@ class MDMetadataReader {
  public:
   void* data;
   bool ownsData = false;
+  uint16_t version = 0;
 
   MDSectionOffset stringsOffset;
   MDSectionOffset constantsOffset;
@@ -35,9 +37,8 @@ class MDMetadataReader {
     }
     ptr_add(&data, MD_HEADER_MAGIC_SIZE);
 
-    uint16_t version;
     memcpy(&version, data, MD_HEADER_VERSION_SIZE);
-    if (version != MD_HEADER_VERSION) {
+    if (version < MD_HEADER_MIN_VERSION || version > MD_HEADER_VERSION) {
       fprintf(stderr, "Invalid metadata header version\n");
       exit(1);
     }
@@ -93,6 +94,66 @@ class MDMetadataReader {
 
   inline int64_t getEnumValue(MDSectionOffset offset) {
     return *(int64_t*)((char*)data + offset);
+  }
+
+  inline bool hasEnumMemberCNames() const {
+    return version >= MD_HEADER_VERSION_ENUM_MEMBER_C_NAMES;
+  }
+
+  // Visits fn(name, cName, value) for each member of the enum entry at
+  // enumOffset and returns the offset just past the entry. cName is empty when
+  // the metadata predates stored C names; it cannot be derived from name.
+  template <typename Fn>
+  inline MDSectionOffset forEachEnumMember(MDSectionOffset enumOffset,
+                                           Fn&& fn) {
+    MDSectionOffset offset = enumOffset + sizeof(MDSectionOffset);
+    const bool hasCNames = hasEnumMemberCNames();
+    const char* prefix = "";
+    const char* suffix = "";
+    if (hasCNames) {
+      prefix = getString(offset);
+      offset += sizeof(MDSectionOffset);
+      suffix = getString(offset);
+      offset += sizeof(MDSectionOffset);
+    }
+
+    bool next = true;
+    while (next) {
+      MDSectionOffset nameOffset = getOffset(offset);
+      next = (nameOffset & mdSectionOffsetNext) != 0;
+      const bool nameIsCName =
+          hasCNames && (nameOffset & mdSectionOffsetEnumMemberCName) != 0;
+      if (hasCNames) {
+        nameOffset &= ~mdSectionOffsetEnumMemberCName;
+      }
+      nameOffset &= ~mdSectionOffsetNext;
+      offset += sizeof(MDSectionOffset);
+      int64_t value = getEnumValue(offset);
+      offset += sizeof(int64_t);
+
+      const char* name = resolveString(nameOffset);
+      std::string cName;
+      if (nameIsCName) {
+        cName = name;
+      } else if (hasCNames) {
+        cName.append(prefix).append(name).append(suffix);
+      }
+      fn(name, cName, value);
+    }
+    return offset;
+  }
+
+  inline MDSectionOffset skipEnum(MDSectionOffset enumOffset) {
+    MDSectionOffset offset = enumOffset + sizeof(MDSectionOffset);
+    if (hasEnumMemberCNames()) {
+      offset += 2 * sizeof(MDSectionOffset);
+    }
+    bool next = true;
+    while (next) {
+      next = (getOffset(offset) & mdSectionOffsetNext) != 0;
+      offset += sizeof(MDSectionOffset) + sizeof(int64_t);
+    }
+    return offset;
   }
 
   inline MDMemberFlag getMemberFlag(MDSectionOffset offset) {
