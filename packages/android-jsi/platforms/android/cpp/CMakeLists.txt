@@ -22,7 +22,15 @@ add_library(
   v8runtime/JSIV8ValueConverter.cpp
   v8runtime/HostProxy.cpp
   v8runtime/JSIRuntime.cpp
+  v8runtime/V8ExportShims.cpp
 )
+
+# Inline V8 header code reads object layouts, so these must match the V8 build
+# inside libNativeScript.so (NativeScript/android test-app/runtime/CMakeLists.txt).
+target_compile_definitions(nativescript-jsi PUBLIC V8_31BIT_SMIS_ON_64BIT_ARCH)
+if(ANDROID_ABI MATCHES "arm64-v8a$" OR ANDROID_ABI MATCHES "x86_64$")
+  target_compile_definitions(nativescript-jsi PUBLIC V8_COMPRESS_POINTERS)
+endif()
 
 target_include_directories(
   nativescript-jsi
@@ -49,6 +57,7 @@ target_compile_options(
 )
 
 find_library(android-log-lib log)
+find_library(android-lib android)
 
 # V8 symbols are exported by libNativeScript.so which is already loaded in the
 # Android process by the NativeScript runtime. Allow unresolved shared-library
@@ -62,9 +71,18 @@ if(DEFINED NATIVESCRIPT_SO_PATH AND EXISTS "${NATIVESCRIPT_SO_PATH}")
   target_link_libraries(
     nativescript-jsi
     ${android-log-lib}
+    ${android-lib}
     NativeScriptRuntime
   )
 else()
+  # Android's dynamic linker binds a library's undefined symbols only against
+  # its own DT_NEEDED tree, never against libraries the process loaded earlier.
+  # Linking against an empty stub whose soname is libNativeScript.so records
+  # that dependency, so the V8 symbols bind to the runtime already in memory.
+  add_library(nativescript-runtime-stub SHARED v8runtime/NativeScriptRuntimeStub.cpp)
+  set_target_properties(nativescript-runtime-stub PROPERTIES NO_SONAME ON)
+  target_link_options(nativescript-runtime-stub PRIVATE "-Wl,-soname,libNativeScript.so")
+
   string(REGEX REPLACE "(^| )-Wl,--no-undefined( |$)" " " CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
   target_link_options(
     nativescript-jsi
@@ -75,5 +93,7 @@ else()
   target_link_libraries(
     nativescript-jsi
     ${android-log-lib}
+    ${android-lib}
+    nativescript-runtime-stub
   )
 endif()

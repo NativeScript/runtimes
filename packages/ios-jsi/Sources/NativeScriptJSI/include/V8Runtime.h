@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include <functional>
+#include <unordered_map>
+
 // #include <cxxreact/MessageQueueThread.h>
 #include "V8RuntimeConfig.h"
 #include "jsi/jsi.h"
@@ -33,12 +36,18 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   // Calling this function when the platform main runloop is idle
   void OnMainLoopIdle();
 
+  // Runs `task` as a top-level entry into JS from the runtime's thread, then
+  // drains microtasks. An exception escaping `task` goes to NativeScript's
+  // uncaught error handling instead of propagating to the caller.
+  void ExecuteTask(const std::function<void(facebook::jsi::Runtime&)>& task);
+
  private:
   v8::Local<v8::Context> CreateGlobalContext(v8::Isolate* isolate);
   facebook::jsi::Value ExecuteScript(v8::Isolate* isolate,
                                      const v8::Local<v8::String>& script,
                                      const std::string& sourceURL);
   void ReportException(v8::Isolate* isolate, v8::TryCatch* tryCatch) const;
+  void DeleteV8Property(v8::Local<v8::Object> object, v8::Local<v8::Value> key);
 
   std::unique_ptr<v8::ScriptCompiler::CachedData> LoadCodeCacheIfNeeded(
       const std::string& sourceURL);
@@ -116,6 +125,19 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
                                              size_t length) override;
   std::string utf8(const facebook::jsi::String&) override;
 
+  facebook::jsi::String createStringFromUtf16(const char16_t* utf16,
+                                              size_t length) override;
+  facebook::jsi::PropNameID createPropNameIDFromUtf16(const char16_t* utf16,
+                                                      size_t length) override;
+  std::u16string utf16(const facebook::jsi::String&) override;
+  std::u16string utf16(const facebook::jsi::PropNameID&) override;
+  void getStringData(const facebook::jsi::String& str, void* ctx,
+                     void (*cb)(void* ctx, bool ascii, const void* data,
+                                size_t num)) override;
+  void getPropNameIdData(const facebook::jsi::PropNameID& sym, void* ctx,
+                         void (*cb)(void* ctx, bool ascii, const void* data,
+                                    size_t num)) override;
+
   facebook::jsi::Object createObject() override;
   facebook::jsi::Object createObject(
       std::shared_ptr<facebook::jsi::HostObject> hostObject) override;
@@ -154,6 +176,23 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   void setPropertyValue(const facebook::jsi::Object&,
                         const facebook::jsi::String& name,
                         const facebook::jsi::Value& value) override;
+  facebook::jsi::Value getProperty(const facebook::jsi::Object&,
+                                   const facebook::jsi::Value& name) override;
+  bool hasProperty(const facebook::jsi::Object&,
+                   const facebook::jsi::Value& name) override;
+  void setPropertyValue(const facebook::jsi::Object&,
+                        const facebook::jsi::Value& name,
+                        const facebook::jsi::Value& value) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::PropNameID& name) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::String& name) override;
+  void deleteProperty(const facebook::jsi::Object&,
+                      const facebook::jsi::Value& name) override;
+
+  void setRuntimeDataImpl(const facebook::jsi::UUID& uuid, const void* data,
+                          void (*deleter)(const void* data)) override;
+  const void* getRuntimeDataImpl(const facebook::jsi::UUID& uuid) override;
 
   bool isArray(const facebook::jsi::Object&) const override;
   bool isArrayBuffer(const facebook::jsi::Object&) const override;
@@ -173,6 +212,11 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   size_t size(const facebook::jsi::Array&) override;
   size_t size(const facebook::jsi::ArrayBuffer&) override;
   uint8_t* data(const facebook::jsi::ArrayBuffer&) override;
+  std::shared_ptr<facebook::jsi::MutableBuffer> tryGetMutableBuffer(
+      const facebook::jsi::ArrayBuffer&) override;
+  bool detached(const facebook::jsi::ArrayBuffer&) override;
+  size_t push(const facebook::jsi::Array&, const facebook::jsi::Value* elements,
+              size_t count) override;
   facebook::jsi::Value getValueAtIndex(const facebook::jsi::Array&,
                                        size_t i) override;
   void setValueAtIndexImpl(const facebook::jsi::Array&, size_t i,
@@ -230,7 +274,18 @@ class JSI_EXPORT V8Runtime : public facebook::jsi::Runtime {
   v8::Isolate* isolate_;
   v8::Global<v8::Context> context_;
   std::shared_ptr<InspectorClient> inspectorClient_;
-  bool isSharedRuntime_ = false;
+
+  struct RuntimeDataEntry {
+    const void* data;
+    void (*deleter)(const void* data);
+  };
+  // Only touched on the runtime's JS thread, so it needs no lock.
+  std::unordered_map<facebook::jsi::UUID, RuntimeDataEntry,
+                     facebook::jsi::UUID::Hash>
+      runtimeData_;
+
+  v8::Global<v8::Function> taskTrampoline_;
+  const std::function<void(facebook::jsi::Runtime&)>* currentTask_ = nullptr;
   //   std::shared_ptr<facebook::react::MessageQueueThread> jsQueue_;
 };
 
