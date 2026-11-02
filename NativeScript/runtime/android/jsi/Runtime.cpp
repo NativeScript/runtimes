@@ -554,6 +554,8 @@ Runtime::~Runtime() {
         s_main_rt = nullptr;
         s_mainThreadInitialized = false;
     }
+
+    JEnv().DeleteGlobalRef(m_runtime);
 }
 
 std::string Runtime::ReadFileText(const std::string &filePath) {

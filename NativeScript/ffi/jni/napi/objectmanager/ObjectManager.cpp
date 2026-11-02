@@ -92,6 +92,10 @@ void ObjectManager::OnDisposeEnv() {
         NAPI_GUARD(napi_delete_reference(m_env, entry.second)) {}
     }
     m_idToObject.clear();
+
+    // Its destructor leaves the weak global refs alive, and the process-wide
+    // weak reference table is finite.
+    m_cache.clear();
 }
 
 napi_value ObjectManager::GetOrCreateProxyWeak(jint javaObjectID, napi_value instance) {
