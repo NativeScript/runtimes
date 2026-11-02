@@ -596,7 +596,7 @@ void Runtime::RunWorker(const std::string &filePath) {
     m_module.LoadWorker(env, filePath);
 }
 
-void Runtime::DisposeWorkerRuntime(Runtime *runtime) {
+void Runtime::DisposeRuntime(Runtime *runtime) {
     // `env` is referenced by the (engine-specific) JSEnterScope macro below.
     napi_env env = runtime->env;
     {

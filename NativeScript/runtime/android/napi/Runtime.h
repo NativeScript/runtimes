@@ -84,7 +84,7 @@ namespace tns {
 
         // Tears down a worker's Runtime (engine scope + env free) and deletes
         // it. Called from the native worker thread during shutdown.
-        static void DisposeWorkerRuntime(Runtime *runtime);
+        static void DisposeRuntime(Runtime *runtime);
 
         jobject RunScript(JNIEnv *_env, jobject obj, jstring scriptFile);
 
