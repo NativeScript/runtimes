@@ -19,6 +19,7 @@ class NativeApiClassHostObject final : public HostObject {
   }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "kind") {
       return makeString(runtime, "class");
@@ -249,6 +250,7 @@ class NativeApiClassHostObject final : public HostObject {
   }
 
   NativeApiHostSetResult set(Runtime& runtime, const PropNameID& name, const Value& value) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     Class cls = objc_lookUpClass(symbol_.runtimeName.c_str());
     if (cls == nil) {
@@ -284,6 +286,7 @@ class NativeApiClassHostObject final : public HostObject {
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     names.reserve(8);
     addPropertyName(runtime, names, "kind");

@@ -15,6 +15,7 @@ class NativeApiProtocolHostObject final : public HostObject {
   const NativeApiSymbol& symbol() const { return symbol_; }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "kind") {
       return makeString(runtime, "protocol");
@@ -91,6 +92,7 @@ class NativeApiProtocolHostObject final : public HostObject {
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     addPropertyName(runtime, names, "kind");
     addPropertyName(runtime, names, "name");

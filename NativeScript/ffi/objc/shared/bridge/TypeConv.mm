@@ -1217,6 +1217,7 @@ void NativeApiReferenceHostObject::ensureStorage(Runtime& runtime, NativeApiType
 }
 
 Value NativeApiReferenceHostObject::get(Runtime& runtime, const PropNameID& name) {
+  bridge_->requireOwnerRuntime(runtime);
   std::string property = name.utf8(runtime);
   if (property == "kind") {
     return makeString(runtime, "reference");
@@ -1258,6 +1259,7 @@ Value NativeApiReferenceHostObject::get(Runtime& runtime, const PropNameID& name
 
 NativeApiHostSetResult NativeApiReferenceHostObject::set(Runtime& runtime, const PropNameID& name,
                                                          const Value& value) {
+  bridge_->requireOwnerRuntime(runtime);
   std::string property = name.utf8(runtime);
   auto index = parseArrayIndexProperty(property);
   if (property != "value" && !index) {
@@ -1283,6 +1285,7 @@ NativeApiHostSetResult NativeApiReferenceHostObject::set(Runtime& runtime, const
 }
 
 Value NativeApiStructObjectHostObject::get(Runtime& runtime, const PropNameID& name) {
+  bridge_->requireOwnerRuntime(runtime);
   std::string property = name.utf8(runtime);
   if (property == "kind") {
     return makeString(runtime, info_ != nullptr && info_->isUnion ? "union" : "struct");
@@ -1328,6 +1331,7 @@ Value NativeApiStructObjectHostObject::get(Runtime& runtime, const PropNameID& n
 NativeApiHostSetResult NativeApiStructObjectHostObject::set(Runtime& runtime,
                                                             const PropNameID& name,
                                                             const Value& value) {
+  bridge_->requireOwnerRuntime(runtime);
   std::string property = name.utf8(runtime);
   if (info_ == nullptr || data_ == nullptr) {
     throw JSError(runtime, "Struct is not initialized.");
@@ -1345,6 +1349,7 @@ NativeApiHostSetResult NativeApiStructObjectHostObject::set(Runtime& runtime,
 }
 
 std::vector<PropNameID> NativeApiStructObjectHostObject::getPropertyNames(Runtime& runtime) {
+  bridge_->requireOwnerRuntime(runtime);
   std::vector<PropNameID> names;
   addPropertyName(runtime, names, "kind");
   addPropertyName(runtime, names, "name");
