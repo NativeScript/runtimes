@@ -219,6 +219,15 @@ describe("TNS Workers", () => {
         worker.postMessage({ eval: "close();" });
     });
 
+    if (global.android) {
+        it("Should not crash on close() after a native wrapper is collected in the same message", (done) => {
+            var worker = new Worker("./EvalWorker.js");
+
+            worker.onmessage = () => setTimeout(done, 500);
+            worker.postMessage({ eval: "new java.lang.Object(); gc(); postMessage('closing'); close();" });
+        });
+    }
+
     it("Should not throw error if post message is called with native object", () => {
         var worker = new Worker("./EvalWorker.js");
 
