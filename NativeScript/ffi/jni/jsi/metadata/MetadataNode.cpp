@@ -6,6 +6,7 @@
 #include <set>
 #include <cerrno>
 #include <unistd.h>
+#include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
 #include "CallbackHandlers.h"
@@ -887,13 +888,14 @@ void MetadataNode::CreateTopLevelNamespaces(JsRuntime &rt) {
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
             }
-            try {
-                global.setProperty(rt, nameSpace.c_str(), packageObj);
-            } catch (JsError &) {
-                // A host can already own the name as a non-writable global (Expo
-                // defines `expo`), so fall back to the same $ prefix as keywords.
-                global.setProperty(rt, ("$" + nameSpace).c_str(), packageObj);
+            if (global.hasProperty(rt, nameSpace.c_str())) {
+                string fallback = "$" + nameSpace;
+                __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
+                                    nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
+                nameSpace = fallback;
             }
+            global.setProperty(rt, nameSpace.c_str(), packageObj);
         }
     }
 }

@@ -6,6 +6,7 @@
 #include <set>
 #include <cerrno>
 #include <unistd.h>
+#include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
 #include "CallbackHandlers.h"
@@ -1119,6 +1120,14 @@ void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
             // if the namespaces matches a javascript keyword, prefix it with $ to avoid TypeScript and JavaScript errors
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
+            }
+            bool exists = false;
+            if (napi_has_named_property(env, global, nameSpace.c_str(), &exists) == napi_ok && exists) {
+                string fallback = "$" + nameSpace;
+                __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
+                                    nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
+                nameSpace = fallback;
             }
             NAPI_GUARD(napi_set_named_property(env, global, nameSpace.c_str(), packageObj)) {}
         }
