@@ -3,6 +3,7 @@ package org.nativescript.reactnative;
 import android.content.Context;
 
 import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.queue.MessageQueueThread;
 import com.facebook.react.module.annotations.ReactModule;
 
 import com.tns.Logger;
@@ -23,6 +24,11 @@ import java.io.OutputStream;
  * thread -- it is a synchronous TurboModule method, so React Native already
  * guarantees that. Everything it does happens against the runtime React Native
  * created; nothing here starts a JavaScript engine.
+ *
+ * <p>React Native creates one instance of this module per JavaScript runtime and
+ * invalidates it before destroying that runtime, which is where NativeScript
+ * lets go of it. A reloaded bundle installs into its new runtime through a new
+ * instance.
  */
 @ReactModule(name = NativeScriptNativeApiModule.NAME)
 public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
@@ -44,6 +50,8 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
 
     private final ReactApplicationContext reactContext;
 
+    private volatile Runtime attachedRuntime;
+
     public NativeScriptNativeApiModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.reactContext = reactContext;
@@ -54,13 +62,11 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
         return NAME;
     }
 
-    private native boolean nativeIsInstalled();
-
     private native String nativeRuntimeBackend();
 
     @Override
     public boolean install(String metadataPath) {
-        if (nativeIsInstalled()) {
+        if (attachedRuntime != null) {
             return true;
         }
 
@@ -88,8 +94,28 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
                             + "JSI runtime and cannot run over the legacy bridge.");
         }
 
-        attachRuntime(context, runtimePtr, resolvedPath, readAsset(context, ASSET_TS_HELPERS));
+        attachedRuntime = attachRuntime(context, runtimePtr, resolvedPath,
+                readAsset(context, ASSET_TS_HELPERS));
         return true;
+    }
+
+    @Override
+    public void invalidate() {
+        Runtime runtime = attachedRuntime;
+        attachedRuntime = null;
+        if (runtime != null) {
+            // Detaching releases handles into the jsi::Runtime, so it has to run
+            // before React Native destroys that runtime and never alongside JS.
+            // Bridgeless has already stopped the JS thread here, so the post is
+            // refused and this thread is safe. The bridge can invalidate from
+            // another thread while JS still runs, and queues the runtime's
+            // destruction on the JS thread behind this.
+            MessageQueueThread jsThread = reactContext.getJSMessageQueueThread();
+            if (jsThread == null || jsThread.isOnThread() || !jsThread.runOnQueue(runtime::detach)) {
+                runtime.detach();
+            }
+        }
+        super.invalidate();
     }
 
     @Override
@@ -104,7 +130,7 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
 
     @Override
     public boolean isInstalled() {
-        return nativeIsInstalled();
+        return attachedRuntime != null;
     }
 
     /**
@@ -138,8 +164,8 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
         }
     }
 
-    private static void attachRuntime(Context context, long runtimePtr, String metadataPath,
-                                      String bootstrapScript) {
+    private static Runtime attachRuntime(Context context, long runtimePtr, String metadataPath,
+                                         String bootstrapScript) {
         File filesDir = context.getFilesDir();
         File dexDir = new File(filesDir, "nativescript-dex");
         if (!dexDir.exists() && !dexDir.mkdirs()) {
@@ -148,7 +174,7 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
 
         Logger logger = new NativeScriptLogger(isDebuggable(context));
 
-        Runtime.attachToHostRuntime(
+        return Runtime.attachToHostRuntime(
                 logger,
                 context.getPackageName(),
                 context.getApplicationInfo().nativeLibraryDir,
