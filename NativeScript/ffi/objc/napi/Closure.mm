@@ -21,12 +21,112 @@
 #include <cassert>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
+
+#ifndef ENABLE_JS_RUNTIME
+// Node-API entry points from node_api.h, which this tree does not vendor.
+typedef struct napi_async_context__* napi_async_context;
+typedef void(NAPI_CDECL* napi_cleanup_hook)(void* arg);
+extern "C" {
+NAPI_EXTERN napi_status NAPI_CDECL napi_async_init(napi_env env, napi_value async_resource,
+                                                   napi_value async_resource_name,
+                                                   napi_async_context* result);
+NAPI_EXTERN napi_status NAPI_CDECL napi_async_destroy(napi_env env,
+                                                      napi_async_context async_context);
+NAPI_EXTERN napi_status NAPI_CDECL napi_make_callback(napi_env env,
+                                                      napi_async_context async_context,
+                                                      napi_value recv, napi_value func, size_t argc,
+                                                      const napi_value* argv, napi_value* result);
+NAPI_EXTERN napi_status NAPI_CDECL napi_add_env_cleanup_hook(node_api_basic_env env,
+                                                             napi_cleanup_hook fun, void* arg);
+}
+#endif
 
 namespace nativescript {
 
 namespace {
+
+#ifndef ENABLE_JS_RUNTIME
+// Hosts that own the native run loop (Electron's main process, for one) can
+// make Objective-C call back into JS with no V8 context entered and no
+// HandleScope open. napi_make_callback is the only Node-API call that enters
+// the env's context itself, so callbacks are routed through a native
+// trampoline invoked that way; Node also drains nextTicks and microtasks when
+// the outermost callback scope closes, which keeps promises settled from
+// native callbacks from stalling.
+struct HostCallbackState {
+  napi_ref trampoline = nullptr;
+  napi_ref receiver = nullptr;
+  napi_async_context asyncContext = nullptr;
+};
+
+thread_local std::unordered_map<napi_env, HostCallbackState> gHostCallbackStates;
+thread_local const std::function<void()>* gPendingHostCallback = nullptr;
+thread_local NSException* gPendingHostCallbackException = nil;
+
+napi_value runPendingHostCallback(napi_env env, napi_callback_info info) {
+  const std::function<void()>* callback = gPendingHostCallback;
+  gPendingHostCallback = nullptr;
+  if (callback != nullptr) {
+    // An Objective-C exception must not unwind through V8 frames; it is
+    // rethrown once napi_make_callback has returned.
+    @try {
+      (*callback)();
+    } @catch (NSException* exception) {
+      gPendingHostCallbackException = exception;
+    }
+  }
+  return nullptr;
+}
+
+void destroyHostCallbackState(void* arg) {
+  napi_env env = (napi_env)arg;
+  auto it = gHostCallbackStates.find(env);
+  if (it == gHostCallbackStates.end()) {
+    return;
+  }
+  napi_async_destroy(env, it->second.asyncContext);
+  napi_delete_reference(env, it->second.trampoline);
+  napi_delete_reference(env, it->second.receiver);
+  gHostCallbackStates.erase(it);
+}
+
+template <typename Fn>
+void runInHostCallbackScope(napi_env env, Fn&& fn) {
+  auto it = gHostCallbackStates.find(env);
+  if (it == gHostCallbackStates.end()) {
+    fn();
+    return;
+  }
+
+  const std::function<void()> callback = std::forward<Fn>(fn);
+  napi_handle_scope handleScope = nullptr;
+  napi_open_handle_scope(env, &handleScope);
+
+  const std::function<void()>* previous = gPendingHostCallback;
+  gPendingHostCallback = &callback;
+  napi_value result = nullptr;
+  napi_status status =
+      napi_make_callback(env, it->second.asyncContext, get_ref_value(env, it->second.receiver),
+                         get_ref_value(env, it->second.trampoline), 0, nullptr, &result);
+  gPendingHostCallback = previous;
+
+  if (status == napi_pending_exception) {
+    napi_value error = nullptr;
+    napi_get_and_clear_last_exception(env, &error);
+  }
+  napi_close_handle_scope(env, handleScope);
+
+  if (gPendingHostCallbackException != nil) {
+    NSException* exception = gPendingHostCallbackException;
+    gPendingHostCallbackException = nil;
+    @throw exception;
+  }
+}
+#endif  // ENABLE_JS_RUNTIME
 
 thread_local std::vector<NapiNativeCallbackExceptionCapture*>
     gNativeCallbackExceptionCaptureStack;
@@ -221,7 +321,7 @@ inline void JSCallbackInner(Closure* closure, napi_value func, napi_value thisAr
 // Bridge calls from Objective-C to JavaScript.
 // Opposite of what native_call.cc does - but a lot of type conversion logic
 // is reused, just in reverse.
-void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+void invokeJSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
   napi_env env = closure->env;
 
@@ -336,7 +436,16 @@ void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   closure->returnType->toNative(env, result, ret, &shouldFree, &shouldFree);
 }
 
-void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+#ifdef ENABLE_JS_RUNTIME
+  invokeJSMethodCallback(cif, ret, args, data);
+#else
+  runInHostCallbackScope(((Closure*)data)->env,
+                         [&] { invokeJSMethodCallback(cif, ret, args, data); });
+#endif
+}
+
+void invokeJSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
   napi_env env = closure->env;
 
@@ -362,6 +471,15 @@ void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   }
 
   JSCallbackInner(closure, func, thisArg, argv, cif->nargs, nullptr, ret);
+}
+
+void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+#ifdef ENABLE_JS_RUNTIME
+  invokeJSFunctionCallback(cif, ret, args, data);
+#else
+  runInHostCallbackScope(((Closure*)data)->env,
+                         [&] { invokeJSFunctionCallback(cif, ret, args, data); });
+#endif
 }
 
 struct JSBlockCallContext {
@@ -431,8 +549,12 @@ void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   if (currentThreadId == closure->jsThreadId || shouldInvokeCallbackOnNativeCallerThread()) {
 #ifdef ENABLE_JS_RUNTIME
     NativeCallbackScope scope(env);
-#endif
     Closure::callBlockFromMainThread(env, get_ref_value(env, closure->func), closure, &ctx);
+#else
+    runInHostCallbackScope(env, [&] {
+      Closure::callBlockFromMainThread(env, get_ref_value(env, closure->func), closure, &ctx);
+    });
+#endif
   } else {
 #ifndef ENABLE_JS_RUNTIME
     if (!closure->tsfn) {
@@ -603,5 +725,31 @@ void Closure::release() {
     deleteClosureOnOwningThread(this);
   }
 }
+
+#ifndef ENABLE_JS_RUNTIME
+void initHostCallbackScope(napi_env env) {
+  if (gHostCallbackStates.count(env) != 0) {
+    return;
+  }
+
+  napi_value trampoline = nullptr;
+  napi_value receiver = nullptr;
+  napi_value resourceName = nullptr;
+  HostCallbackState state;
+  if (napi_create_function(env, "nativeScriptHostCallback", NAPI_AUTO_LENGTH,
+                           runPendingHostCallback, nullptr, &trampoline) != napi_ok ||
+      napi_create_object(env, &receiver) != napi_ok ||
+      napi_create_string_utf8(env, "NativeScriptHostCallback", NAPI_AUTO_LENGTH, &resourceName) !=
+          napi_ok ||
+      napi_async_init(env, receiver, resourceName, &state.asyncContext) != napi_ok) {
+    return;
+  }
+
+  napi_create_reference(env, trampoline, 1, &state.trampoline);
+  napi_create_reference(env, receiver, 1, &state.receiver);
+  gHostCallbackStates[env] = state;
+  napi_add_env_cleanup_hook(env, destroyHostCallbackState, env);
+}
+#endif  // ENABLE_JS_RUNTIME
 
 }  // namespace nativescript

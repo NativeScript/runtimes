@@ -44,6 +44,12 @@ bool recordNapiNativeCallbackException(napi_env env, napi_value error);
 bool rethrowNapiNativeCallbackException(
     napi_env env, NapiNativeCallbackExceptionCapture& capture);
 
+#ifndef ENABLE_JS_RUNTIME
+// Must run while JS is on the stack (e.g. from module init): it allocates JS
+// objects, which needs an entered V8 context.
+void initHostCallbackScope(napi_env env);
+#endif
+
 class Closure {
  public:
   static void callBlockFromMainThread(napi_env env, napi_value js_cb,

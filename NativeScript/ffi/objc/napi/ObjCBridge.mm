@@ -1088,6 +1088,9 @@ NAPI_EXPORT void nativescript_init(void* _env, const char* metadata_path,
   napi_env env = (napi_env)_env;
 
   ObjCBridgeState* bridgeState = new ObjCBridgeState(env, metadata_path, metadata_ptr);
+#ifndef ENABLE_JS_RUNTIME
+  initHostCallbackScope(env);
+#endif
 
   napi_value objc;
   napi_create_object(env, &objc);
