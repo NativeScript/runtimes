@@ -729,7 +729,7 @@ Value extendNativeApiClass(
 	  newSymbol.name = className;
 	  newSymbol.runtimeName = className;
 	  newSymbol.superclassOffset = baseSymbol.offset;
-	  return makeNativeClassValue(runtime, bridge, std::move(newSymbol));
+	  return makeExtendedNativeClassValue(runtime, bridge, std::move(newSymbol));
 	}
 
 Value invokeNativeApiBaseMethod(

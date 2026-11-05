@@ -18,9 +18,10 @@ LDPLUSPLUS = $SRCROOT/internal/nsld.sh
 // * It will be generated on each build, so you can find it after running "ns build ios" in "YOUR_APP/platforms/ios".
 // NS_DEBUG_METADATA_PATH = $(SRCROOT)/debug-metadata
 
-// Xcode 12 
-EXCLUDED_ARCHS_x86_64 = arm64 arm64e
-EXCLUDED_ARCHS[sdk=iphonesimulator*] = i386 armv6 armv7 armv7s armv8 $(EXCLUDED_ARCHS_$(NATIVE_ARCH_64_BIT))
+// NativeScript.xcframework ships an arm64-only simulator slice, so x86_64 must
+// stay out of simulator builds even though ARCHS_STANDARD lists it and the CLI
+// builds simulator targets with ONLY_ACTIVE_ARCH=NO.
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = i386 x86_64 armv6 armv7 armv7s armv8
 EXCLUDED_ARCHS[sdk=iphoneos*] = i386 armv6 armv7 armv7s armv8 x86_64
 EXCLUDED_ARCHS[sdk=macosx*] = i386 armv6 armv7 armv7s armv8
 VALIDATE_WORKSPACE = YES

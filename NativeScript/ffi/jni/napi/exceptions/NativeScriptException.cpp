@@ -187,7 +187,31 @@ void NativeScriptException::CallJsFuncWithErr(napi_env env, napi_value errObj, b
     if (napi_util::is_of_type(env, handler, napi_function)) {
         napi_value result;
         NAPI_GUARD(napi_call_function(env, global, handler, 1, &errObj, &result)) {}
+        return;
     }
+
+    // Nothing in JS can observe this error yet: it happened before the app
+    // installed its handler, typically while the entry module was loading, so
+    // logcat is the only place left to report it.
+    std::string report;
+    for (const char* propertyName : {"stack", "message", "stackTrace"}) {
+        napi_value value = nullptr;
+        if (napi_get_named_property(env, errObj, propertyName, &value) != napi_ok ||
+            !napi_util::is_of_type(env, value, napi_string)) {
+            continue;
+        }
+        std::string text = ArgConverter::ConvertToString(env, value);
+        if (text.empty() || report.find(text) != std::string::npos) {
+            continue;
+        }
+        if (!report.empty()) {
+            report += "\n";
+        }
+        report += text;
+    }
+    __android_log_print(ANDROID_LOG_ERROR, "JS",
+                        "Uncaught error before a JS error handler was installed:\n%s",
+                        report.c_str());
 }
 
 napi_value NativeScriptException::WrapJavaToJsException(napi_env env) {

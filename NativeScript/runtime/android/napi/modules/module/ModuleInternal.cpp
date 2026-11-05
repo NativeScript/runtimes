@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <ctime>
 #include "GlobalHelpers.h"
+#include "ESModuleSupport.h"
 #include <utime.h>
 
 
@@ -32,6 +33,10 @@ void ThrowFallbackRequireError(napi_env env, const char* message) {
     }
 
     napi_throw_error(env, nullptr, message);
+}
+
+bool IsJavaScriptModulePath(const std::string& path) {
+    return Util::EndsWith(path, ".js") || Util::EndsWith(path, ".mjs") || Util::EndsWith(path, ".cjs");
 }
 
 void ReThrowRequireError(napi_env env, NativeScriptException& exception) {
@@ -353,7 +358,7 @@ napi_value ModuleInternal::LoadImpl(napi_env env, const std::string& moduleName,
         auto it2 = m_loadedModules.find(path);
 
         if (it2 == m_loadedModules.end()) {
-            if (Util::EndsWith(path, ".js") || Util::EndsWith(path, ".so")) {
+            if (IsJavaScriptModulePath(path) || Util::EndsWith(path, ".so")) {
                 isData = false;
                 result = LoadModule(env, path, cachePathKey);
             } else if (Util::EndsWith(path, ".json")) {
@@ -424,18 +429,26 @@ napi_value ModuleInternal::LoadModule(napi_env env, const std::string& modulePat
 
     napi_value moduleFunc;
 
-    if (Util::EndsWith(modulePath, ".js")) {
+    if (IsJavaScriptModulePath(modulePath)) {
         DEBUG_WRITE("%s", modulePath.c_str());
 
-        // Fast path: if the build compiled this module to engine bytecode, run it
-        // directly. This peeks the file header only — the source is never read or
-        // wrapped for a bytecode module. Bytecode is the compiled form of the
-        // *wrapped* module content, so it yields the same wrapper function.
-        status = js_run_bytecode_file(env, EnsureFileProtocol(modulePath).c_str(), &moduleFunc);
-        if (status == napi_cannot_run_js) {
-            // Not bytecode — compile and run the wrapped source as usual.
-            napi_value script = LoadScript(env, modulePath, fullRequiredModulePath);
+        if (nativescript::esm::IsESModulePath(modulePath)) {
+            // ES module sources are rewritten to CommonJS at load time, so the
+            // bytecode compiler never produced a precompiled form to try first.
+            napi_util::define_property(env, exportsObj, "__esModule", napi_util::get_true(env));
+            napi_value script = WrapESModuleContent(env, modulePath);
             status = js_execute_script(env, script, EnsureFileProtocol(modulePath).c_str(), &moduleFunc);
+        } else {
+            // Fast path: if the build compiled this module to engine bytecode, run it
+            // directly. This peeks the file header only — the source is never read or
+            // wrapped for a bytecode module. Bytecode is the compiled form of the
+            // *wrapped* module content, so it yields the same wrapper function.
+            status = js_run_bytecode_file(env, EnsureFileProtocol(modulePath).c_str(), &moduleFunc);
+            if (status == napi_cannot_run_js) {
+                // Not bytecode — compile and run the wrapped source as usual.
+                napi_value script = LoadScript(env, modulePath, fullRequiredModulePath);
+                status = js_execute_script(env, script, EnsureFileProtocol(modulePath).c_str(), &moduleFunc);
+            }
         }
         if (status != napi_ok) {
             bool pendingException;
@@ -566,12 +579,27 @@ napi_value ModuleInternal::LoadData(napi_env env, const std::string& path) {
 }
 
 napi_value ModuleInternal::WrapModuleContent(napi_env env, const std::string& path) {
+    std::string content = nativescript::esm::RewriteCommonJSDynamicImportsForFallbackEngines(
+            nativescript::esm::StripShebang(Runtime::GetRuntime(m_env)->ReadFileText(path)));
+    return WrapWithModuleFunction(env, content, false /* isESModule */);
+}
 
-    std::string content = Runtime::GetRuntime(m_env)->ReadFileText(path);
+napi_value ModuleInternal::WrapESModuleContent(napi_env env, const std::string& path) {
+    std::string content = nativescript::esm::TransformESModuleForFallbackEngines(
+            nativescript::esm::StripShebang(Runtime::GetRuntime(m_env)->ReadFileText(path)));
+    return WrapWithModuleFunction(env, content, true /* isESModule */);
+}
 
-    // TODO: Use statically allocated buffer for better performance
+napi_value ModuleInternal::WrapWithModuleFunction(napi_env env, const std::string& content, bool isESModule) {
+    // The shims share the prologue's line so source line numbers are unchanged.
+    // MODULE_PROLOGUE itself stays byte-identical to the one the bytecode
+    // compiler wraps with; only source-evaluated modules get the shims.
     std::string result(MODULE_PROLOGUE);
     result.reserve(content.length() + 1024);
+    result += NS_ESM_FALLBACK_DYNAMIC_IMPORT_SHIM;
+    if (isESModule) {
+        result += NS_ESM_FALLBACK_MODULE_SHIM;
+    }
     result += content;
     result += MODULE_EPILOGUE;
 
