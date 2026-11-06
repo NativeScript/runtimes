@@ -18,8 +18,12 @@ cp -R "./platforms/apple/templates/visionos/." "$STAGING_DIR/framework"
 cp -R "dist/NativeScript.xcframework" "$STAGING_DIR/framework/internal"
 cp -R "dist/TKLiveSync.xcframework" "$STAGING_DIR/framework/internal"
 
-mkdir -p "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
-cp -R "metadata-generator/dist/x86_64/." "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
+if [ -d "metadata-generator/dist/x86_64" ]; then
+  mkdir -p "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
+  cp -R "metadata-generator/dist/x86_64/." "$STAGING_DIR/framework/internal/metadata-generator-x86_64"
+else
+  echo "warning: skipping x86_64 metadata generator in package: metadata-generator/dist/x86_64 was not built" >&2
+fi
 
 mkdir -p "$STAGING_DIR/framework/internal/metadata-generator-arm64"
 cp -R "metadata-generator/dist/arm64/." "$STAGING_DIR/framework/internal/metadata-generator-arm64"
