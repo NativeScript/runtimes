@@ -782,3 +782,66 @@ React Native already provides `console`, timers, `queueMicrotask`,
 installs only the metadata globals, the object manager and the interop
 callbacks. `Worker` is not installed either: a worker needs its own VM, which a
 guest has no way to create.
+
+## Windows
+
+The same package runs on React Native for Windows (react-native-windows 0.83 or later, New
+Architecture, Hermes). Where Apple platforms give you Objective-C, Windows gives you the whole
+Windows Runtime, from NativeScript's Windows runtime
+([@nativescript/windows-napi](https://github.com/NativeScript/windows/tree/main/windows-napi)).
+
+```ts
+import NativeScript from "@nativescript/react-native";
+
+const device = await NativeScript.runOnUI(() => {
+  "worklet";
+  const info = Windows.System.Profile.AnalyticsInfo.VersionInfo;
+  return `${info.DeviceFamily} ${Windows.System.UserProfile.GlobalizationPreferences.HomeGeographicRegion}`;
+});
+```
+
+### How it works
+
+On Windows, NativeScript can't bind to React Native's own runtime: a native module only sees it
+through react-native-windows' JSI ABI, and NativeScript's Windows runtime binds through Node-API.
+react-native-worklets has no Windows implementation either. So the module runs a Hermes runtime
+of its own on the UI thread, created through the `jsr_*` API of the `hermes.dll` react-native-windows
+already loaded, with `@nativescript/windows-napi` attached to it. `Windows`, `XamlWindow` and
+`NSWinRT` are globals there, as in NativeScript's Windows desktop hosts.
+
+`NativeScript.runOnUI(worklet, ...args)` runs a worklet there and resolves with its result:
+
+- The worklet is rebuilt from the code the Worklets Babel plugin embeds in it, so keep
+  `react-native-worklets/plugin` in your Babel config. No native Worklets library is needed on
+  Windows.
+- Arguments, captured values and the result travel as JSON. A captured name that has no value in
+  React Native (`Windows`, `XamlWindow`, `NSWinRT`) is that runtime's global. Functions can't be
+  captured: define them inside the worklet.
+- A worklet may be `async`: await WinRT async operations with `await NSWinRT.toPromise(op)`.
+- `console` output from the worklet is replayed through React Native's `console` when it returns,
+  and a thrown error rejects the promise with its stack.
+
+`NativeScript.init()` starts that runtime; NativeScript's globals don't exist in React Native's
+own runtime on Windows.
+
+### Setup
+
+Add `@nativescript/windows-napi` (1.0.0-beta.22 or later, the first that can run outside Node) next
+to this package. Autolinking adds the `NativeScriptNativeApi` project, which embeds the addon and
+its JS helpers (`nswinrt.js`) in its DLL and extracts the addon to
+`%LOCALAPPDATA%\nativescript-react-native\` on first use, so it works however the app is packaged.
+To embed another build of the addon, pass `/p:NativeScriptWindowsNapiAddon=<path to the .node or
+.dll>` and `/p:NativeScriptWindowsNapiJs=<path to nswinrt.js>` to MSBuild.
+
+Keep `react-native-worklets/plugin` in your Babel config. On Windows the package declares
+`Windows`, `NSWinRT` and `XamlWindow` in React Native's runtime (as `undefined`) when it's imported,
+so a worklet that uses them can capture them; they resolve to the UI runtime's globals.
+
+### How Node-API gets there
+
+`@nativescript/windows-napi` is a Node-API addon. Hermes' `hermes.dll` provides the engine half of
+Node-API (`js_native_api.h`) but not Node's (`node_api.h`: threadsafe functions, cleanup hooks,
+buffers, async work), which the addon also uses. The module implements Node's half itself
+(`windows/NativeScriptNativeApi/NodeApiHost.cpp`) and sets `NAPI_HOST_MODULES` to its own DLL and
+`hermes.dll` before loading the addon, which takes each `napi_*` function from the first of them
+that exports it.

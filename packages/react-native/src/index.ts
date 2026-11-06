@@ -13,6 +13,7 @@ import type {
 } from "react";
 import type { ViewProps } from "react-native";
 import NativeScriptNativeApi from "./NativeScriptNativeApi";
+import { initWindows, isWindows, runOnUIWindows } from "./windows";
 import NativeScriptUIViewNativeComponent from "./NativeScriptUIViewNativeComponent";
 
 declare const require: (id: string) => any;
@@ -984,6 +985,8 @@ export function installGlobals(): boolean {
 }
 
 export function init(metadataPath = "", options: InstallOptions = {}): boolean {
+  // Windows: the Windows Runtime lives in the UI-thread runtime, reached through runOnUI.
+  if (isWindows) return initWindows();
   const installed =
     NativeScriptNativeApi.isInstalled() ||
     NativeScriptNativeApi.install(metadataPath);
@@ -1344,6 +1347,7 @@ export function runOnUI<Args extends unknown[], ReturnValue>(
   if (typeof callback !== "function") {
     throw new TypeError("NativeScript.runOnUI expects a Worklets callback");
   }
+  if (isWindows) return runOnUIWindows(callback, args);
 
   ensureNativeScriptInstalled();
   const worklets = ensureWorkletsInstalled();
