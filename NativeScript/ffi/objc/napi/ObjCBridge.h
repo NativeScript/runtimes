@@ -161,6 +161,26 @@ class ObjCBridgeState {
 
   ObjCClass* getClass(napi_env env, MDSectionOffset offset);
 
+  inline bool findMetadataClassOffset(Class cls, MDSectionOffset* offset) {
+    auto find = mdClassesByPointer.find(cls);
+    if (find == mdClassesByPointer.end()) {
+      if (!resolvePendingMetadataClasses()) {
+        return false;
+      }
+      find = mdClassesByPointer.find(cls);
+      if (find == mdClassesByPointer.end()) {
+        return false;
+      }
+    }
+    *offset = find->second;
+    return true;
+  }
+
+  // Maps metadata classes whose image was not loaded when the class globals
+  // were registered. Only does work after another image has loaded since the
+  // last call. Returns whether any class was mapped.
+  bool resolvePendingMetadataClasses();
+
   ObjCProtocol* getProtocol(napi_env env, MDSectionOffset offset);
 
   Cif* getMethodCif(napi_env env, Method method);
@@ -943,6 +963,8 @@ class ObjCBridgeState {
   std::unordered_map<MDSectionOffset, ObjCProtocol*> protocols;
   std::unordered_map<Class, ObjCClass*> classesByPointer;
   std::unordered_map<Class, MDSectionOffset> mdClassesByPointer;
+  std::vector<std::pair<const char*, MDSectionOffset>> pendingMdClasses;
+  uint64_t pendingMdClassesImageGeneration = 0;
   std::unordered_map<Protocol*, MDSectionOffset> mdProtocolsByPointer;
   std::unordered_map<void*, id> nativeObjectsByBridgeWrapper;
   std::unordered_map<Class, napi_ref> constructorsByPointer;
