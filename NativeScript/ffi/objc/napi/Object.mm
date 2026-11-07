@@ -158,9 +158,9 @@ napi_value findConstructorForClassObject(napi_env env, ObjCBridgeState* bridgeSt
     }
   }
 
-  auto metadataClass = bridgeState->mdClassesByPointer.find(cls);
-  if (metadataClass != bridgeState->mdClassesByPointer.end()) {
-    auto bridgedMetadataClass = bridgeState->getClass(env, metadataClass->second);
+  MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+  if (bridgeState->findMetadataClassOffset(cls, &metadataOffset)) {
+    auto bridgedMetadataClass = bridgeState->getClass(env, metadataOffset);
     if (bridgedMetadataClass != nullptr) {
       return get_ref_value(env, bridgedMetadataClass->constructor);
     }
@@ -640,9 +640,9 @@ napi_value findConstructorForObject(napi_env env, ObjCBridgeState* bridgeState, 
 
   // Look up if there is a metadata-defined class
   {
-    auto find = bridgeState->mdClassesByPointer.find(cls);
-    if (find != bridgeState->mdClassesByPointer.end()) {
-      auto cls = bridgeState->getClass(env, find->second);
+    MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+    if (bridgeState->findMetadataClassOffset(cls, &metadataOffset)) {
+      auto cls = bridgeState->getClass(env, metadataOffset);
       return get_ref_value(env, cls->constructor);
     }
   }
@@ -737,9 +737,9 @@ napi_value ObjCBridgeState::getObject(napi_env env, id obj, ObjectOwnership owne
 
   auto cls = objectClass;
 
-  auto mdFindByPointer = mdClassesByPointer.find(cls);
-  if (mdFindByPointer != mdClassesByPointer.end()) {
-    classOffset = mdFindByPointer->second;
+  MDSectionOffset metadataOffset = MD_SECTION_OFFSET_NULL;
+  if (findMetadataClassOffset(cls, &metadataOffset)) {
+    classOffset = metadataOffset;
   }
 
   auto findByPointer = classesByPointer.find(cls);
