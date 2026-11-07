@@ -18,6 +18,9 @@
 #include "js_native_api.h"
 #include "js_native_api_types.h"
 #include "node_api_util.h"
+#ifndef ENABLE_JS_RUNTIME
+#include "CallbackThreading.h"
+#endif
 
 #import <Foundation/Foundation.h>
 #include <TargetConditionals.h>
@@ -1089,7 +1092,7 @@ NAPI_EXPORT void nativescript_init(void* _env, const char* metadata_path,
 
   ObjCBridgeState* bridgeState = new ObjCBridgeState(env, metadata_path, metadata_ptr);
 #ifndef ENABLE_JS_RUNTIME
-  initHostCallbackScope(env);
+  NativeCallbackScope::initialize(env);
 #endif
 
   napi_value objc;
