@@ -436,18 +436,6 @@ id registerBlock(napi_env env, Closure* closure, napi_value callback) {
   napi_create_external(env, block, nullptr, nullptr, &ptrExternal);
   napi_set_named_property(env, callback, "__ns_native_ptr", ptrExternal);
 
-  auto bridgeState = ObjCBridgeState::InstanceData(env);
-
-#ifndef ENABLE_JS_RUNTIME
-  if (napiSupportsThreadsafeFunctions(bridgeState->self_dl)) {
-    napi_value workName;
-    napi_create_string_utf8(env, "Block", NAPI_AUTO_LENGTH, &workName);
-    napi_create_threadsafe_function(env, nullptr, nullptr, workName, 0, 1, nullptr, nullptr,
-                                    closure, Closure::callBlockFromMainThread, &closure->tsfn);
-    if (closure->tsfn) napi_unref_threadsafe_function(env, closure->tsfn);
-  }
-#endif  // ENABLE_JS_RUNTIME
-
   cacheBlockJsFunction(env, block, callback, closure);
 
   return (id)block;
