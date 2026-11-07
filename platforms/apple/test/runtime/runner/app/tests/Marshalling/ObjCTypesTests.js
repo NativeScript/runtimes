@@ -188,6 +188,23 @@ describe(module.id, function () {
         expect(actual).toBe("complex block called\nTNSObjCTypes");
     });
 
+    it("Block parameters with CF typedefs are marshalled as objects", function () {
+        var metadata = CGImageMetadataCreateMutable();
+        expect(CGImageMetadataSetValueWithPath(metadata, null, "xmp:CreatorTool", "NativeScript")).toBe(true);
+
+        var calls = [];
+        CGImageMetadataEnumerateTagsUsingBlock(metadata, null, null, function (path, tag) {
+            calls.push({ path: path, tag: tag });
+            return true;
+        });
+
+        expect(calls.length).toBe(1);
+        expect(calls[0].path instanceof interop.Pointer).toBe(false);
+        expect(calls[0].path instanceof interop.Reference).toBe(false);
+        expect(calls[0].path).toBe("xmp:CreatorTool");
+        expect(String(CGImageMetadataTagCopyName(calls[0].tag))).toBe("CreatorTool");
+    });
+
     it("MethodWithBlockReturn", function () {
         var block = TNSObjCTypes.alloc().init().methodWithBlockScope(4);
         //expect(block.length).toBe(3);
