@@ -138,6 +138,7 @@ void transferOwnershipToNative(napi_env env, napi_value value, id object) {
 
 namespace {
 constexpr const char* kNativePointerProperty = "__ns_native_ptr";
+constexpr const char* kProxyTargetProperty = "__ns_proxy_target";
 
 napi_value findConstructorForClassObject(napi_env env, ObjCBridgeState* bridgeState, Class cls,
                                          napi_value fallback = nullptr) {
@@ -183,6 +184,61 @@ napi_value findConstructorForClassObject(napi_env env, ObjCBridgeState* bridgeSt
   return resolved != nullptr ? resolved : fallback;
 }
 }  // namespace
+
+napi_value JS_releaseNativeCounterpart(napi_env env, napi_callback_info cbinfo) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  napi_get_cb_info(env, cbinfo, &argc, &arg, nullptr, nullptr);
+
+  if (argc != 1) {
+    std::string message =
+        "Actual arguments count: \"" + std::to_string(argc) + "\". Expected: \"1\".";
+    napi_throw_error(env, nullptr, message.c_str());
+    return nullptr;
+  }
+
+  auto bridgeState = ObjCBridgeState::InstanceData(env);
+  if (bridgeState != nullptr && bridgeState->releaseObjectWrapper(env, arg)) {
+    return nullptr;
+  }
+
+  // A wrapper released earlier keeps a null native pointer; releasing it again
+  // is a no-op, as on Android.
+  napi_valuetype argType = napi_undefined;
+  napi_typeof(env, arg, &argType);
+  if (argType == napi_object) {
+    bool hasNativePointer = false;
+    napi_value nativePointer = nullptr;
+    napi_valuetype nativePointerType = napi_undefined;
+    if (napi_has_named_property(env, arg, kNativePointerProperty, &hasNativePointer) == napi_ok &&
+        hasNativePointer &&
+        napi_get_named_property(env, arg, kNativePointerProperty, &nativePointer) == napi_ok &&
+        napi_typeof(env, nativePointer, &nativePointerType) == napi_ok &&
+        nativePointerType == napi_null) {
+      return nullptr;
+    }
+  }
+
+  std::string description = "<value>";
+  napi_value coerced = nullptr;
+  size_t length = 0;
+  if (napi_coerce_to_string(env, arg, &coerced) == napi_ok &&
+      napi_get_value_string_utf8(env, coerced, nullptr, 0, &length) == napi_ok) {
+    description.resize(length + 1);
+    napi_get_value_string_utf8(env, coerced, description.data(), length + 1, &length);
+    description.resize(length);
+  } else {
+    bool hasException = false;
+    napi_value exception = nullptr;
+    if (napi_is_exception_pending(env, &hasException) == napi_ok && hasException) {
+      napi_get_and_clear_last_exception(env, &exception);
+    }
+  }
+
+  std::string message = description + " is an object which is not a native wrapper.";
+  napi_throw_error(env, nullptr, message.c_str());
+  return nullptr;
+}
 
 const char* nativeObjectProxySource = R"(
   (function (object, isArray, transferOwnershipToNative) {
@@ -331,6 +387,10 @@ const char* nativeObjectProxySource = R"(
 
         if (typeof name === 'symbol') {
           return undefined;
+        }
+
+        if (name === "__ns_proxy_target") {
+          return target;
         }
 
         if (isArray) {
@@ -799,6 +859,57 @@ bool ObjCBridgeState::unregisterObjectIfRefMatches(id object, napi_ref ref) noex
 
   removeRecentObjectWrapper(env, object);
   removeCachedHandleObject(env, (void*)object);
+  [object release];
+  return true;
+}
+
+bool ObjCBridgeState::releaseObjectWrapper(napi_env env, napi_value wrapper) {
+  // Pointers, references and class constructors are napi-wrapped too, so the
+  // unwrapped value is only treated as an id once objectRefs vouches for it.
+  void* wrapped = nullptr;
+  napi_ref ref = nullptr;
+  if (napi_unwrap(env, wrapper, &wrapped) == napi_ok && wrapped != nullptr) {
+    std::lock_guard<std::mutex> lock(objectRefsMutex);
+    auto it = objectRefs.find((id)wrapped);
+    if (it != objectRefs.end()) {
+      ref = it->second;
+    }
+  }
+
+  bool isRegisteredWrapper = false;
+  napi_value registered = ref != nullptr ? get_ref_value(env, ref) : nullptr;
+  if (registered == nullptr ||
+      napi_strict_equals(env, registered, wrapper, &isRegisteredWrapper) != napi_ok ||
+      !isRegisteredWrapper) {
+    return false;
+  }
+
+  id object = (id)wrapped;
+  if (takeObjectRef(object, ref) == nullptr) {
+    return false;
+  }
+
+  detachObject(object);
+  objc_setAssociatedObject(object, JSWrapperObjectAssociationKey, nil,
+                           OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+  // Without its wrap and native pointer the wrapper no longer resolves to the
+  // object, so later use throws instead of reaching freed memory.
+  napi_remove_wrap(env, wrapper, nullptr);
+  // Proxied wrappers forward method calls to their target, which carries its
+  // own wrap of the same object.
+  napi_value proxyTarget = nullptr;
+  napi_valuetype proxyTargetType = napi_undefined;
+  if (napi_get_named_property(env, wrapper, kProxyTargetProperty, &proxyTarget) == napi_ok &&
+      napi_typeof(env, proxyTarget, &proxyTargetType) == napi_ok &&
+      proxyTargetType == napi_object) {
+    napi_remove_wrap(env, proxyTarget, nullptr);
+  }
+
+  napi_value releasedPointer = nullptr;
+  napi_get_null(env, &releasedPointer);
+  napi_set_named_property(env, wrapper, kNativePointerProperty, releasedPointer);
+
   [object release];
   return true;
 }

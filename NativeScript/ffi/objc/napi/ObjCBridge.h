@@ -415,6 +415,7 @@ class ObjCBridgeState {
 
   void unregisterObject(id object) noexcept;
   bool unregisterObjectIfRefMatches(id object, napi_ref ref) noexcept;
+  bool releaseObjectWrapper(napi_env env, napi_value wrapper);
   void detachObject(id object) noexcept;
   void trackObject(id object) noexcept;
   bool isTrackedObjectAlive(id object) const noexcept;

@@ -1141,6 +1141,11 @@ NAPI_EXPORT void nativescript_init(void* _env, const char* metadata_path,
   registerInterop(env, global);
   registerInlineFunctions(env);
 
+  napi_value releaseNativeCounterpart;
+  napi_create_function(env, "__releaseNativeCounterpart", NAPI_AUTO_LENGTH,
+                       JS_releaseNativeCounterpart, nullptr, &releaseNativeCounterpart);
+  napi_set_named_property(env, global, "__releaseNativeCounterpart", releaseNativeCounterpart);
+
   bridgeState->registerVarGlobals(env, global);
   bridgeState->registerEnumGlobals(env, global);
   bridgeState->registerStructGlobals(env, global);
