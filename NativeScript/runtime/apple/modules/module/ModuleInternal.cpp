@@ -43,7 +43,10 @@ using namespace std;
 namespace {
 
 // Cache for package.json \"type\" field lookups
-thread_local std::unordered_map<std::string, bool> g_modulePackageTypeCache;
+std::unordered_map<std::string, bool>& ModulePackageTypeCache() {
+  static thread_local auto* cache = new std::unordered_map<std::string, bool>();
+  return *cache;
+}
 
 // Strip shebang line from source code (e.g., #!/usr/bin/env node)
 std::string StripShebang(const std::string& source) {
@@ -353,8 +356,9 @@ std::string FindNearestPackageJson(const std::filesystem::path& startDir) {
 
 // Check if package.json has "type": "module"
 bool IsPackageTypeModule(const std::string& packageJsonPath) {
-  auto cacheIt = g_modulePackageTypeCache.find(packageJsonPath);
-  if (cacheIt != g_modulePackageTypeCache.end()) {
+  auto& cache = ModulePackageTypeCache();
+  auto cacheIt = cache.find(packageJsonPath);
+  if (cacheIt != cache.end()) {
     return cacheIt->second;
   }
 
@@ -384,7 +388,7 @@ bool IsPackageTypeModule(const std::string& packageJsonPath) {
     }
   }
 
-  g_modulePackageTypeCache[packageJsonPath] = isModule;
+  cache[packageJsonPath] = isModule;
   return isModule;
 }
 
@@ -811,7 +815,7 @@ ModuleInternal::ModuleInternal()
 
 void ModuleInternal::DeInit() {
   // Clear the package.json type cache
-  g_modulePackageTypeCache.clear();
+  ModulePackageTypeCache().clear();
 
   if (m_env != nullptr) {
     if (m_requireFunction != nullptr) {

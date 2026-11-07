@@ -21,11 +21,11 @@ Value Runtime::evaluateJavaScript(std::shared_ptr<StringBuffer> buffer,
   v8::ScriptOrigin origin(resourceName);
   v8::Local<v8::Script> script;
   if (!v8::Script::Compile(context(), source, &origin).ToLocal(&script)) {
-    throw JSError(*this, v8engine::currentExceptionMessage(isolate(), tryCatch));
+    throw v8engine::caughtError(*this, tryCatch);
   }
   v8::Local<v8::Value> result;
   if (!script->Run(context()).ToLocal(&result)) {
-    throw JSError(*this, v8engine::currentExceptionMessage(isolate(), tryCatch));
+    throw v8engine::caughtError(*this, tryCatch);
   }
   return Value(*this, result);
 }

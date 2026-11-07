@@ -193,6 +193,15 @@ public final class RuntimeHelper {
                         if (Util.isDebuggableApp(context)) {
                             e.printStackTrace();
                         }
+                    } catch (UnsatisfiedLinkError e) {
+                        // The inspector's JNI entry points are only present in a
+                        // runtime that ships the Chrome DevTools Protocol
+                        // implementation (bindingLayer=napi). The jsi runtime has
+                        // no debugger, so its absence is expected rather than a
+                        // failure to start the app.
+                        if (Util.isDebuggableApp(context)) {
+                            logger.write("Debugger not available in this runtime: " + e.getMessage());
+                        }
                     }
 
                     // if app is in debuggable mode run livesync service

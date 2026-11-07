@@ -230,6 +230,14 @@ public class DummyClass {
 
     public long longField;
 
+    public byte byteField;
+
+    public short shortField;
+
+    public static byte staticByteField;
+
+    public static short staticShortField;
+
     public String getLongAsString(long value) {
         return "" + value;
     }

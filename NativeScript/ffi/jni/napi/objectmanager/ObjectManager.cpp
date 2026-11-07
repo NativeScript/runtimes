@@ -539,12 +539,14 @@ napi_value ObjectManager::HostObjectIndexedGet(napi_env env, napi_value host,
                                                uint32_t index, void *data) {
     auto *proxy = reinterpret_cast<HostObjectProxy *>(data);
     try {
-        // The proxy already knows the java object id + ObjectManager, so resolve
-        // the backing array directly (no locked env->runtime lookup, no host probe).
-        jobject arr = proxy->instanceInfo
-                      ? (jobject) proxy->objectManager->GetJavaObjectByID(
-                              proxy->instanceInfo->JavaObjectID)
-                      : nullptr;
+        // Keep the JNI local reference alive until the array accessor finishes.
+        // GetJavaObjectByID returns an owning JniLocalRef; casting a temporary to
+        // jobject here deletes the local reference before the accessor uses it.
+        JniLocalRef arrayRef = proxy->instanceInfo
+                               ? proxy->objectManager->GetJavaObjectByID(
+                                       proxy->instanceInfo->JavaObjectID)
+                               : JniLocalRef();
+        jobject arr = arrayRef;
         return CallbackHandlers::GetArrayElement(env, host, index, proxy->arraySignature,
                                                  proxy->objectManager, arr);
     } catch (NativeScriptException &e) {
@@ -564,10 +566,11 @@ void ObjectManager::HostObjectIndexedSet(napi_env env, napi_value host,
                                          void *data) {
     auto *proxy = reinterpret_cast<HostObjectProxy *>(data);
     try {
-        jobject arr = proxy->instanceInfo
-                      ? (jobject) proxy->objectManager->GetJavaObjectByID(
-                              proxy->instanceInfo->JavaObjectID)
-                      : nullptr;
+        JniLocalRef arrayRef = proxy->instanceInfo
+                               ? proxy->objectManager->GetJavaObjectByID(
+                                       proxy->instanceInfo->JavaObjectID)
+                               : JniLocalRef();
+        jobject arr = arrayRef;
         CallbackHandlers::SetArrayElement(env, host, index, proxy->arraySignature,
                                           value, proxy->objectManager, arr);
     } catch (NativeScriptException &e) {

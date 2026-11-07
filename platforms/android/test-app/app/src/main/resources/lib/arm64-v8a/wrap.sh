@@ -19,4 +19,4 @@ else
   cmd="$cmd -XjdwpProvider:adbconnection -XjdwpOptions:suspend=n,server=y $@"
 fi
 
-LD_HWASAN=1 exec $cmd
+NS_DISABLE_SIGHANDLER=1 LD_HWASAN=1 exec $cmd

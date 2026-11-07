@@ -27,7 +27,7 @@ Value Runtime::evaluateJavaScript(std::shared_ptr<StringBuffer> buffer,
       JS_Eval(context(), buffer != nullptr ? buffer->data() : "",
               buffer != nullptr ? buffer->size() : 0, sourceURL.c_str(), JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(result)) {
-    throw JSError(*this, "QuickJS script evaluation failed.");
+    throw quickjsengine::caughtError(*this, "QuickJS script evaluation failed.");
   }
   Value value(*this, result);
   JS_FreeValue(context(), result);
