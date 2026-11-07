@@ -26,6 +26,12 @@ class NativeApiStructObjectHostObject final : public HostObject {
     }
   }
 
+  ~NativeApiStructObjectHostObject() override {
+    if (bridge_ != nullptr) {
+      bridge_->releaseOrAbandonValue(backingValue_);
+    }
+  }
+
   void* data() const { return data_; }
   std::shared_ptr<NativeApiAggregateInfo> info() const { return info_; }
   std::shared_ptr<std::vector<unsigned char>> storageOwner() const {
