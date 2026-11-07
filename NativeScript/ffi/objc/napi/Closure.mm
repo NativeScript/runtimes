@@ -15,6 +15,7 @@
 #include "node_api_util.h"
 #include "objc/message.h"
 
+#include <Block.h>
 #include <CoreFoundation/CFRunLoop.h>
 #include <Foundation/Foundation.h>
 #include <dispatch/dispatch.h>
@@ -391,19 +392,191 @@ void invokeInNativeCallbackScope(napi_env env, ClosureInvoker invoke, ffi_cif* c
 }
 
 // A closure invoked on a thread other than the JS thread is forwarded to it
-// through one threadsafe function per env, and the native caller waits for JS
-// to return.
+// through one threadsafe function per env. A void callback whose arguments
+// can all be captured is queued and its native caller returns at once:
+// waiting deadlocks whenever the JS thread is itself blocked on that caller
+// (e.g. a synchronous native call whose completion handler fires on a worker
+// thread). Every other call waits for JS to return.
+//
+// Limits of queued calls:
+// - The queue is unbounded and every pending call keeps its object arguments
+//   retained. When JS falls behind a producer such as a capture stream, the
+//   retained buffers pile up and can exhaust the producer's buffer pool.
+// - Object arguments are retained, not copied. JS sees the state of an object
+//   at the time the call runs, not when it was queued, so native code that
+//   recycles or mutates an object after the callback returns (a reused
+//   buffer, for one) shows JS the later contents.
+// - A queued call has no native caller left to receive an exception. JS errors
+//   still go through the closure uncaught-error handling, and the Objective-C
+//   exception that handling raises is logged.
 struct ForeignThreadCall {
   ClosureInvoker invoke;
   ffi_cif* cif;
   void* ret;
   void** args;
   void* data;
+  bool queued = false;
 
   std::mutex mutex;
   std::condition_variable cv;
   bool done = false;
   NSException* exception = nil;
+};
+
+enum class CapturedArg { Copy, Retain, CopyBlock };
+
+bool isPlainValue(ffi_type* type) {
+  if (type->type == FFI_TYPE_POINTER) {
+    return false;
+  }
+  if (type->type == FFI_TYPE_STRUCT || type->type == FFI_TYPE_COMPLEX) {
+    for (ffi_type** element = type->elements; element != nullptr && *element != nullptr;
+         element++) {
+      if (!isPlainValue(*element)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Only values that stay valid after the native caller returns can be
+// captured; anything that may point into memory the caller owns cannot.
+bool capturedArgHandling(TypeConv* type, ffi_type* ffiType, CapturedArg* handling) {
+  switch (type->kind) {
+    case mdTypeAnyObject:
+    case mdTypeProtocolObject:
+    case mdTypeClassObject:
+    case mdTypeInstanceObject:
+    case mdTypeNSStringObject:
+    case mdTypeNSMutableStringObject:
+      *handling = CapturedArg::Retain;
+      return true;
+    case mdTypeBlock:
+      *handling = CapturedArg::CopyBlock;
+      return true;
+    case mdTypeChar:
+    case mdTypeSInt:
+    case mdTypeSShort:
+    case mdTypeSLong:
+    case mdTypeSInt64:
+    case mdTypeUChar:
+    case mdTypeUInt:
+    case mdTypeUShort:
+    case mdTypeULong:
+    case mdTypeUInt64:
+    case mdTypeFloat:
+    case mdTypeDouble:
+    case mdTypeUInt8:
+    case mdTypeBool:
+    case mdTypeUnichar:
+    case mdTypeF16:
+    case mdTypeUInt128:
+    case mdTypeLongDouble:
+    case mdTypeComplex:
+    case mdTypeVector:
+    case mdTypeExtVector:
+    // Classes and selectors live as long as the process.
+    case mdTypeClass:
+    case mdTypeSelector:
+      *handling = CapturedArg::Copy;
+      return true;
+    case mdTypeStruct:
+      *handling = CapturedArg::Copy;
+      return isPlainValue(ffiType);
+    default:
+      return false;
+  }
+}
+
+// The block literal (argument 0 of a block invoke) has no TypeConv; it is not
+// passed to JS.
+TypeConv* foreignCallArgType(Closure* closure, bool isBlock, unsigned index) {
+  if (isBlock) {
+    if (index == 0) {
+      return nullptr;
+    }
+    index -= 1;
+  }
+  return index < closure->argTypes.size() ? closure->argTypes[index].get() : nullptr;
+}
+
+bool canQueueForeignCall(Closure* closure, bool isBlock, ffi_cif* cif) {
+  // A setter waits, so a getter that follows on the same thread sees the value.
+  if (closure->returnType == nullptr || closure->returnType->kind != mdTypeVoid ||
+      closure->isSetter) {
+    return false;
+  }
+  for (unsigned i = isBlock ? 1 : 0; i < cif->nargs; i++) {
+    TypeConv* type = foreignCallArgType(closure, isBlock, i);
+    CapturedArg handling;
+    if (type == nullptr || !capturedArgHandling(type, cif->arg_types[i], &handling)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct QueuedForeignThreadCall : ForeignThreadCall {
+  Closure* closure = nullptr;
+  std::vector<std::max_align_t> argStorage;
+  std::vector<void*> argValues;
+  std::vector<std::pair<void*, CapturedArg>> ownedArgs;
+  std::max_align_t returnStorage[2];
+
+  QueuedForeignThreadCall(Closure* closure, ClosureInvoker invoke, bool isBlock, ffi_cif* cif,
+                          void* sourceArgs[])
+      : closure(closure) {
+    this->invoke = invoke;
+    this->cif = cif;
+    this->data = closure;
+    this->ret = returnStorage;
+    queued = true;
+    closure->retain();
+
+    const size_t slotSize = sizeof(std::max_align_t);
+    size_t slots = 0;
+    for (unsigned i = 0; i < cif->nargs; i++) {
+      slots += (cif->arg_types[i]->size + slotSize - 1) / slotSize;
+    }
+    argStorage.resize(slots > 0 ? slots : 1);
+    argValues.resize(cif->nargs);
+
+    std::max_align_t* cursor = argStorage.data();
+    for (unsigned i = 0; i < cif->nargs; i++) {
+      size_t size = cif->arg_types[i]->size;
+      memcpy(cursor, sourceArgs[i], size);
+      argValues[i] = cursor;
+
+      TypeConv* type = foreignCallArgType(closure, isBlock, i);
+      CapturedArg handling = CapturedArg::Copy;
+      if (type != nullptr) {
+        capturedArgHandling(type, cif->arg_types[i], &handling);
+      }
+      void** value = (void**)cursor;
+      if (handling == CapturedArg::Retain && *value != nullptr) {
+        CFRetain((CFTypeRef)*value);
+        ownedArgs.emplace_back(*value, handling);
+      } else if (handling == CapturedArg::CopyBlock && *value != nullptr) {
+        *value = Block_copy(*value);
+        ownedArgs.emplace_back(*value, handling);
+      }
+
+      cursor += (size + slotSize - 1) / slotSize;
+    }
+    args = argValues.data();
+  }
+
+  ~QueuedForeignThreadCall() {
+    for (auto& owned : ownedArgs) {
+      if (owned.second == CapturedArg::CopyBlock) {
+        Block_release(owned.first);
+      } else {
+        CFRelease((CFTypeRef)owned.first);
+      }
+    }
+    closure->release();
+  }
 };
 
 std::mutex gForeignThreadDispatchersMutex;
@@ -412,6 +585,7 @@ std::unordered_map<napi_env, napi_threadsafe_function> gForeignThreadDispatchers
 void runForeignThreadCall(napi_env env, napi_value /*jsCallback*/, void* /*context*/, void* data) {
   auto call = static_cast<ForeignThreadCall*>(data);
   bool ran = false;
+  NSException* exception = nil;
   // env is null when the env is torn down with calls still pending.
   if (env != nullptr) {
     // The JS thread of a Node-API host has no autorelease pool of its own.
@@ -419,15 +593,26 @@ void runForeignThreadCall(napi_env env, napi_value /*jsCallback*/, void* /*conte
       @try {
         call->invoke(call->cif, call->ret, call->args, call->data);
         ran = true;
-      } @catch (NSException* exception) {
-        call->exception = [exception retain];
+      } @catch (NSException* caught) {
+        exception = [caught retain];
       }
     }
   }
+
+  if (call->queued) {
+    if (exception != nil) {
+      NSLog(@"Uncaught exception in a JS callback invoked from a background thread: %@",
+            exception);
+      [exception release];
+    }
+    delete static_cast<QueuedForeignThreadCall*>(call);
+    return;
+  }
+
+  call->exception = exception;
   if (!ran && call->cif->rtype->type != FFI_TYPE_VOID) {
     memset(call->ret, 0, call->cif->rtype->size);
   }
-
   {
     std::lock_guard<std::mutex> lock(call->mutex);
     call->done = true;
@@ -440,24 +625,32 @@ void finalizeForeignThreadDispatcher(napi_env /*env*/, void* finalizeData, void*
   gForeignThreadDispatchers.erase(static_cast<napi_env>(finalizeData));
 }
 
-void callFromForeignThread(napi_env env, ClosureInvoker invoke, ffi_cif* cif, void* ret,
-                           void* args[], void* data) {
+bool postForeignThreadCall(napi_env env, ForeignThreadCall* call) {
+  std::lock_guard<std::mutex> lock(gForeignThreadDispatchersMutex);
+  auto it = gForeignThreadDispatchers.find(env);
+  return it != gForeignThreadDispatchers.end() &&
+         napi_call_threadsafe_function(it->second, call, napi_tsfn_blocking) == napi_ok;
+}
+
+void callFromForeignThread(Closure* closure, ClosureInvoker invoke, bool isBlock, ffi_cif* cif,
+                           void* ret, void* args[]) {
+  if (canQueueForeignCall(closure, isBlock, cif)) {
+    auto call = new QueuedForeignThreadCall(closure, invoke, isBlock, cif, args);
+    if (!postForeignThreadCall(closure->env, call)) {
+      delete call;
+    }
+    return;
+  }
+
   ForeignThreadCall call;
   call.invoke = invoke;
   call.cif = cif;
   call.ret = ret;
   call.args = args;
-  call.data = data;
+  call.data = closure;
 
   std::unique_lock<std::mutex> lock(call.mutex);
-  bool posted = false;
-  {
-    std::lock_guard<std::mutex> dispatchersLock(gForeignThreadDispatchersMutex);
-    auto it = gForeignThreadDispatchers.find(env);
-    posted = it != gForeignThreadDispatchers.end() &&
-             napi_call_threadsafe_function(it->second, &call, napi_tsfn_blocking) == napi_ok;
-  }
-  if (!posted) {
+  if (!postForeignThreadCall(closure->env, &call)) {
     lock.unlock();
     if (cif->rtype->type != FFI_TYPE_VOID) {
       memset(ret, 0, cif->rtype->size);
@@ -479,7 +672,7 @@ void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #else
   Closure* closure = (Closure*)data;
   if (std::this_thread::get_id() != closure->jsThreadId) {
-    callFromForeignThread(closure->env, invokeJSMethodCallback, cif, ret, args, data);
+    callFromForeignThread(closure, invokeJSMethodCallback, false, cif, ret, args);
     return;
   }
   invokeInNativeCallbackScope(closure->env, invokeJSMethodCallback, cif, ret, args, data);
@@ -492,7 +685,7 @@ void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #else
   Closure* closure = (Closure*)data;
   if (std::this_thread::get_id() != closure->jsThreadId) {
-    callFromForeignThread(closure->env, invokeJSFunctionCallback, cif, ret, args, data);
+    callFromForeignThread(closure, invokeJSFunctionCallback, false, cif, ret, args);
     return;
   }
   invokeInNativeCallbackScope(closure->env, invokeJSFunctionCallback, cif, ret, args, data);
@@ -565,7 +758,7 @@ void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
 #endif
   } else {
 #ifndef ENABLE_JS_RUNTIME
-    callFromForeignThread(env, invokeJSBlockCallback, cif, ret, args, closure);
+    callFromForeignThread(closure, invokeJSBlockCallback, true, cif, ret, args);
 #else
     auto runloop = closure->jsRunLoop;
     if (runloop == nullptr) {
