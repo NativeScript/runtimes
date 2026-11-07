@@ -468,7 +468,7 @@ function buildTKLiveSyncSimulatorXCFramework() {
     runAndRequireSuccess("xcrun", [
         "--sdk", "iphonesimulator",
         "clang",
-        "-target", "arm64-apple-ios13.0-simulator",
+        "-target", "arm64-apple-ios15.0-simulator",
         "-dynamiclib",
         sourcePath,
         "-install_name", "@rpath/TKLiveSync.framework/TKLiveSync",
@@ -478,7 +478,7 @@ function buildTKLiveSyncSimulatorXCFramework() {
     runAndRequireSuccess("xcrun", [
         "--sdk", "iphonesimulator",
         "clang",
-        "-target", "x86_64-apple-ios13.0-simulator",
+        "-target", "x86_64-apple-ios15.0-simulator",
         "-dynamiclib",
         sourcePath,
         "-install_name", "@rpath/TKLiveSync.framework/TKLiveSync",
