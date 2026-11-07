@@ -131,6 +131,12 @@ bool rethrowNapiNativeCallbackException(
   return true;
 }
 
+void reportNativeCallbackError(napi_env env, napi_value error) {
+  if (!recordNapiNativeCallbackException(env, error)) {
+    NativeScriptException::OnUncaughtError(env, error);
+  }
+}
+
 void Closure::destroyOnOwningThread(Closure* closure) { deleteClosureOnOwningThread(closure); }
 
 inline bool selectorEndsWithErrorParam(SEL selector) {
@@ -205,11 +211,8 @@ inline void JSCallbackInner(Closure* closure, napi_value func, napi_value thisAr
       napi_create_error(env, code, msg, &result);
     }
 
-    if (recordNapiNativeCallbackException(env, result)) {
-      napi_get_undefined(env, &result);
-    } else {
-      NativeScriptException::OnUncaughtError(env, result);
-    }
+    reportNativeCallbackError(env, result);
+    napi_get_undefined(env, &result);
   }
 
   // Even if call was failed and result is just undefined, let's still try to
@@ -221,7 +224,7 @@ inline void JSCallbackInner(Closure* closure, napi_value func, napi_value thisAr
 // Bridge calls from Objective-C to JavaScript.
 // Opposite of what native_call.cc does - but a lot of type conversion logic
 // is reused, just in reverse.
-void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+void invokeJSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
   napi_env env = closure->env;
 
@@ -325,18 +328,15 @@ void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
       napi_create_error(env, code, msg, &result);
     }
 
-    if (recordNapiNativeCallbackException(env, result)) {
-      napi_get_undefined(env, &result);
-    } else {
-      NativeScriptException::OnUncaughtError(env, result);
-    }
+    reportNativeCallbackError(env, result);
+    napi_get_undefined(env, &result);
   }
 
   bool shouldFree;
   closure->returnType->toNative(env, result, ret, &shouldFree, &shouldFree);
 }
 
-void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+void invokeJSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
   napi_env env = closure->env;
 
@@ -362,6 +362,49 @@ void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   }
 
   JSCallbackInner(closure, func, thisArg, argv, cif->nargs, nullptr, ret);
+}
+
+#ifndef ENABLE_JS_RUNTIME
+using ClosureInvoker = void (*)(ffi_cif* cif, void* ret, void* args[], void* data);
+
+struct ClosureInvocation {
+  ClosureInvoker invoke;
+  ffi_cif* cif;
+  void* ret;
+  void** args;
+  void* data;
+};
+
+void runClosureInvocation(void* data) {
+  auto invocation = static_cast<ClosureInvocation*>(data);
+  invocation->invoke(invocation->cif, invocation->ret, invocation->args, invocation->data);
+}
+
+void invokeInNativeCallbackScope(napi_env env, ClosureInvoker invoke, ffi_cif* cif, void* ret,
+                                 void* args[], void* data) {
+  ClosureInvocation invocation{invoke, cif, ret, args, data};
+  if (!NativeCallbackScope::run(env, runClosureInvocation, &invocation) &&
+      cif->rtype->type != FFI_TYPE_VOID) {
+    memset(ret, 0, cif->rtype->size);
+  }
+}
+#endif  // ENABLE_JS_RUNTIME
+
+void JSMethodCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+#ifdef ENABLE_JS_RUNTIME
+  invokeJSMethodCallback(cif, ret, args, data);
+#else
+  invokeInNativeCallbackScope(((Closure*)data)->env, invokeJSMethodCallback, cif, ret, args, data);
+#endif
+}
+
+void JSFunctionCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+#ifdef ENABLE_JS_RUNTIME
+  invokeJSFunctionCallback(cif, ret, args, data);
+#else
+  invokeInNativeCallbackScope(((Closure*)data)->env, invokeJSFunctionCallback, cif, ret, args,
+                              data);
+#endif
 }
 
 struct JSBlockCallContext {
@@ -406,6 +449,20 @@ void Closure::callBlockFromMainThread(napi_env env, napi_value js_cb, void* cont
   }
 }
 
+#ifndef ENABLE_JS_RUNTIME
+void invokeJSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
+  Closure* closure = (Closure*)data;
+  JSBlockCallContext ctx;
+  ctx.cif = cif;
+  ctx.ret = ret;
+  ctx.args = args;
+  ctx.done = false;
+  ctx.useCondvar = false;
+  Closure::callBlockFromMainThread(closure->env, get_ref_value(closure->env, closure->func),
+                                   closure, &ctx);
+}
+#endif  // ENABLE_JS_RUNTIME
+
 void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   Closure* closure = (Closure*)data;
   napi_env env = closure->env;
@@ -431,8 +488,10 @@ void JSBlockCallback(ffi_cif* cif, void* ret, void* args[], void* data) {
   if (currentThreadId == closure->jsThreadId || shouldInvokeCallbackOnNativeCallerThread()) {
 #ifdef ENABLE_JS_RUNTIME
     NativeCallbackScope scope(env);
-#endif
     Closure::callBlockFromMainThread(env, get_ref_value(env, closure->func), closure, &ctx);
+#else
+    invokeInNativeCallbackScope(env, invokeJSBlockCallback, cif, ret, args, closure);
+#endif
   } else {
 #ifndef ENABLE_JS_RUNTIME
     if (!closure->tsfn) {
