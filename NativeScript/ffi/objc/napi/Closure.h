@@ -44,6 +44,11 @@ bool recordNapiNativeCallbackException(napi_env env, napi_value error);
 bool rethrowNapiNativeCallbackException(
     napi_env env, NapiNativeCallbackExceptionCapture& capture);
 
+#ifndef ENABLE_JS_RUNTIME
+// Must run on the JS thread before any closure can be invoked from another one.
+void initForeignThreadCallbacks(napi_env env);
+#endif
+
 class Closure {
  public:
   static void callBlockFromMainThread(napi_env env, napi_value js_cb,
@@ -68,7 +73,6 @@ class Closure {
   bool isSetter = false;
   std::string propertyName;
   SEL selector = nullptr;
-  napi_threadsafe_function tsfn = nullptr;
 
   std::thread::id jsThreadId = std::this_thread::get_id();
   CFRunLoopRef jsRunLoop = CFRunLoopGetCurrent();
