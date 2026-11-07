@@ -8,6 +8,7 @@ namespace nativescript {
 void initProxyFactory(napi_env env, ObjCBridgeState* bridgeState);
 void attachObjectLifecycleAssociation(napi_env env, id object);
 void transferOwnershipToNative(napi_env env, napi_value value, id object);
+napi_value JS_releaseNativeCounterpart(napi_env env, napi_callback_info cbinfo);
 
 }  // namespace nativescript
 
