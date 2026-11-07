@@ -85,7 +85,11 @@ elseif(TARGET_PLATFORM STREQUAL "macos")
   set(LIBFFI_BUILD "macosx-universal")
   set(TARGET_PLATFORM_MACOS TRUE)
   set(SDK_NAME "macosx")
-  set(CMAKE_OSX_ARCHITECTURES "arm64")
+  # Default to arm64, but honor a caller-supplied architecture list so the
+  # framework can also be built for x86_64 (the bundled libffi is universal).
+  if(NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64")
+  endif()
   set(TARGET_PLATFORM_SPEC "macos-arm64_x86_64")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTARGET_PLATFORM_MACOS")
 
