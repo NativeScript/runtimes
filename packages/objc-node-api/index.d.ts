@@ -7,6 +7,14 @@ declare global {
   // deno-lint-ignore ban-types
   function NativeClass(cls: Function): void;
 
+  /**
+   * Releases the native object behind `obj` now instead of when `obj` is
+   * garbage collected. Calling native methods on `obj` afterwards throws.
+   * Releasing an already released wrapper does nothing. Throws if called
+   * with other than one argument or if `obj` is not a native object wrapper.
+   */
+  function __releaseNativeCounterpart(obj: NativeObject): void;
+
   class NativeObject implements interop.PointerObject {
     readonly __brand__: interop.PointerObject["__brand__"];
 

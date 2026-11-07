@@ -703,6 +703,52 @@ describe(module.id, function () {
             expect(() => __releaseNativeCounterpart(undefined)).toThrowError(getNotANativeWrapperRegex(undefined));
         });
 
+        it("throws when the released wrapper is used", function () {
+            if (!isFunction(global.__releaseNativeCounterpart)) {
+                pending("__releaseNativeCounterpart is not available in this runtime.");
+                return;
+            }
+
+            var p = TNSAllocLog.alloc().init();
+            __releaseNativeCounterpart(p);
+
+            expect(() => p.self()).toThrowError(/no native counterpart/);
+        });
+
+        it("does nothing when the wrapper is already released", function () {
+            if (!isFunction(global.__releaseNativeCounterpart)) {
+                pending("__releaseNativeCounterpart is not available in this runtime.");
+                return;
+            }
+
+            var p = TNSAllocLog.alloc().init();
+            __releaseNativeCounterpart(p);
+
+            expect(() => __releaseNativeCounterpart(p)).not.toThrow();
+            expect(TNSGetOutput()).toBe("TNSAllocLog initTNSAllocLog dealloc");
+        });
+
+        it("keeps a js derived instance usable from native code that still retains it", function () {
+            if (!isFunction(global.__releaseNativeCounterpart)) {
+                pending("__releaseNativeCounterpart is not available in this runtime.");
+                return;
+            }
+
+            var P = TNSAllocLog.extend({
+                description: function () {
+                    return "released-derived";
+                }
+            });
+
+            var p = P.alloc().init();
+            var holder = NSMutableArray.alloc().init();
+            holder.addObject(p);
+            __releaseNativeCounterpart(p);
+
+            expect(TNSGetOutput()).toBe("TNSAllocLog init");
+            expect(holder.description).toContain("released-derived");
+        });
+
         // it("sets object to nil", function () {
         //     var arr = NSArray.arrayWithArray([1,2,3]);
         //     expect(arr.count).toBe(3);
