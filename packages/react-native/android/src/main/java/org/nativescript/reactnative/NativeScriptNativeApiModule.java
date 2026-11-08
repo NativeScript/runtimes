@@ -119,12 +119,21 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
     }
 
     @Override
-    public boolean installWorkletRuntime(com.facebook.react.bridge.ReadableMap runtimeHolder,
-                                         String metadataPath) {
+    public boolean installUIRuntime(com.facebook.react.bridge.ReadableMap runtimeHolder,
+                                    com.facebook.react.bridge.ReadableMap schedulerHolder,
+                                    String metadataPath) {
         // Worklet runtimes are separate jsi::Runtimes on separate threads. Each
         // would need its own attach and its own object manager, which the object
         // graph does not yet model on Android; iOS reaches this through
         // NativeApiJsi.mm. Reported honestly rather than silently no-oped.
+        return false;
+    }
+
+    @Override
+    public boolean registerComponent(String name, com.facebook.react.bridge.ReadableMap spec,
+                                     double hookMask, double shouldBeRecycled) {
+        // Native components are hosted by UIKit Fabric views, which have no
+        // Android counterpart yet; defineNativeComponent reports the false.
         return false;
     }
 
@@ -152,15 +161,44 @@ public class NativeScriptNativeApiModule extends NativeScriptNativeApiSpec {
 
     @Override
     public boolean __writeTestMarker(String content) {
+        return writeMarker("nativescript-test-marker.txt", content);
+    }
+
+    @Override
+    public String __readTestMarker() {
+        return readMarker("nativescript-test-marker.txt");
+    }
+
+    // A file of its own, as on iOS: the smoke marker above is rewritten on every
+    // install, which a reload would do before the new JS reads its phase back.
+    @Override
+    public boolean __writeReloadPhaseMarker(String content) {
+        return writeMarker("nativescript-reload-phase-marker.txt", content);
+    }
+
+    @Override
+    public String __readReloadPhaseMarker() {
+        return readMarker("nativescript-reload-phase-marker.txt");
+    }
+
+    private boolean writeMarker(String name, String content) {
         try {
-            File marker = new File(reactContext.getApplicationContext().getFilesDir(),
-                    "nativescript-test-marker.txt");
+            File marker = new File(reactContext.getApplicationContext().getFilesDir(), name);
             try (OutputStream out = new FileOutputStream(marker)) {
                 out.write(content.getBytes("UTF-8"));
             }
             return true;
         } catch (IOException e) {
             return false;
+        }
+    }
+
+    private String readMarker(String name) {
+        File marker = new File(reactContext.getApplicationContext().getFilesDir(), name);
+        try {
+            return marker.exists() ? readAll(marker) : "";
+        } catch (IOException e) {
+            return "";
         }
     }
 
