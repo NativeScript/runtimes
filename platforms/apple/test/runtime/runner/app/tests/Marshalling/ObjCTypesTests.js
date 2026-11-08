@@ -3,6 +3,18 @@ describe(module.id, function () {
         global.process &&
         global.process.versions &&
         global.process.versions.engine === "hermes";
+    const isJSC =
+        global.process &&
+        global.process.versions &&
+        global.process.versions.engine === "jsc";
+
+    // JSC scans the stack conservatively, so a stale slot can keep a block's
+    // function alive for a while; give its poll 10s, past Jasmine's 5s default.
+    let originalTimeout;
+    beforeEach(function () {
+        originalTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
+        jasmine.DEFAULT_TIMEOUT_INTERVAL = 15000;
+    });
 
     function expectWeakRefCollected(ref, done, timeoutMs) {
         if (isHermes) {
@@ -10,7 +22,7 @@ describe(module.id, function () {
             return;
         }
 
-        const deadline = Date.now() + (timeoutMs || 2000);
+        const deadline = Date.now() + (timeoutMs || (isJSC ? 10000 : 2000));
         function poll() {
             gc();
             if (!ref.deref()) {
@@ -32,6 +44,7 @@ describe(module.id, function () {
 
     afterEach(function () {
         TNSClearOutput();
+        jasmine.DEFAULT_TIMEOUT_INTERVAL = originalTimeout;
     });
 
     it("FunctionWithCFTypeRefArgument", function () {
