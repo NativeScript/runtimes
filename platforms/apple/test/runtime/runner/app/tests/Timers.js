@@ -27,6 +27,17 @@ describe("native timer", () => {
   /** @type {global.queueMicrotask} */
   let queueMicrotask = global.__ns__queueMicrotask || global.queueMicrotask;
 
+  // expectWeakRefCleared polls for up to 10s on JSC, past Jasmine's 5s
+  // default, which would otherwise time the spec out before the poll gives up.
+  let originalTimeout;
+  beforeEach(() => {
+    originalTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
+    jasmine.DEFAULT_TIMEOUT_INTERVAL = 15000;
+  });
+  afterEach(() => {
+    jasmine.DEFAULT_TIMEOUT_INTERVAL = originalTimeout;
+  });
+
   function expectWeakRefCleared(ref, done, timeoutMs) {
     const deadline = Date.now() + (timeoutMs || 1000);
 
