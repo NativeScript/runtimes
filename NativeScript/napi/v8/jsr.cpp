@@ -11,6 +11,7 @@
 
 #include "libplatform/libplatform.h"
 #include "v8-fast-api-calls.h"
+#include "v8-module-loader.h"
 
 #ifdef __ANDROID__
 #include "NativeScriptAssert.h"
@@ -262,6 +263,9 @@ napi_status js_free_runtime(jsr_ns_runtime runtime) {
   // the locker has been destroyed.
   {
     v8::Locker locker(jsr->isolate);
+    // The ES module cache holds thread-local Globals per isolate. Release them
+    // now; left to thread exit, they would be reset against a disposed isolate.
+    v8impl::CleanupESModuleSystem(jsr->isolate);
     while (v8::Isolate::GetCurrent() == jsr->isolate) {
       jsr->isolate->Exit();
     }

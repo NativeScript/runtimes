@@ -148,8 +148,26 @@ Runtime::~Runtime() {
         napi_close_handle_scope(env_, globalScope_);
         globalScope_ = nullptr;
       }
+#ifndef TARGET_ENGINE_V8
+      js_free_napi_env(env_);
+#endif
+    }
+#ifdef TARGET_ENGINE_V8
+    {
+      // NapiScope enters env_->context(), a Local that aliases the env's own
+      // persistent slot. Freeing the env destroys that slot, so exiting the
+      // scope afterwards reads a dead handle and V8 aborts with "Cannot exit
+      // non-entered context". Enter a HandleScope-owned copy instead, so the
+      // env's finalizers still run inside the context.
+      v8::Locker locker(env_->isolate);
+      v8::Isolate::Scope isolateScope(env_->isolate);
+      v8::HandleScope handleScope(env_->isolate);
+      v8::Local<v8::Context> context =
+          v8::Local<v8::Context>::New(env_->isolate, env_->context());
+      v8::Context::Scope contextScope(context);
       js_free_napi_env(env_);
     }
+#endif
 
     js_free_runtime(runtime_);
   } else {
