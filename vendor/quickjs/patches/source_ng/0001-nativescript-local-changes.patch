@@ -1,5 +1,5 @@
 diff --git a/quickjs.c b/quickjs.c
-index 9053c26..f224ad5 100644
+index 9053c26..d377977 100644
 --- a/quickjs.c
 +++ b/quickjs.c
 @@ -379,6 +379,7 @@ struct JSRuntime {
@@ -52,7 +52,7 @@ index 9053c26..f224ad5 100644
  static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
                                        JSAtom prop, JSValueConst this_obj,
                                        bool throw_ref_error)
-@@ -9070,6 +9085,11 @@ static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
+@@ -9070,14 +9085,19 @@ static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
      JSProperty *pr;
      JSShapeProperty *prs;
      uint32_t tag;
@@ -64,6 +64,16 @@ index 9053c26..f224ad5 100644
  
      tag = JS_VALUE_GET_TAG(obj);
      if (unlikely(tag != JS_TAG_OBJECT)) {
+         switch(tag) {
+         case JS_TAG_NULL:
+-            return JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of null", prop);
++            return JS_ThrowTypeErrorAtom(ctx, "Cannot read properties of null (reading '%s')", prop);
+         case JS_TAG_UNDEFINED:
+-            return JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of undefined", prop);
++            return JS_ThrowTypeErrorAtom(ctx, "Cannot read properties of undefined (reading '%s')", prop);
+         case JS_TAG_EXCEPTION:
+             return JS_EXCEPTION;
+         case JS_TAG_STRING:
 @@ -9174,14 +9194,27 @@ static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
                  const JSClassExoticMethods *em = ctx->rt->class_array[p->class_id].exotic;
                  if (em) {
@@ -118,6 +128,18 @@ index 9053c26..f224ad5 100644
      if (unlikely(throw_ref_error)) {
          return JS_ThrowReferenceErrorNotDefined(ctx, prop);
      } else {
+@@ -10001,9 +10045,9 @@ static JSValue JS_GetPropertyValue(JSContext *ctx, JSValueConst this_obj,
+         if (unlikely(atom == JS_ATOM_NULL))
+             return JS_EXCEPTION;
+         if (tag == JS_TAG_NULL) {
+-            JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of null", atom);
++            JS_ThrowTypeErrorAtom(ctx, "Cannot read properties of null (reading '%s')", atom);
+         } else {
+-            JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of undefined", atom);
++            JS_ThrowTypeErrorAtom(ctx, "Cannot read properties of undefined (reading '%s')", atom);
+         }
+         JS_FreeAtom(ctx, atom);
+         return JS_EXCEPTION;
 @@ -37877,7 +37921,8 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
      /* Could add a flag to avoid resolution if necessary */
      if (m) {
