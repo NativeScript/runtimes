@@ -1214,6 +1214,7 @@ class NativeApiBridge {
     const uintptr_t runtimeKey = runtimeObjectExpandoKey(runtime);
     {
       std::lock_guard<std::mutex> lock(objectExpandosMutex_);
+      purgeRetiredObjectExpandosLocked(key);
       objectExpandos_[key][property][runtimeKey] =
           std::make_shared<Value>(runtime, value);
       objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
@@ -1224,9 +1225,11 @@ class NativeApiBridge {
     if (native == nullptr) {
       return;
     }
+    const uintptr_t key =
+        normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native));
     std::lock_guard<std::mutex> lock(objectExpandosMutex_);
-    objectExpandoOwnerCounts_[
-        normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native))] += 1;
+    purgeRetiredObjectExpandosLocked(key);
+    objectExpandoOwnerCounts_[key] += 1;
   }
 
   // preserveExpandos keeps the stored values around after the last owner
@@ -1297,7 +1300,9 @@ class NativeApiBridge {
     const size_t slot = nextSlot++ & 7;
     {
       std::lock_guard<std::mutex> lock(objectExpandosMutex_);
-      auto objectIt = objectExpandos_.find(key);
+      auto objectIt = retiredObjectExpandoKeys_.count(key) != 0
+                          ? objectExpandos_.end()
+                          : objectExpandos_.find(key);
       if (objectIt != objectExpandos_.end()) {
         auto propertyIt = objectIt->second.find(property);
         if (propertyIt != objectIt->second.end()) {
@@ -1319,6 +1324,8 @@ class NativeApiBridge {
     return Value(runtime, *storedValue);
   }
 
+  uint64_t instanceId() const { return instanceId_; }
+
   // Erases every runtime's stored values for this native (codex semantics):
   // the native object itself is gone, so no runtime should keep seeing it.
   void forgetObjectExpandos(const void* native) {
@@ -1329,6 +1336,23 @@ class NativeApiBridge {
     {
       std::lock_guard<std::mutex> lock(objectExpandosMutex_);
       objectExpandos_.erase(key);
+      retiredObjectExpandoKeys_.erase(key);
+      objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
+    }
+  }
+
+  // For a native that deallocated while its expandos were preserved. Safe on
+  // any thread: lookups stop seeing them at once, but the stored values are
+  // only destroyed on a runtime thread, when the address is next wrapped or
+  // written to.
+  void retireObjectExpandos(const void* native) {
+    if (native == nullptr) {
+      return;
+    }
+    auto key = normalizeRuntimePointer(reinterpret_cast<uintptr_t>(native));
+    std::lock_guard<std::mutex> lock(objectExpandosMutex_);
+    if (objectExpandos_.count(key) != 0) {
+      retiredObjectExpandoKeys_.insert(key);
       objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
     }
   }
@@ -2461,7 +2485,17 @@ class NativeApiBridge {
           std::unordered_map<uintptr_t, std::shared_ptr<Value>>>>
       objectExpandos_;
   std::unordered_map<uintptr_t, size_t> objectExpandoOwnerCounts_;
+  // Addresses whose expandos belong to a deallocated native; see
+  // retireObjectExpandos.
+  std::unordered_set<uintptr_t> retiredObjectExpandoKeys_;
   std::atomic<uint64_t> objectExpandosGeneration_{1};
+
+  // Callers hold objectExpandosMutex_ and run on a runtime thread.
+  void purgeRetiredObjectExpandosLocked(uintptr_t key) {
+    if (retiredObjectExpandoKeys_.erase(key) != 0) {
+      objectExpandos_.erase(key);
+    }
+  }
   // Identifies this bridge in the thread_local lookup caches. Its address
   // cannot: a bridge allocated where a destroyed one lived would match that
   // one's entries, and the property-getter cache holds raw pointers into it.
