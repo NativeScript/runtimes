@@ -59,7 +59,8 @@ namespace tns {
         CallJavaMethod(napi_env env, napi_value caller, const std::string &className,
                        const std::string &methodName, MetadataEntry *entry, bool isFromInterface,
                        bool isStatic, napi_callback_info info,  size_t argc, napi_value* argv,
-                       ObjectManager *objectManager = nullptr);
+                       ObjectManager *objectManager = nullptr,
+                       bool metadataSignatureIsUnambiguous = false);
 
         static napi_value
         CallJSMethod(napi_env env, JNIEnv *jEnv, napi_value jsObject,jclass claz,
@@ -94,6 +95,22 @@ namespace tns {
         static void CreateGlobalCastFunctions(napi_env env);
 
         static std::vector<std::string> GetTypeMetadata(const std::string &name, int index);
+
+        /*
+         * The two Collect* helpers below define which names take part in a binding.
+         * Content-keyed class names hash exactly these sets, so the static binding
+         * generator has to reproduce them from the bundle byte for byte -- a name
+         * that is collected here but not there (or the reverse) yields two
+         * different class names for one extend() site, which fails at runtime as
+         * LookedUpClassNotFound. Keeping the JNI arrays and the hash on one
+         * implementation is what makes that contract checkable in a single place.
+         */
+        static std::vector<std::string>
+        CollectImplementedInterfaceNames(napi_env env, napi_value implementationObject);
+
+        static std::vector<std::string>
+        CollectMethodOverrideNames(napi_env env, napi_value implementationObject,
+                                   bool functionsOnly);
 
         /*
          * Gets all methods in the implementation object, and packs them in a jobjectArray

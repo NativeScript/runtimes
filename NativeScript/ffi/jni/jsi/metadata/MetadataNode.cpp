@@ -6,6 +6,7 @@
 #include <set>
 #include <cerrno>
 #include <unistd.h>
+#include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
 #include "CallbackHandlers.h"
@@ -16,7 +17,11 @@
 #include "FieldCallbackData.h"
 #include "MetadataBuilder.h"
 #include "ArgsWrapper.h"
+// Only referenced from the module-prologue column adjustment below, which is
+// itself standalone-only -- a guest has no module wrapper to undo.
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
 #include "Util.h"
 #include "GlobalHelpers.h"
 #include "JSONObjectHelper.h"
@@ -545,6 +550,109 @@ string MetadataNode::CreateFullClassName(const std::string &className,
     return fullClassName;
 }
 
+// The compile-time policy, which is also the floor: a build that hard-wires
+// content keying cannot be talked out of it by an app's config.
+static bool ContentKeyedBindingsForcedOn() {
+#if defined(NS_CONTENT_KEYED_BINDINGS)
+    return true;
+#elif defined(NS_JSI_HOST_RUNTIME)
+    // A guest runs inside the embedder's bundle, so no location key computed here
+    // can match one the generator computed from a source tree it never saw.
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Resolved once, before any JS runs. The naming scheme has to match what the
+// static binding generator used for this app, so the value comes from the build
+// that ran the generator (app/package.json -> AppConfig -> Runtime::Init) rather
+// than from anything decided here.
+static bool s_contentKeyedBindings = ContentKeyedBindingsForcedOn();
+
+void MetadataNode::SetContentKeyedBindings(bool enabled) {
+    // Only ever widens: an app may turn content keying on, never off under a
+    // runtime that was built to require it.
+    s_contentKeyedBindings = s_contentKeyedBindings || enabled;
+}
+
+bool MetadataNode::ContentKeyedBindingsEnabled() {
+    return s_contentKeyedBindings;
+}
+
+// A class-name token derived from what the generated binding is actually made
+// of, rather than from where the extend() call happens to sit.
+//
+// The static binding generator writes a class out of exactly three inputs: the
+// base class, the implemented interfaces, and the overridden method names. Two
+// extend() sites that agree on all three produce byte-identical Java, so hashing
+// them is enough to name the class -- and two sites that collide are meant to
+// share, which is why the generator already treats a duplicate file with equal
+// content as a warning rather than an error.
+//
+// Location keys cannot do this once an embedder owns the bundler: the generator
+// reads source coordinates and the runtime reads bundle coordinates. A content
+// key needs no shared coordinate system at all.
+//
+// Sorted, because the runtime's order is JS own-property order and the
+// generator's is source order; the binding treats both sets as unordered.
+// FNV-1a rather than std::hash, which is not stable across implementations and
+// so could not be reproduced by the generator.
+// Package separators and nested-type separators both become '.' -- see the
+// comment in CreateContentKey.
+static string Canonicalize(const string &name) {
+    string canonical = name;
+    canonical = Util::ReplaceAll(canonical, std::string("/"), std::string("."));
+    return Util::ReplaceAll(canonical, std::string("$"), std::string("."));
+}
+
+string MetadataNode::CreateContentKey(const string &baseClassName,
+                                      vector<string> interfaceNames,
+                                      vector<string> methodNames) {
+    // Canonicalized before sorting, not after: '$' and '.' are different bytes,
+    // so sorting the binary form and sorting the dotted form can disagree on
+    // order even once the names themselves match.
+    for (auto &interfaceName: interfaceNames) {
+        interfaceName = Canonicalize(interfaceName);
+    }
+
+    sort(interfaceNames.begin(), interfaceNames.end());
+    sort(methodNames.begin(), methodNames.end());
+
+    // Nested types reach here in their binary form -- `Pack200$Unpacker`, and
+    // `/` for package separators on the interface side. The generator reads the
+    // same names out of JS source, where both are written with a dot and there
+    // is no way to tell a nested type from a package. So the dotted form is the
+    // canonical one for hashing; the JNI arrays that actually load the classes
+    // keep the binary form, which is what Class.forName needs.
+    string canonicalBase = Canonicalize(baseClassName);
+
+    string payload = canonicalBase;
+    payload += "|";
+    for (size_t i = 0; i < interfaceNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += interfaceNames[i];
+    }
+    payload += "|";
+    for (size_t i = 0; i < methodNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += methodNames[i];
+    }
+
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c: payload) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+
+    char buffer[19];
+    snprintf(buffer, sizeof(buffer), "h%016llx", static_cast<unsigned long long>(hash));
+
+    DEBUG_WRITE("CreateContentKey: %s -> %s", payload.c_str(), buffer);
+
+    return string(buffer);
+}
+
 bool MetadataNode::IsValidExtendName(JsRuntime &rt, const JsValue &name) {
     string extendName = ArgConverter::ConvertToString(rt, name);
 
@@ -568,7 +676,12 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
     auto frames = tns::BuildStacktraceFrames(rt, nullptr, 4);
     if (frames.empty()) {
         DEBUG_WRITE("%s", "FRAME IS NULL!");
-        return true;
+        // Reported as a failure, not a success with an empty location. An empty
+        // location makes every unnamed extend() of the same base class produce
+        // the same generated class name, and the second one's overrides then
+        // dispatch to themselves -- a StackOverflowError far from the cause.
+        // The caller turns this into "No name specified for extend at location".
+        return false;
     }
 
     tns::JsStacktraceFrame *frame;
@@ -590,10 +703,10 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
     if (srcFileName == "<embedded>" || srcFileName == "<input>" || srcFileName == "JavaScript") {
         fullPathToFile = "script";
     } else {
-        string hardcodedPathToSkip = Constants::APP_ROOT_FOLDER_PATH;
-        int startIndex = hardcodedPathToSkip.length();
-        int strToTakeLen = srcFileName.length() - startIndex - 3;
-        fullPathToFile = srcFileName.substr(startIndex, strToTakeLen);
+        // The app-root-relative substring this used to compute was assigned and
+        // then immediately overwritten by the full name below, so it was already
+        // dead -- and it throws for any path that does not start with the app
+        // root, which is every path a guest sees.
         fullPathToFile = srcFileName;
         replace(fullPathToFile.begin(), fullPathToFile.end(), '/', '_');
         replace(fullPathToFile.begin(), fullPathToFile.end(), '.', '_');
@@ -619,6 +732,14 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
         return false;
     }
     int column = frame->col;
+
+    // Both adjustments below exist to undo the runtime's own module wrapper, so
+    // that a call site's key matches what the static binding generator computed
+    // from the unwrapped source. A guest has no such wrapper -- the embedder's
+    // bundler (Metro) owns module wrapping and the static binding generator
+    // never saw the source -- so applying them here only corrupts the key, and
+    // two different extend() sites can collide onto one generated class.
+#if !defined(NS_JSI_HOST_RUNTIME)
     if (frame->line == 1) {
         column -= ModuleInternal::MODULE_PROLOGUE_LENGTH;
     }
@@ -626,6 +747,7 @@ MetadataNode::GetExtendLocation(JsRuntime &rt, string &extendLocation, bool isTy
 #ifdef TARGET_ENGINE_HERMES
     column = column - 6;
 #endif
+#endif  // !NS_JSI_HOST_RUNTIME
 
     extendLocationStream << fullPathToFile << "_" << frame->line << "_" << column << "_";
     extendLocation = extendLocationStream.str();
@@ -765,6 +887,13 @@ void MetadataNode::CreateTopLevelNamespaces(JsRuntime &rt) {
             // if the namespaces matches a javascript keyword, prefix it with $ to avoid TypeScript and JavaScript errors
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
+            }
+            if (global.hasProperty(rt, nameSpace.c_str())) {
+                string fallback = "$" + nameSpace;
+                __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
+                                    nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
+                nameSpace = fallback;
             }
             global.setProperty(rt, nameSpace.c_str(), packageObj);
         }
@@ -1180,6 +1309,12 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         callbackData->candidates.push_back(std::move(entry));
         callbackData->objectManager = objectManager;
     }
+    for (const auto &extension: collectedExtensionMethods) {
+        if (std::find(instanceMethodData.begin(), instanceMethodData.end(), extension.second) ==
+            instanceMethodData.end()) {
+            cache->methodCallbackData.push_back(extension.second);
+        }
+    }
     auto instanceFieldCount = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
     for (auto i = 0; i < instanceFieldCount; i++) {
@@ -1265,6 +1400,7 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         auto &methodName = entry.getName();
         if (methodName != lastMethodName) {
             callbackData = new MethodCallbackData(this);
+            cache->methodCallbackData.push_back(callbackData);
             auto method = JsFunction::createFromHostFunction(
                     rt, engine::PropNameID::forAscii(rt, methodName), 0,
                     [callbackData](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
@@ -1397,8 +1533,8 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetInstanceMembers
         entry.paramCount = paramCount;
         entry.isStatic = false;
         if (chKind == 'M') {
+            entry.type = NodeType::Method;
             if (entry.name != lastMethodName) {
-                entry.type = NodeType::Method;
                 callbackData = new MethodCallbackData(this);
                 instanceMethodData.push_back(callbackData);
                 instanceMethodsCallbackData.push_back(callbackData);
@@ -1831,11 +1967,28 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
             }
         }
 
+        auto useContentKey = false;
+
         if (hasDot) {
             extendName = JsValue(rt, args[0]);
             implementationObject = JsValue(rt, args[1]);
         } else {
-            bool validExtend = GetExtendLocation(rt, extendLocation, isTypeScriptExtend);
+            useContentKey = ContentKeyedBindingsEnabled();
+
+            // Skipped outright when content keying is on: this walks the stack
+            // purely to build a name, on every class creation.
+            bool validExtend =
+                    useContentKey || GetExtendLocation(rt, extendLocation, isTypeScriptExtend);
+
+            if (!validExtend) {
+                // No usable call site -- an anonymous frame, or a bundle the
+                // generator never indexed. Naming by content still works here,
+                // where before this was fatal.
+                useContentKey = true;
+                validExtend = true;
+                extendLocation.clear();
+            }
+
             extendName = js_util::to_js_string(rt, "");
             auto validArgs = ValidateExtendArguments(rt, argc, args, validExtend,
                                                      extendLocation,
@@ -1846,11 +1999,35 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
             }
         }
 
-
-        string extendNameAndLocation =
-                extendLocation + ArgConverter::ConvertToString(rt, extendName);
-        string fullClassName;
         string baseClassName = node->m_name;
+
+        // An explicitly named extend keeps its name in front of the hash. The
+        // generator reads the same name out of the bundle, so the two still
+        // agree, and it buys back two things the bare hash costs: a class name
+        // that says what it is in a stack trace, and uniqueness for the classes
+        // that need it. Anything Java instantiates by name -- an Activity, a
+        // Fragment, a Worker, anything reached by reflection -- cannot share a
+        // generated class, because the runtime has only the class name to find
+        // the JS implementation with. Naming such a class is what makes it
+        // unique; unnamed extends stay shared, which is the common case and the
+        // point of the scheme.
+        string extendNameString = ArgConverter::ConvertToString(rt, extendName);
+        string extendNameAndLocation;
+
+        if (useContentKey) {
+            string contentKey =
+                    CreateContentKey(baseClassName,
+                                     CallbackHandlers::CollectImplementedInterfaceNames(
+                                             rt, implementationObject),
+                                     CallbackHandlers::CollectMethodOverrideNames(
+                                             rt, implementationObject, /* functionsOnly */ false));
+            extendNameAndLocation =
+                    extendNameString.empty() ? contentKey : extendNameString + "_" + contentKey;
+        } else {
+            extendNameAndLocation = extendLocation + extendNameString;
+        }
+
+        string fullClassName;
         if (!hasDot) {
             fullClassName = TNS_PREFIX + CreateFullClassName(baseClassName, extendNameAndLocation);
         } else {
@@ -1863,12 +2040,43 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
                                                     implementationObject, isInterface);
         auto fullExtendedName = CallbackHandlers::ResolveClassName(rt, clazz);
 
-        auto cachedData = GetCachedExtendedClassData(rt, fullExtendedName);
+        auto implObject = implementationObject.asObjectBorrowed(rt);
+
+        // Which JS constructor to reuse is a different question from which Java
+        // class to load, and only the second one has to agree with the static
+        // binding generator.
+        //
+        // Two extend() calls with the same base, interfaces and overridden names
+        // share one generated Java class -- the Java is identical, and sharing it
+        // is the point. Their JS bodies are not identical, though, so caching the
+        // constructor under the class name would hand the second call the first
+        // call's implementation. Under content keying that is not a rare
+        // collision but the common case, so the constructor is cached per
+        // implementation object instead.
+        // The stamp identifies the object, not the class it was used to build:
+        // combining it with fullExtendedName keeps a second extend() of the same
+        // object against a *different* base a cache miss, so it still reaches the
+        // "used to extend another class" check below instead of silently
+        // returning the first class.
+        string ctorCacheKey = fullExtendedName;
+        if (useContentKey) {
+            auto stamped = implObject.getProperty(rt, EXTEND_CTOR_CACHE_KEY);
+            string implObjectId;
+            if (stamped.isString()) {
+                implObjectId = stamped.asString(rt).utf8(rt);
+            } else {
+                static std::atomic<uint64_t> s_implObjectCounter{0};
+                implObjectId = std::to_string(s_implObjectCounter.fetch_add(1));
+                implObject.setProperty(rt, EXTEND_CTOR_CACHE_KEY,
+                                       ArgConverter::convertToJsString(rt, implObjectId));
+            }
+            ctorCacheKey = fullExtendedName + "#" + implObjectId;
+        }
+
+        auto cachedData = GetCachedExtendedClassData(rt, ctorCacheKey);
         if (!js_util::is_null_or_undefined(cachedData.extendedCtorFunction)) {
             return JsValue(rt, cachedData.extendedCtorFunction);
         }
-
-        auto implObject = implementationObject.asObjectBorrowed(rt);
         auto implementationObjectName = implObject.getProperty(rt, CLASS_IMPLEMENTATION_OBJECT);
 
         if (js_util::is_null_or_undefined(implementationObjectName)) {
@@ -1920,10 +2128,31 @@ JsValue MetadataNode::ExtendMethodCallback(JsRuntime &rt, const JsValue &thisVal
 
         s_name2NodeCache.emplace(fullExtendedName, node);
 
-        ExtendedClassCacheData cacheData(JsValue(rt, extendFuncCtorValue), fullExtendedName,
-                                         node);
         auto cache = GetMetadataNodeCache(rt);
-        cache->ExtendedCtorFuncCache.emplace(fullExtendedName, std::move(cacheData));
+
+        // Two entries, because there are two ways in.
+        //
+        // From JS, extend() asks "have I already built a constructor for this
+        // implementation object?" -- keyed per object, so two identical-looking
+        // extends keep their own bodies.
+        //
+        // From Java, createJSInstanceNative has only the class name of the
+        // instance it is wrapping (CreateExtendedJSWrapper), so the class name
+        // has to resolve too. emplace leaves an existing entry alone, so for a
+        // shared generated class the first implementation registered is the one
+        // Java-side instantiation finds. That is unambiguous for a named extend
+        // -- naming it makes the class unique -- and inherently ambiguous for an
+        // unnamed one, which is why anything Java constructs by name should be
+        // named.
+        ExtendedClassCacheData byImplObject(JsValue(rt, extendFuncCtorValue), fullExtendedName,
+                                            node);
+        cache->ExtendedCtorFuncCache.emplace(ctorCacheKey, std::move(byImplObject));
+
+        if (ctorCacheKey != fullExtendedName) {
+            ExtendedClassCacheData byClassName(JsValue(rt, extendFuncCtorValue), fullExtendedName,
+                                               node);
+            cache->ExtendedCtorFuncCache.emplace(fullExtendedName, std::move(byClassName));
+        }
 
         return extendFuncCtorValue;
     });
@@ -1974,6 +2203,8 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
 
         auto callbackData = initialCallbackData;
 
+        MethodCallbackData *selectedCallbackData = nullptr;
+        std::vector<MetadataEntry *> arityCandidates;
         string *className;
         auto &first = callbackData->candidates.front();
         auto &methodName = first.getName();
@@ -1985,6 +2216,8 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
             !first.isExtensionFunction &&
             first.getParamCount() == argc) {
             className = &callbackData->node->m_name;
+            selectedCallbackData = callbackData;
+            arityCandidates.push_back(&first);
             entry = &first;
         }
 
@@ -1993,27 +2226,29 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
 
             className = &callbackData->node->m_name;
 
-            // Iterates through all methods and finds the best match based on the number of arguments
-            auto found = false;
+            arityCandidates.clear();
             for (auto &c: candidates) {
-                found = (!c.isExtensionFunction && c.getParamCount() == argc) ||
-                        (c.isExtensionFunction && c.getParamCount() == argc + 1);
-                if (found) {
-                    if (c.isExtensionFunction) {
-                        className = &c.getDeclaringType();
-                    }
-                    entry = &c;
-                    DEBUG_WRITE("MetaDataEntry Method %s's signature is: %s",
-                                entry->getName().c_str(),
-                                entry->getSig().c_str());
-                    break;
+                if ((!c.isExtensionFunction && c.getParamCount() == argc) ||
+                    (c.isExtensionFunction && c.getParamCount() == argc + 1)) {
+                    arityCandidates.push_back(&c);
                 }
             }
 
-            // Iterates through the parent class's methods to find a good match
-            if (!found) {
+            if (!arityCandidates.empty()) {
+                selectedCallbackData = callbackData;
+                if (arityCandidates.front()->isExtensionFunction) {
+                    className = &arityCandidates.front()->getDeclaringType();
+                }
+                break;
+            } else {
                 callbackData = callbackData->parent;
             }
+        }
+
+        if (arityCandidates.size() == 1) {
+            entry = arityCandidates.front();
+        } else if (arityCandidates.size() > 1) {
+            entry = arityCandidates.front();
         }
 
 
@@ -2034,9 +2269,237 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
             initialCallbackData->objectManager =
                     Runtime::GetRuntime(rt)->GetObjectManager();
         }
+
+        size_t metadataMatches = 0;
+        MetadataEntry *metadataMatch = nullptr;
+        bool metadataSignatureIsUnambiguous = false;
+        bool forceReflectionFallback = false;
+        bool preserveGenericObject = false;
+        bool hasObjectCandidate = false;
+        bool hasSpecificInterfaceCandidate = false;
+        bool hasExactStringCandidate = false;
+        for (auto *candidate : arityCandidates) {
+            const auto signature = candidate->getSig();
+            hasObjectCandidate |= signature.find("Ljava/lang/Object;") != std::string::npos;
+            hasSpecificInterfaceCandidate |= signature.find("Ljava/io/Serializable;") != std::string::npos ||
+                                            signature.find("Ljava/lang/CharSequence;") != std::string::npos;
+            hasExactStringCandidate |= signature.find("(Ljava/lang/String;") == 0;
+        }
+        preserveGenericObject = hasObjectCandidate && hasSpecificInterfaceCandidate && !hasExactStringCandidate;
+        struct MetadataCandidateMatch {
+            MetadataEntry *entry;
+            std::vector<jclass> parameterClasses;
+        };
+        std::vector<MetadataCandidateMatch> metadataCandidateMatches;
+        JEnv metadataEnv;
+        bool hasNullArgument = false;
+        for (size_t i = 0; i < argc; i++) {
+            if (args[i].isNull() || args[i].isUndefined() ||
+                (args[i].isObject() && MetadataNode::GetNullNode(rt, args[i]) != nullptr)) {
+                hasNullArgument = true;
+                break;
+            }
+        }
+        constexpr int kMetadataMismatch = -1;
+        constexpr int kMetadataUnknown = 0;
+        constexpr int kMetadataMatch = 1;
+        auto metadataTypesMatch = [&](MetadataEntry &candidate,
+                                      std::vector<jclass> &parameterClasses) -> int {
+            const auto signature = candidate.getSig();
+            if (signature.empty() || signature[0] != '(') {
+                return kMetadataMismatch;
+            }
+
+            std::vector<std::string> parameterTypes;
+            size_t index = 1;
+            while (index < signature.size() && signature[index] != ')') {
+                const size_t start = index;
+                if (signature[index] == 'L') {
+                    const auto end = signature.find(';', index);
+                    if (end == std::string::npos) return kMetadataMismatch;
+                    index = end + 1;
+                } else if (signature[index] == '[') {
+                    do {
+                        index++;
+                    } while (index < signature.size() && signature[index] == '[');
+                    if (index < signature.size() && signature[index] == 'L') {
+                        const auto end = signature.find(';', index);
+                        if (end == std::string::npos) return kMetadataMismatch;
+                        index = end + 1;
+                    } else if (index >= signature.size()) {
+                        return kMetadataMismatch;
+                    } else {
+                        index++;
+                    }
+                } else {
+                    index++;
+                }
+                parameterTypes.emplace_back(signature.substr(start, index - start));
+            }
+
+            if (candidate.isExtensionFunction) {
+                if (parameterTypes.empty()) return kMetadataMismatch;
+                parameterTypes.erase(parameterTypes.begin());
+            }
+            if (index >= signature.size() || parameterTypes.size() != argc) return kMetadataMismatch;
+
+            parameterClasses.assign(argc, nullptr);
+            bool hasUnknownArgument = false;
+            for (size_t i = 0; i < argc; i++) {
+                const auto &parameterType = parameterTypes[i];
+                if (args[i].isNull() || args[i].isUndefined()) {
+                    hasUnknownArgument = true;
+                    continue;
+                }
+                if (parameterType[0] == 'L' || parameterType[0] == '[') {
+                    auto expectedName = parameterType;
+                    if (expectedName[0] == 'L') {
+                        expectedName = expectedName.substr(1, expectedName.size() - 2);
+                    }
+                    auto expectedClass = metadataEnv.FindClass(expectedName);
+                    if (expectedClass == nullptr) {
+                        metadataEnv.ExceptionClear();
+                        return kMetadataMismatch;
+                    }
+                    parameterClasses[i] = expectedClass;
+                    if (args[i].isString()) {
+                        if (expectedName != "java/lang/String") return kMetadataMismatch;
+                        auto stringClass = metadataEnv.FindClass("java/lang/String");
+                        if (stringClass == nullptr) {
+                            metadataEnv.ExceptionClear();
+                            return kMetadataMismatch;
+                        }
+                        if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) return kMetadataMismatch;
+                    } else {
+                        if (!args[i].isObject()) return kMetadataMismatch;
+                        if (MetadataNode::GetNullNode(rt, args[i]) != nullptr) return kMetadataMismatch;
+                        auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(args[i]);
+                        if (actualObject.IsNull()) {
+                            // JS array for an array parameter, or a JS value
+                            // without a Java peer: only the lenient
+                            // JsArgConverter can marshal these.
+                            hasUnknownArgument = true;
+                            continue;
+                        }
+                        if (parameterType[0] == '[' && expectedName == "[Ljava/lang/Object;" &&
+                            ObjectManager::GetClassName((jobject) actualObject) != expectedName) return kMetadataMismatch;
+                        bool hasSerializableCandidate = false;
+                        for (auto *arityCandidate : arityCandidates) {
+                            if (arityCandidate->getSig().find("Ljava/io/Serializable;") != std::string::npos) {
+                                hasSerializableCandidate = true;
+                                break;
+                            }
+                        }
+                        if (expectedName == "java/lang/Object" && !hasSerializableCandidate) return kMetadataMismatch;
+                        if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return kMetadataMismatch;
+                    }
+                } else if (parameterType[0] == 'Z') {
+                    if (!args[i].isBool()) return kMetadataMismatch;
+                } else if (!args[i].isNumber() ||
+                           (parameterType[0] != 'B' && parameterType[0] != 'C' &&
+                            parameterType[0] != 'S' && parameterType[0] != 'I' &&
+                            parameterType[0] != 'J' && parameterType[0] != 'F' &&
+                            parameterType[0] != 'D')) {
+                    return kMetadataMismatch;
+                }
+            }
+            return hasUnknownArgument ? kMetadataUnknown : kMetadataMatch;
+        };
+        if (!hasNullArgument && selectedCallbackData != nullptr && arityCandidates.size() > 1 && !preserveGenericObject) {
+            for (auto *candidate : arityCandidates) {
+                if (candidate->isStatic != first.isStatic) continue;
+                std::vector<jclass> parameterClasses;
+                if (metadataTypesMatch(*candidate, parameterClasses) == kMetadataMatch) {
+                    metadataCandidateMatches.push_back({candidate, std::move(parameterClasses)});
+                }
+            }
+            for (size_t i = 0; i < metadataCandidateMatches.size(); i++) {
+                bool dominated = false;
+                for (size_t j = 0; j < metadataCandidateMatches.size(); j++) {
+                    if (i == j) continue;
+                    const auto &candidate = metadataCandidateMatches[i];
+                    const auto &other = metadataCandidateMatches[j];
+                    for (size_t parameter = 0; parameter < argc; parameter++) {
+                        auto candidateClass = candidate.parameterClasses[parameter];
+                        auto otherClass = other.parameterClasses[parameter];
+                        if (candidateClass == nullptr || otherClass == nullptr) {
+                            if (candidate.entry->getSig() != other.entry->getSig()) break;
+                            continue;
+                        }
+                        if (metadataEnv.IsAssignableFrom(candidateClass, otherClass) == JNI_TRUE &&
+                            metadataEnv.IsAssignableFrom(otherClass, candidateClass) != JNI_TRUE) {
+                            dominated = true;
+                            break;
+                        }
+                    }
+                    if (dominated) break;
+                }
+                if (!dominated) {
+                    metadataMatches++;
+                    metadataMatch = metadataCandidateMatches[i].entry;
+                }
+            }
+            metadataSignatureIsUnambiguous = metadataMatches == 1 && metadataMatch != nullptr;
+            for (const auto &candidate : metadataCandidateMatches) {
+                hasExactStringCandidate |= candidate.entry->getSig().find("(Ljava/lang/String;") == 0;
+            }
+            if (metadataCandidateMatches.size() > 1 && !hasExactStringCandidate) {
+                metadataSignatureIsUnambiguous = false;
+                metadataMatch = nullptr;
+                forceReflectionFallback = false;
+            }
+            if (!metadataSignatureIsUnambiguous && !metadataCandidateMatches.empty()) {
+                for (const auto &candidate : metadataCandidateMatches) {
+                    const auto signature = candidate.entry->getSig();
+                    const auto closeParen = signature.find(')');
+                    if (closeParen != std::string::npos && closeParen > 1 && signature[1] == '[') {
+                        forceReflectionFallback = true;
+                        break;
+                    }
+                    if (closeParen != std::string::npos && closeParen > 1 &&
+                        signature[1] != 'L' && signature[1] != 'Z') {
+                        forceReflectionFallback = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!hasNullArgument && entry != nullptr && !entry->isExtensionFunction && arityCandidates.size() == 1) {
+            std::vector<jclass> parameterClasses;
+            const int compatibility = metadataTypesMatch(*entry, parameterClasses);
+            if (compatibility == kMetadataMatch) {
+                metadataMatch = entry;
+                metadataSignatureIsUnambiguous = true;
+            } else if (compatibility == kMetadataMismatch) {
+                // Provable mismatch against the only metadata candidate: the
+                // metadata may be stale, so let reflection resolve it.
+                const auto signature = entry->getSig();
+                if (entry->isStatic || signature.find("Ljava/lang/Object;") == std::string::npos) {
+                    entry = nullptr;
+                }
+            }
+            // kMetadataUnknown: keep the entry (direct call via JsArgConverter
+            // when generator-resolved, reflection otherwise). Reflection can't
+            // marshal JS arrays, so demoting here breaks valid calls.
+        }
+        if (!hasNullArgument && entry != nullptr && entry->isExtensionFunction) {
+            metadataMatch = entry;
+            metadataSignatureIsUnambiguous = true;
+        }
+        if (metadataSignatureIsUnambiguous) {
+            entry = metadataMatch;
+        } else if (forceReflectionFallback) {
+            entry = nullptr;
+        }
+        const bool selectedIsStatic = entry != nullptr
+                                      ? entry->isStatic
+                                      : (arityCandidates.size() == 1
+                                         ? arityCandidates.front()->isStatic
+                                         : first.isStatic);
         return CallbackHandlers::CallJavaMethod(rt, thisVal, *className, methodName, entry,
-                                                isFromInterface, first.isStatic, false,
-                                                args, argc, initialCallbackData->objectManager);
+                                                isFromInterface, selectedIsStatic, false,
+                                                args, argc, initialCallbackData->objectManager,
+                                                metadataSignatureIsUnambiguous);
     });
 }
 
@@ -2102,6 +2565,7 @@ void MetadataNode::SetMissingBaseMethods(
 
             if (callbackData == nullptr) {
                 callbackData = new MethodCallbackData(this);
+                GetMetadataNodeCache(rt)->methodCallbackData.push_back(callbackData);
                 auto proto = constructor.getPropertyAsObject(rt, "prototype");
                 auto method = JsFunction::createFromHostFunction(
                         rt, engine::PropNameID::forAscii(rt, methodName), 0,
@@ -2128,6 +2592,11 @@ void MetadataNode::SetMissingBaseMethods(
 }
 
 void MetadataNode::BuildMetadata(const std::string &filesPath) {
+    // Once per process: the static node caches point into this tree, and it
+    // outlives any one main runtime.
+    if (s_metadataReader.GetRoot() != nullptr) {
+        return;
+    }
     s_metadataReader = MetadataBuilder::BuildMetadata(filesPath);
 }
 
@@ -2157,6 +2626,9 @@ void MetadataNode::onDisposeRuntime(JsRuntime &rt) {
                 delete entry;
             }
             for (const auto &entry: it->extendedClassCallbackData) {
+                delete entry;
+            }
+            for (const auto &entry: it->methodCallbackData) {
                 delete entry;
             }
         }

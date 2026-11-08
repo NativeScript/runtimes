@@ -592,3 +592,162 @@ missing, writes
 `nativescript.react-native.json`, and warns when the app is not configured for
 Hermes and the New Architecture. The command is intentionally conservative and
 does not make destructive native project edits.
+
+## Android
+
+The same package runs on Android. Where iOS gives you Objective-C and UIKit,
+Android gives you Java and the Android SDK — plus every library your app
+depends on, because the metadata is generated from your app's own classpath.
+
+```ts
+import NativeScriptNativeApi from "@nativescript/react-native/src/NativeScriptNativeApi";
+
+NativeScriptNativeApi.install("");
+
+const now = java.lang.System.currentTimeMillis();
+const sdk = android.os.Build.VERSION.SDK_INT;
+```
+
+### How it works
+
+The runtime does not bring a JavaScript engine. It binds to the
+`jsi::Runtime` React Native already created, which is why the same build works
+whether your app runs Hermes or JSC. The Android module compiles from source in
+your app the way every React Native module with C++ does — `jsi::Runtime` is an
+abstract C++ class whose layout changes between React Native versions, so a
+prebuilt binary could not be safe across them.
+
+### Setup
+
+`npx nativescript-rn configure` adds the Gradle script and the typings entries.
+To do it by hand, in `android/app/build.gradle`, after the React plugin:
+
+```groovy
+apply from: "../../node_modules/@nativescript/react-native/android/nativescript.gradle"
+```
+
+That adds two things to your build:
+
+* **Metadata** — a description of every class on the app's resolved classpath,
+  generated into the APK's assets on every build. This is what makes
+  `android.widget.Toast` and any third-party library resolvable from JavaScript.
+  `whitelist.mdg` / `blacklist.mdg` next to `android/app/build.gradle` filter it,
+  with the same format the NativeScript CLI uses.
+* **TypeScript declarations** — off by default because they take a while:
+
+  ```bash
+  cd android && ./gradlew generateNativeScriptTypingsDebug -PnsGenerateTypings=true
+  ```
+
+  which writes `types/android/` and, with `configure` having run, is already
+  referenced from `tsconfig.json`.
+
+### Extending Java classes
+
+Every class that extends a native class carries `@NativeClass`:
+
+```ts
+import { NativeClass } from "@nativescript/react-native";
+
+@NativeClass()
+class Ticker extends java.lang.Object {
+  run() {
+    console.log("tick");
+  }
+}
+```
+
+`@NativeClass` is a plain runtime decorator. It reads nothing at build time and
+behaves identically under Babel, SWC or tsc, in either the legacy or the TC39
+decorator dialect. It is not optional: `class X extends java.util.ArrayList {}`
+on its own produces a class whose overrides resolve in JavaScript but which Java
+still sees as an unmodified `ArrayList`. The decorator is what generates the
+real Java subclass, so that Java calling `size()` reaches your implementation.
+
+A JavaScript class has one base, so several interfaces are declared on the
+decorator:
+
+```ts
+@NativeClass({
+  interfaces: [java.lang.Runnable, java.util.concurrent.Callable],
+})
+class Job extends java.lang.Object {
+  run() {}
+  call() {
+    return new java.lang.String("done");
+  }
+}
+```
+
+Decorators are *syntax*, so your bundler has to parse them — that means
+`@babel/plugin-proposal-decorators` (or the SWC equivalent) in your Babel
+config. That is a standard plugin, not a NativeScript-specific transform.
+
+#### Naming a class
+
+`@NativeClass()` on its own generates the Java class on the device. The class is
+named after what it contains — its base class, its interfaces, and the names it
+overrides — rather than after the source position of the call, because a guest
+runs inside React Native's bundle and no source position computed here would
+match one a build-time tool computed from your source tree.
+
+One consequence is worth knowing: two classes that extend the same type, declare
+the same interfaces and override the same method names **share one generated
+Java class**. That is safe, because the generated Java is identical in both
+cases and only forwards into JavaScript — each instance still runs its own
+implementation.
+
+It stops being safe when *Java* constructs the class by name, because then the
+class name is all the runtime has to find the JavaScript side with. So:
+
+> **Name any class that Java instantiates for you** — an `Activity`, a
+> `Fragment`, a `Service`, a `Worker`, anything reached by reflection or named
+> in `AndroidManifest.xml`. Naming makes it unique. Classes you construct
+> yourself with `new` never need it.
+
+A class that has to exist *before* the app runs — one named in
+`AndroidManifest.xml`, for instance — needs a fixed name instead:
+
+```ts
+import { JavaProxy } from "@nativescript/react-native";
+
+@JavaProxy("com.example.Ticker")
+@NativeClass()
+class Ticker extends java.lang.Object {}
+```
+
+A fully-qualified name is taken verbatim by the runtime, so it is reproducible
+at build time. The runtime then *looks the class up* rather than generating it,
+which means a named class only resolves once the static binding generator has
+emitted it — see the note below.
+
+> **Release builds only.** The generator reads a bundle, so it needs one on
+> disk. On a release build the Gradle script bundles your JavaScript a second
+> time -- separately from the one that ships, and with classes preserved -- and
+> pre-generates the Java from that. In debug there is no bundle to read: Metro
+> serves it over HTTP. Unnamed `@NativeClass()` classes are generated on the
+> device and work in both, but `@JavaProxy` names resolve only in release.
+
+If you would rather not use decorators, the runtime API is always available and
+needs nothing from the bundler:
+
+```ts
+const Ticker = java.lang.Object.extend("Ticker", { run() {} });
+const listener = new android.view.View.OnClickListener({ onClick(v) {} });
+```
+
+### Threads
+
+React Native owns the JavaScript thread, and JSI may only be touched there. A
+Java callback arriving on another thread is marshalled onto the JS thread for
+you. The one thing to avoid is blocking the JS thread while waiting for such a
+callback — `thread.join()` immediately after `thread.start()` deadlocks, because
+the callback cannot run until the JS thread is free again.
+
+### What a guest does not install
+
+React Native already provides `console`, timers, `queueMicrotask`,
+`performance` and a module loader, so the runtime leaves all of them alone and
+installs only the metadata globals, the object manager and the interop
+callbacks. `Worker` is not installed either: a worker needs its own VM, which a
+guest has no way to create.

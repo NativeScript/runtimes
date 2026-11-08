@@ -1,6 +1,10 @@
 var es5_visitors = (function () {
   var types = require("@babel/types"),
     defaultExtendDecoratorName = "JavaProxy",
+    // Marks a class that extends a native type. Required on every such class,
+    // so that this parser never has to guess whether a dotted superclass is a
+    // Java type or an ordinary JS one.
+    NATIVE_CLASS_DECORATOR_NAME = "NativeClass",
     columnOffset = 1,
     ASTERISK_SEPARATOR = "*",
     customExtendsArr = [],
@@ -39,6 +43,15 @@ var es5_visitors = (function () {
     //anchor is new keyword (interface pattern)
     if (types.isNewExpression(path)) {
       traverseInterface(path, config);
+    }
+
+    // Native `class X extends android.view.View {}`, decorators intact.
+    // Everything below this point anchors on transpiler output (__extends,
+    // swc_inherit_polyfill, .extend). A bundler that emits classes and
+    // decorators as written -- Metro with Hermes, esbuild targeting esnext --
+    // produces none of those, so the class itself has to be an anchor too.
+    if (types.isClassDeclaration(path) || types.isClassExpression(path)) {
+      traverseNativeClassDeclaration(path, config);
     }
 
     // // Parsed Typescript to ES5 Syntax (normal extend pattern + custom extend pattern)
@@ -418,7 +431,7 @@ var es5_visitors = (function () {
       foundInterface = false,
       interfaceNames = config.interfaceNames;
 
-    var currentInterface = interfaceArr.reverse().join(".");
+    var currentInterface = _stripNonJavaPrefix(interfaceArr.reverse().join("."));
     for (var i in interfaceNames) {
       var interfaceName = interfaceNames[i].trim();
       if (interfaceName === currentInterface) {
@@ -476,6 +489,307 @@ var es5_visitors = (function () {
    *	Finds the java proxy name from custom class decorator.
    *	Write results in "customExtendsArr"
    */
+  /*
+   *	Handles a native class declaration that still has its decorators:
+   *
+   *		@NativeClass
+   *		class MyView extends android.view.View { onClick() {} }
+   *
+   *		@JavaProxy("com.example.MyActivity")
+   *		@Interfaces([android.view.View.OnClickListener])
+   *		class MyActivity extends android.app.Activity { onCreate() {} }
+   *
+   *	A class is only reported when it carries one of those two decorators.
+   *	That is the documented rule -- every class extending a native type is
+   *	decorated -- and it keeps this visitor off the many ordinary classes in a
+   *	bundle that merely extend something with a dotted name.
+   */
+  function traverseNativeClassDeclaration(path, config) {
+    var node = path.node;
+
+    var appliedDecorators = _collectAppliedDecorators(path);
+    if (appliedDecorators.length === 0) {
+      return;
+    }
+
+    if (!node.superClass || !types.isMemberExpression(node.superClass)) {
+      return;
+    }
+
+    var extendClass = _stripNonJavaPrefix(
+      _getWholeName(node.superClass).reverse().join(".")
+    );
+    if (!extendClass || extendClass.indexOf(".") === -1) {
+      return;
+    }
+
+    var extendDecoratorName =
+      config.extendDecoratorName === undefined
+        ? defaultExtendDecoratorName
+        : config.extendDecoratorName;
+
+    var javaProxyName = null;
+    var isNativeClass = false;
+    var implementedInterfaces = [];
+
+    for (var i = 0; i < appliedDecorators.length; i++) {
+      var expression = appliedDecorators[i];
+      var isCall = types.isCallExpression(expression);
+      var name = _decoratorName(isCall ? expression.callee : expression);
+
+      if (!name) {
+        continue;
+      }
+
+      if (name === extendDecoratorName) {
+        // @JavaProxy("a.b.C") -- reuse the shared validation so the error text
+        // is the same one the transpiled path produces.
+        javaProxyName = _getDecoratorArgument(
+          { parent: expression },
+          config,
+          extendDecoratorName
+        );
+      } else if (name === config.interfacesDecoratorName) {
+        if (isCall && expression.arguments.length > 0) {
+          var interfacesNode = expression.arguments[0];
+          if (types.isArrayExpression(interfacesNode)) {
+            for (var j = 0; j < interfacesNode.elements.length; j++) {
+              implementedInterfaces.push(
+                _getWholeInterfaceNameFromInterfacesNode(
+                  interfacesNode.elements[j]
+                )
+              );
+            }
+          }
+        }
+      } else if (name === NATIVE_CLASS_DECORATOR_NAME) {
+        isNativeClass = true;
+        // @NativeClass({ name: "a.b.C" }) is the same request as @JavaProxy.
+        if (isCall && expression.arguments.length > 0) {
+          var options = expression.arguments[0];
+          if (types.isObjectExpression(options)) {
+            for (var k = 0; k < options.properties.length; k++) {
+              var property = options.properties[k];
+              if (
+                _getIdentifierKeyName(property) === "name" &&
+                types.isStringLiteral(property.value)
+              ) {
+                javaProxyName = property.value.value;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!isNativeClass && javaProxyName === null) {
+      return;
+    }
+
+    var overriddenMethodNames = _getOverriddenMethodsFromClassBody(node);
+
+    if (javaProxyName !== null) {
+      traverseJavaProxyExtend(
+        javaProxyName,
+        config,
+        extendDecoratorName,
+        extendClass,
+        overriddenMethodNames,
+        implementedInterfaces.join(",")
+      );
+      return;
+    }
+
+    var location = node.loc && node.loc.start;
+    var lineToWrite = _generateLineToWrite(
+      "",
+      extendClass,
+      overriddenMethodNames,
+      {
+        file: config.fullPathName,
+        line: location ? location.line : "",
+        column: location ? location.column + columnOffset : "",
+        className: node.id ? node.id.name : "",
+      },
+      config.fullPathName,
+      implementedInterfaces.join(",")
+    );
+
+    if (config.logger) {
+      config.logger.info(lineToWrite);
+    }
+
+    normalExtendsArr.push(lineToWrite);
+  }
+
+  /*
+   *	The name of the decorator being applied, through whatever the module
+   *	system wrapped it in.
+   *
+   *	In source it is a bare `JavaProxy`. Once bundled, the same import reads as
+   *	`(0, _$$_REQUIRE(_dependencyMap[5]).JavaProxy)` -- a sequence whose last
+   *	element is a member expression -- and other bundlers produce
+   *	`ns.JavaProxy` or a further call. Only the trailing property name is
+   *	stable across all of them, and it is the one thing minification leaves
+   *	alone, since renaming a property would break the import.
+   */
+  function _decoratorName(node) {
+    if (!node) {
+      return undefined;
+    }
+
+    if (types.isIdentifier(node)) {
+      return node.name;
+    }
+
+    if (types.isMemberExpression(node)) {
+      return node.property && node.property.name;
+    }
+
+    if (types.isSequenceExpression(node)) {
+      // `(0, x)` -- the comma operator's value is its last element.
+      return _decoratorName(node.expressions[node.expressions.length - 1]);
+    }
+
+    if (types.isCallExpression(node)) {
+      return _decoratorName(node.callee);
+    }
+
+    return undefined;
+  }
+
+  /*
+   *	Every decorator applied to a class, however it was spelled.
+   *
+   *	`@NativeClass class X {}` keeps its decorators on the class node, but a
+   *	decorator is only syntax: a project without the Babel plugin writes the
+   *	same thing as a call, `NativeClass(class X {})`, and so does any bundler
+   *	that downlevels decorators it cannot emit. Both forms reach the runtime
+   *	identically, so both have to be recognised here or a class is silently
+   *	left without a binding.
+   *
+   *	The call form nests, `JavaProxy("a.b.C")(Interfaces([...])(class X {}))`,
+   *	so the chain is walked while the class is still the first argument.
+   *
+   *	What gets collected is the callee, which lands on the same shapes the
+   *	decorator form produces: an Identifier for a bare decorator, a
+   *	CallExpression for one with arguments.
+   */
+  function _collectAppliedDecorators(path) {
+    var expressions = [];
+    var node = path.node;
+
+    if (node.decorators) {
+      for (var i = 0; i < node.decorators.length; i++) {
+        expressions.push(node.decorators[i].expression);
+      }
+    }
+
+    var current = path;
+    var parent = current.parentPath;
+    while (
+      parent &&
+      types.isCallExpression(parent.node) &&
+      parent.node.arguments.length > 0 &&
+      parent.node.arguments[0] === current.node
+    ) {
+      expressions.push(parent.node.callee);
+      current = parent;
+      parent = current.parentPath;
+    }
+
+    return expressions;
+  }
+
+  /*
+   *	Drops whatever the code used to reach the Java namespace.
+   *
+   *	Java types are usually written `global.java.util.ArrayList` outside of
+   *	NativeScript's own tooling, because `java` is not a declared global in a
+   *	React Native project. The runtime resolves that to java/util/ArrayList,
+   *	and so must this: left alone, the base class reads as
+   *	`global.java.util.ArrayList`, and after minification as `g.java.util.
+   *	ArrayList`, neither of which names a class the generator can load.
+   *
+   *	The first segment that looks like a Java root wins. A name already
+   *	starting at its root is returned untouched.
+   */
+  var JAVA_ROOT_PACKAGES = [
+    "java",
+    "javax",
+    "android",
+    "androidx",
+    "dalvik",
+    "kotlin",
+    "com",
+    "org",
+    "net",
+  ];
+
+  function _stripNonJavaPrefix(dottedName) {
+    if (!dottedName) {
+      return dottedName;
+    }
+
+    var segments = dottedName.split(".");
+    for (var i = 0; i < segments.length; i++) {
+      if (JAVA_ROOT_PACKAGES.indexOf(segments[i]) !== -1) {
+        return segments.slice(i).join(".");
+      }
+    }
+
+    return dottedName;
+  }
+
+  /*
+   *	The names a class body puts on the prototype, which is the object the
+   *	runtime is handed as the implementation.
+   *
+   *	Must agree with CallbackHandlers::CollectMethodOverrideNames in the
+   *	runtime, because a content-keyed class name hashes this set: a name
+   *	collected on one side and not the other produces two different class
+   *	names for one class, which surfaces only as LookedUpClassNotFound.
+   *
+   *	 - "constructor" is skipped; it is on the prototype but is never a Java
+   *	   override, and the runtime skips it too.
+   *	 - static members live on the constructor, not the prototype.
+   *	 - class fields are per-instance, so they are not on the prototype either.
+   *	 - getters and setters are, so they count.
+   *	 - computed keys cannot be read statically; skipping them costs only the
+   *	   pre-generated class, since the runtime still generates one at load.
+   */
+  function _getOverriddenMethodsFromClassBody(node) {
+    var overriddenMethodNames = [];
+
+    if (!node.body || !node.body.body) {
+      return overriddenMethodNames;
+    }
+
+    var members = node.body.body;
+    for (var i = 0; i < members.length; i++) {
+      var member = members[i];
+
+      if (!types.isClassMethod(member) || member.static || member.computed) {
+        continue;
+      }
+
+      if (member.kind === "constructor") {
+        continue;
+      }
+
+      var keyName = _getIdentifierKeyName(member);
+      if (keyName === null) {
+        continue;
+      }
+
+      if (overriddenMethodNames.indexOf(keyName) === -1) {
+        overriddenMethodNames.push(keyName);
+      }
+    }
+
+    return overriddenMethodNames;
+  }
+
   function traverseJavaProxyExtend(
     path,
     config,
@@ -601,7 +915,7 @@ var es5_visitors = (function () {
         var classNameFromDecorator = isCorrectExtendClassName ? className : "";
         lineToWrite = _generateLineToWrite(
           classNameFromDecorator,
-          extendClass.reverse().join("."),
+          _stripNonJavaPrefix(extendClass.reverse().join(".")),
           overriddenMethodNames,
           "",
           config.fullPathName,
@@ -632,7 +946,7 @@ var es5_visitors = (function () {
       };
       lineToWrite = _generateLineToWrite(
         isCorrectExtendClassName ? className : "",
-        extendClass.reverse().join("."),
+        _stripNonJavaPrefix(extendClass.reverse().join(".")),
         overriddenMethodNames,
         extendInfo,
         "",
@@ -657,18 +971,33 @@ var es5_visitors = (function () {
    *	HELPER METHODS
    */
 
-  // Returns the Identifier name of a property's key, or null when the property
-  // is a SpreadElement, has a computed key, or uses a non-Identifier key
-  // (e.g. StringLiteral, NumericLiteral). Such properties cannot be mapped to
-  // a Java method binding, so callers should skip them.
+  // A method name a Java binding could carry, or null when the property cannot
+  // be mapped to one: a SpreadElement, a computed key, or a literal that is not
+  // a legal identifier.
+  //
+  // A quoted key counts. `{ "toString": function () {} }` is the same override
+  // as `{ toString: function () {} }` -- the runtime enumerates the object's
+  // own property names and cannot tell the two apart, so skipping the quoted
+  // form put this side's method list (and therefore the content key derived
+  // from it) permanently out of step with the runtime's for any app that writes
+  // its overrides that way. Minifiers and code generators emit it routinely.
+  var JAVA_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
   function _getIdentifierKeyName(property) {
     if (!property || property.computed) {
       return null;
     }
-    if (!property.key || !types.isIdentifier(property.key)) {
+    if (!property.key) {
       return null;
     }
-    return property.key.name;
+    if (types.isIdentifier(property.key)) {
+      return property.key.name;
+    }
+    if (types.isStringLiteral(property.key) &&
+        JAVA_IDENTIFIER.test(property.key.value)) {
+      return property.key.value;
+    }
+    return null;
   }
 
   function getTypeScriptExtendSuperCallLocation(extendPath, config) {
@@ -1022,7 +1351,7 @@ var es5_visitors = (function () {
 
     extClassArr = _getWholeName(o);
 
-    return extClassArr.reverse().join(".");
+    return _stripNonJavaPrefix(extClassArr.reverse().join("."));
   }
 
   function _getDecoratorArgument(path, config, customDecoratorName) {

@@ -19,6 +19,14 @@ import com.telerik.metadata.parsing.kotlin.metadata.ClassMetadataParser;
 import com.telerik.metadata.parsing.kotlin.metadata.bytecode.BytecodeClassMetadataParser;
 import com.telerik.metadata.security.classes.SecuredClassRepository;
 import com.telerik.metadata.security.classes.SecuredNativeClassDescriptor;
+import com.telerik.metadata.security.filtering.blacklisting.MetadataBlacklist;
+import com.telerik.metadata.security.filtering.closure.ClosureVerifier;
+import com.telerik.metadata.security.filtering.closure.MetadataClosure;
+import com.telerik.metadata.security.filtering.closure.ProguardRulesWriter;
+import com.telerik.metadata.security.filtering.input.PatternEntry;
+import com.telerik.metadata.security.filtering.input.user.UserPatternsCollection;
+import com.telerik.metadata.security.filtering.matching.impl.PatternMatcherImpl;
+import com.telerik.metadata.security.filtering.whitelisting.MetadataWhitelist;
 import com.telerik.metadata.storage.functions.FunctionsStorage;
 import com.telerik.metadata.storage.functions.extensions.ExtensionFunctionsStorage;
 import com.telerik.metadata.security.MetadataSecurityViolationException;
@@ -83,11 +91,16 @@ public class Builder {
 
         String[] classNames = SecuredClassRepository.INSTANCE.getClassNames();
 
+        // Before the closure, and deliberately unfiltered: a Kotlin extension
+        // function is declared on a file class the app never names, so the
+        // closure can only retain that class if it already knows the function
+        // exists. Entries for classes that go on to be dropped are inert --
+        // the storage is only ever consulted for a class being generated.
         for (String className : classNames) {
             try {
-                SecuredNativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClass(className);
-                if (clazz.isUsageAllowed()) {
-                    tryCollectKotlinExtensionFunctions(clazz.getNativeDescriptor());
+                NativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClassUnfiltered(className);
+                if (clazz != null) {
+                    tryCollectKotlinExtensionFunctions(clazz);
                 }
             } catch (Throwable e) {
                 System.out.println("Skip " + className);
@@ -95,6 +108,11 @@ public class Builder {
                 //e.printStackTrace();
             }
         }
+
+        // Grow the whitelist into something the tree can be built from before
+        // anything is generated. Skipped entirely when no whitelist was given,
+        // which is what keeps the default behaviour "emit everything".
+        applyClosureIfRequested();
 
         for (String className : classNames) {
             try {
@@ -108,6 +126,7 @@ public class Builder {
 
                 SecuredNativeClassDescriptor clazz = SecuredClassRepository.INSTANCE.findClass(className);
                 if (clazz.isUsageAllowed()) {
+                    ClosureVerifier.INSTANCE.setCurrentContext(className);
                     generate(clazz.getNativeDescriptor(), root);
                 }
             } catch (Throwable e) {
@@ -116,6 +135,10 @@ public class Builder {
                 //e.printStackTrace();
             }
         }
+
+        ensureSeedPackageSpine(root);
+
+        assertClosureIsSound();
 
         System.out.println("Added   Properties "+TreeNode.addedProperties);
         System.out.println("Ignored Properties "+TreeNode.skippedProperties+" duplicates.");
@@ -127,6 +150,179 @@ public class Builder {
 
 
         return root;
+    }
+
+    // Set from Generator before build() runs.
+    private static int signatureClosureDepth = Integer.MAX_VALUE;
+    private static String proguardRulesPath = null;
+    private static boolean enforceClosure = false;
+
+    public static void configureClosure(int depth, String proguardOut, boolean enforce) {
+        signatureClosureDepth = depth;
+        proguardRulesPath = proguardOut;
+        enforceClosure = enforce;
+    }
+
+    /**
+     * Turns the whitelist into the concrete set of classes to emit, and writes
+     * the matching R8 keep rules.
+     *
+     * A no-op unless the build asked for it *and* a whitelist was supplied. The
+     * flag matters as much as the file: only a seed the build generated may be
+     * grown and then held to the soundness check. An app's own hand-written
+     * whitelist.mdg is filtered exactly as authored -- widening included --
+     * which is how it behaved before the closure existed, and what an app that
+     * ships one is relying on.
+     */
+    private static void applyClosureIfRequested() {
+        if (!enforceClosure || !UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
+            return;
+        }
+
+        PatternMatcherImpl patternMatcher = new PatternMatcherImpl();
+        MetadataWhitelist seedFilter = new MetadataWhitelist(
+                UserPatternsCollection.INSTANCE.getWhitelistEntries(), patternMatcher);
+        MetadataBlacklist blacklistFilter = new MetadataBlacklist(
+                UserPatternsCollection.INSTANCE.getBlacklistEntries(), patternMatcher);
+
+        MetadataClosure closure = new MetadataClosure(
+                SecuredClassRepository.INSTANCE.getCachedProviders(),
+                blacklistFilter,
+                signatureClosureDepth);
+
+        Set<String> retained = closure.compute(descriptor -> {
+            String simplified = descriptor.getClassName()
+                    .substring(descriptor.getPackageName().length())
+                    .replace('$', '.');
+            while (simplified.startsWith(".")) {
+                simplified = simplified.substring(1);
+            }
+            return seedFilter.isAllowed(descriptor.getPackageName(), simplified).isAllowed();
+        });
+
+        SecuredClassRepository.INSTANCE.applyClosure(retained);
+        ClosureVerifier.INSTANCE.setEnabled(true);
+
+        System.out.println(String.format(
+                "Metadata filter: seed %d classes -> retained %d after closure (depth %s).",
+                closure.getSeedSize(), retained.size(),
+                signatureClosureDepth == Integer.MAX_VALUE
+                        ? "unbounded" : String.valueOf(signatureClosureDepth)));
+
+        if (proguardRulesPath != null) {
+            ProguardRulesWriter.INSTANCE.write(new File(proguardRulesPath), retained);
+            System.out.println("Metadata filter: wrote keep rules to " + proguardRulesPath);
+        }
+    }
+
+    /**
+     * Fails the build if the filter changed the meaning of any signature.
+     *
+     * A violation is a latent NoSuchMethodError -- the metadata is well-formed
+     * and describes a method that does not exist. It would surface only when
+     * the app happens to call that method, which is exactly the kind of defect
+     * that ships. The closure is meant to make this set empty; that it is
+     * checked separately is the point, since a closure bug would otherwise be
+     * invisible until runtime.
+     */
+    private static void assertClosureIsSound() throws MetadataSecurityViolationException {
+        Collection<ClosureVerifier.Widening> violations = ClosureVerifier.INSTANCE.violations();
+        if (violations.isEmpty()) {
+            return;
+        }
+
+        StringBuilder message = new StringBuilder();
+        message.append(String.format(
+                "Metadata filter is unsound: %d signature type(s) were replaced by a "
+                        + "supertype because the filter dropped them. Each is a "
+                        + "NoSuchMethodError waiting to happen at runtime.%n",
+                violations.size()));
+
+        int shown = 0;
+        for (ClosureVerifier.Widening violation : violations) {
+            if (shown++ == 25) {
+                message.append(String.format("  … and %d more%n", violations.size() - 25));
+                break;
+            }
+            message.append(String.format("  %s -> %s (needed by %s)%n",
+                    violation.getRequested(), violation.getSubstituted(), violation.getContext()));
+        }
+
+        message.append("This is a bug in the closure, not in the app: add the missing edge "
+                + "to MetadataClosure, or name the type in whitelist.mdg to unblock.");
+
+        throw new MetadataSecurityViolationException(message.toString());
+    }
+
+    /**
+     * Creates an empty package node for every package the seed named outright,
+     * whether or not any class under it survived.
+     *
+     * JS feature-detects with `if (a.b.C)`. Unfiltered, `a.b` is an object and
+     * a missing `C` reads as undefined -- falsy, and the guard does its job.
+     * Filter every class out of `a.b` and the package node disappears with
+     * them, so the same guard throws:
+     *
+     *     TypeError: Cannot read property 'design' of undefined
+     *
+     * An empty package costs a name and a node. Turning a working guard into a
+     * crash costs the app.
+     *
+     * Restricted to packages that exist on the classpath. A package the filter
+     * emptied must stay visible; a package that was never there must stay
+     * absent, or the same guard breaks the other way -- it passes, and the
+     * constructor behind it is undefined.
+     */
+    private static void ensureSeedPackageSpine(TreeNode root) {
+        if (!UserPatternsCollection.INSTANCE.getWhitelistProvided()) {
+            return;
+        }
+
+        Set<String> existingPackages = new HashSet<>();
+        for (ClassMapProvider provider : SecuredClassRepository.INSTANCE.getCachedProviders()) {
+            for (NativeClassDescriptor descriptor : provider.getClassMap().values()) {
+                String packageName = descriptor.getPackageName();
+                while (!packageName.isEmpty() && existingPackages.add(packageName)) {
+                    int idx = packageName.lastIndexOf('.');
+                    packageName = idx < 0 ? "" : packageName.substring(0, idx);
+                }
+            }
+        }
+
+        for (PatternEntry entry : UserPatternsCollection.INSTANCE.getWhitelistEntries()) {
+            String packagePattern = entry.getPackagePattern();
+
+            // Only literal package names; a wildcard does not name a package to create.
+            if (packagePattern.isEmpty()
+                    || packagePattern.contains("*")
+                    || packagePattern.contains("?")) {
+                continue;
+            }
+
+            // Walk the prefixes and stop at the first that does not exist on
+            // the classpath. `android.support.design` is named by the app but
+            // was never there; its parent `android.support` was, via another
+            // library, and is what the guard actually dereferences.
+            TreeNode node = root;
+            StringBuilder soFar = new StringBuilder();
+            for (String part : packagePattern.split("\\.")) {
+                if (soFar.length() > 0) {
+                    soFar.append('.');
+                }
+                soFar.append(part);
+
+                if (!existingPackages.contains(soFar.toString())) {
+                    break;
+                }
+
+                TreeNode child = node.getChild(part);
+                if (child == null) {
+                    child = node.createChild(part);
+                    child.nodeType = TreeNode.Package;
+                }
+                node = child;
+            }
+        }
     }
 
     private static void tryCollectKotlinExtensionFunctions(NativeClassDescriptor classDescriptor) {
@@ -258,7 +454,7 @@ public class Builder {
                         }
                     }
                 }
-                mi.isResolved = countUnique == 1;
+                mi.isResolved = countUnique == 1 || clazz instanceof KotlinClassDescriptor;
 
 
                 NativeTypeDescriptor[] params = ownMethod.getArgumentTypes();
@@ -407,6 +603,15 @@ public class Builder {
             // if clazz is not found in the ClassRepo, the method/field being analyzed will be skipped
             if (!clazz.isUsageAllowed()) {
                 return null;
+            }
+
+            // A substitution here rewrites the signature being emitted. Only a
+            // type that exists on the classpath indicts the filter -- one that
+            // was never there is widened with or without filtering.
+            String resolved = clazz.getNativeDescriptor().getClassName();
+            if (!resolved.equals(name)
+                    && SecuredClassRepository.INSTANCE.findClassUnfiltered(name) != null) {
+                ClosureVerifier.INSTANCE.record(name, resolved);
             }
 
             node = getOrCreateNode(root, clazz.getNativeDescriptor(), null);
@@ -585,6 +790,14 @@ public class Builder {
                 SecuredNativeClassDescriptor securedNativeClassDescriptor = SecuredClassRepository.INSTANCE.findNearestAllowedClass(name);
                 if (securedNativeClassDescriptor.isUsageAllowed()) {
                     NativeClassDescriptor nativeClassDescriptor = securedNativeClassDescriptor.getNativeDescriptor();
+
+                    // Array element types reach signatures the same way; see
+                    // the sibling check in getOrCreateNode(root, type).
+                    if (!nativeClassDescriptor.getClassName().equals(name)
+                            && SecuredClassRepository.INSTANCE.findClassUnfiltered(name) != null) {
+                        ClosureVerifier.INSTANCE.record(name, nativeClassDescriptor.getClassName());
+                    }
+
                     child.nodeType = nativeClassDescriptor.isInterface() ? TreeNode.Interface
                             : TreeNode.Class;
                     if (nativeClassDescriptor.isStatic()) {

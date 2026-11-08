@@ -34,7 +34,6 @@ function hostKey() {
 
 const adapters = [
   require('./hermes'),
-  require('./quickjs'),
   require('./quickjs-ng'),
   require('./primjs'),
 ];

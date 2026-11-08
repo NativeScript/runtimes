@@ -78,7 +78,8 @@ const marker = 'NATIVESCRIPT_RN_TURBO_SMOKE_PASS';
 
 async function runSmoke(): Promise<string> {
   try {
-    const installed = NativeScript.init();
+    // Metadata globals on the React runtime are opt-in.
+    const installed = NativeScript.init('', {globals: true});
     const api = (globalThis as any).__nativeScriptNativeApi;
     if (!installed || !api) {
       throw new Error('NativeScript Native API JSI host object was not installed');

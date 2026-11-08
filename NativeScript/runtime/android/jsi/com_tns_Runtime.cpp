@@ -80,7 +80,13 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
 // @FastNative ABI: standard JNI signature (registered via RegisterNatives).
 static void setManualInstrumentationModeFast_impl(JNIEnv* env, jclass clazz, jstring mode) {
     try {
+#if !defined(NS_JSI_HOST_RUNTIME)
         Runtime::SetManualInstrumentationMode(mode);
+#else
+        // Timeline instrumentation is standalone-runtime tooling; the guest does
+        // not build it. The symbol stays because RegisterNatives binds it.
+        (void) mode;
+#endif
     } catch (...) {
         NativeScriptException nsEx(std::string("Error: c++ exception!"));
         nsEx.ReThrowToJava(nullptr);
@@ -93,6 +99,10 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_setManualInstrumentationModeLegac
     setManualInstrumentationModeFast_impl(_env, clazz, mode);
 }
 
+// Standalone only: a guest is attached by its embedder (see Runtime::Attach),
+// never by Java asking the runtime to stand a VM up. Every other native below
+// is interop that both flavours need, so only this one is compiled out.
+#if !defined(NS_JSI_HOST_RUNTIME)
 extern "C" JNIEXPORT void Java_com_tns_Runtime_initNativeScript(JNIEnv* _env, jobject obj, jint runtimeId, jstring filesPath, jstring nativeLibDir, jboolean verboseLoggingEnabled, jboolean isDebuggable, jstring packageName, jobjectArray args, jstring callingDir, jint maxLogcatObjectSize, jboolean forceLog) {
     try {
         DEBUG_WRITE("NativeScript Initializing!");
@@ -110,6 +120,7 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_initNativeScript(JNIEnv* _env, jo
         nsEx.ReThrowToJava(nullptr);
     }
 }
+#endif  // !NS_JSI_HOST_RUNTIME
 
 Runtime* TryGetRuntime(int runtimeId) {
     Runtime* runtime = nullptr;
@@ -129,6 +140,10 @@ Runtime* TryGetRuntime(int runtimeId) {
     return runtime;
 }
 
+// Bound by name rather than registered, so a guest simply does not export
+// it: nothing on the Java side calls runModule or runScript, because the
+// embedder's bundler owns module loading.
+#if !defined(NS_JSI_HOST_RUNTIME)
 extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject obj, jint runtimeId, jstring scriptFile) {
     auto runtime = TryGetRuntime(runtimeId);
     if (runtime == nullptr) {
@@ -151,7 +166,10 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject o
         nsEx.ReThrowToJava(&runtime->GetJSRuntime());
     }
 }
+#endif
 
+
+#if !defined(NS_JSI_HOST_RUNTIME)
 extern "C" JNIEXPORT jobject Java_com_tns_Runtime_runScript(JNIEnv* _env, jobject obj, jint runtimeId, jstring scriptFile) {
     jobject result = nullptr;
 
@@ -176,6 +194,8 @@ extern "C" JNIEXPORT jobject Java_com_tns_Runtime_runScript(JNIEnv* _env, jobjec
 
     return result;
 }
+#endif
+
 
 extern "C" JNIEXPORT jobject Java_com_tns_Runtime_callJSMethodNative(JNIEnv* _env, jobject obj, jint runtimeId, jint javaObjectID, jclass claz, jstring methodName,jint retType, jboolean isConstructor, jobjectArray packagedArgs) {
     jobject result = nullptr;

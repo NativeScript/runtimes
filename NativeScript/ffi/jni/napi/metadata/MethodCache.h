@@ -42,7 +42,6 @@ class MethodCache {
     inline static MethodCache::CacheMethodInfo ResolveMethodSignature(napi_env env, const string &className, const string &methodName, size_t argc, napi_value* argv, bool isStatic)
     {
         CacheMethodInfo method_info;
-
         auto encoded_method_signature = EncodeSignature(env, className, methodName,argc, argv, isStatic);
         auto it = s_method_ctor_signature_cache.find(encoded_method_signature);
 
@@ -150,10 +149,9 @@ private:
         if (valueType == napi_object || valueType == napi_function)
         {
 
-            napi_value nullNode;
-            napi_get_named_property(env, value, PROP_KEY_NULL_NODE_NAME, &nullNode);
-
-            if (!napi_util::is_null_or_undefined(env, nullNode))
+            napi_value nullNode = nullptr;
+            if (napi_get_named_property(env, value, PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
+                !napi_util::is_null_or_undefined(env, nullNode))
             {
                 void *data = nullptr;
                 napi_get_value_external(env, nullNode, &data);
@@ -306,10 +304,16 @@ private:
         JniLocalRef jsMethodName(jEnv.NewStringUTF(methodName.c_str()));
 
         jobjectArray arrArgs = argConverter.ToJavaArray();
-
         auto runtime = Runtime::GetRuntime(env);
 
         jstring signature = (jstring)jEnv.CallObjectMethod(runtime->GetJavaRuntime(), RESOLVE_METHOD_OVERLOAD_METHOD_ID, (jstring)jsClassName, (jstring)jsMethodName, arrArgs);
+
+        if (signature == nullptr || jEnv.ExceptionCheck() == JNI_TRUE) {
+            if (jEnv.ExceptionCheck() == JNI_TRUE) {
+                jEnv.ExceptionClear();
+            }
+            return string();
+        }
 
         string resolvedSignature;
 
@@ -366,4 +370,3 @@ private:
 }
 
 #endif /* METHODCACHE_H_ */
-

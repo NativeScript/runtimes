@@ -29,6 +29,8 @@ The core backbone that powers [NativeScript](https://nativescript.org/) apps and
    - `npm run build-macos`: Builds the macOS runtime platforms.
    - `npm run build-vision`: Builds the visionOS runtime platforms.
    - `npm run build-node-api`: Compiles the Node-API (N-API) addon.
+   - `npm run build-android`: Builds the Android runtime for one JS engine (prompts, or `-- --engine=<ENGINE>`).
+   - `npm run setup-android`: Prepares an Android checkout (QuickJS patches + jsparser deps).
    - `npm run build-rn-turbomodule`: Compiles the React Native TurboModules compatibility layer.
 4. **Core Dependencies**:
    - `npm run build-metagen`: Builds the Clang metadata generator binary.

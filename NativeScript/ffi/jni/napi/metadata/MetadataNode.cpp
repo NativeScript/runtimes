@@ -6,6 +6,7 @@
 #include <set>
 #include <cerrno>
 #include <unistd.h>
+#include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
 #include "CallbackHandlers.h"
@@ -800,6 +801,105 @@ string MetadataNode::CreateFullClassName(const std::string &className,
     return fullClassName;
 }
 
+// The compile-time policy, which is also the floor: a build that hard-wires
+// content keying cannot be talked out of it by an app's config.
+static bool ContentKeyedBindingsForcedOn() {
+#if defined(NS_CONTENT_KEYED_BINDINGS)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Resolved once, before any JS runs. The naming scheme has to match what the
+// static binding generator used for this app, so the value comes from the build
+// that ran the generator (app/package.json -> AppConfig -> Runtime::Init) rather
+// than from anything decided here.
+static bool s_contentKeyedBindings = ContentKeyedBindingsForcedOn();
+
+void MetadataNode::SetContentKeyedBindings(bool enabled) {
+    // Only ever widens: an app may turn content keying on, never off under a
+    // runtime that was built to require it.
+    s_contentKeyedBindings = s_contentKeyedBindings || enabled;
+}
+
+bool MetadataNode::ContentKeyedBindingsEnabled() {
+    return s_contentKeyedBindings;
+}
+
+// A class-name token derived from what the generated binding is actually made
+// of, rather than from where the extend() call happens to sit.
+//
+// The static binding generator writes a class out of exactly three inputs: the
+// base class, the implemented interfaces, and the overridden method names. Two
+// extend() sites that agree on all three produce byte-identical Java, so hashing
+// them is enough to name the class -- and two sites that collide are meant to
+// share, which is why the generator already treats a duplicate file with equal
+// content as a warning rather than an error.
+//
+// Location keys cannot do this once an embedder owns the bundler: the generator
+// reads source coordinates and the runtime reads bundle coordinates. A content
+// key needs no shared coordinate system at all.
+//
+// Sorted, because the runtime's order is JS own-property order and the
+// generator's is source order; the binding treats both sets as unordered.
+// FNV-1a rather than std::hash, which is not stable across implementations and
+// so could not be reproduced by the generator.
+// Package separators and nested-type separators both become '.' -- see the
+// comment in CreateContentKey.
+static string Canonicalize(const string &name) {
+    string canonical = name;
+    canonical = Util::ReplaceAll(canonical, std::string("/"), std::string("."));
+    return Util::ReplaceAll(canonical, std::string("$"), std::string("."));
+}
+
+string MetadataNode::CreateContentKey(const string &baseClassName,
+                                      vector<string> interfaceNames,
+                                      vector<string> methodNames) {
+    // Canonicalized before sorting, not after: '$' and '.' are different bytes,
+    // so sorting the binary form and sorting the dotted form can disagree on
+    // order even once the names themselves match.
+    for (auto &interfaceName: interfaceNames) {
+        interfaceName = Canonicalize(interfaceName);
+    }
+
+    sort(interfaceNames.begin(), interfaceNames.end());
+    sort(methodNames.begin(), methodNames.end());
+
+    // Nested types reach here in their binary form -- `Pack200$Unpacker`, and
+    // `/` for package separators on the interface side. The generator reads the
+    // same names out of JS source, where both are written with a dot and there
+    // is no way to tell a nested type from a package. So the dotted form is the
+    // canonical one for hashing; the JNI arrays that actually load the classes
+    // keep the binary form, which is what Class.forName needs.
+    string canonicalBase = Canonicalize(baseClassName);
+
+    string payload = canonicalBase;
+    payload += "|";
+    for (size_t i = 0; i < interfaceNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += interfaceNames[i];
+    }
+    payload += "|";
+    for (size_t i = 0; i < methodNames.size(); i++) {
+        if (i > 0) payload += ",";
+        payload += methodNames[i];
+    }
+
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c: payload) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+
+    char buffer[19];
+    snprintf(buffer, sizeof(buffer), "h%016llx", static_cast<unsigned long long>(hash));
+
+    DEBUG_WRITE("CreateContentKey: %s -> %s", payload.c_str(), buffer);
+
+    return string(buffer);
+}
+
 bool MetadataNode::IsValidExtendName(napi_env env, napi_value name) {
     string extendName = ArgConverter::ConvertToString(env, name);
 
@@ -1020,6 +1120,14 @@ void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
             // if the namespaces matches a javascript keyword, prefix it with $ to avoid TypeScript and JavaScript errors
             if (IsJavascriptKeyword(nameSpace)) {
                 nameSpace = "$" + nameSpace;
+            }
+            bool exists = false;
+            if (napi_has_named_property(env, global, nameSpace.c_str(), &exists) == napi_ok && exists) {
+                string fallback = "$" + nameSpace;
+                __android_log_print(ANDROID_LOG_WARN, "TNS.Runtime",
+                                    "Java package '%s' is exposed as '%s': the global '%s' already exists.",
+                                    nameSpace.c_str(), fallback.c_str(), nameSpace.c_str());
+                nameSpace = fallback;
             }
             NAPI_GUARD(napi_set_named_property(env, global, nameSpace.c_str(), packageObj)) {}
         }
@@ -1679,8 +1787,8 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetInstanceMembers
         entry.paramCount = paramCount;
         entry.isStatic = false;
         if (chKind == 'M') {
+            entry.type = NodeType::Method;
             if (entry.name != lastMethodName) {
-                entry.type = NodeType::Method;
                 callbackData = new MethodCallbackData(this);
                 MetadataNode::GetMetadataNodeCache(env)->methodCallbackData.push_back(callbackData);
                 instanceMethodData.push_back(callbackData);
@@ -2226,14 +2334,30 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                 NAPI_GUARD(napi_get_value_bool(env, argv[2], &isTypeScriptExtend)) {}
             };
         }
-
         auto node = reinterpret_cast<MetadataNode *>(data);
+
+        auto useContentKey = false;
 
         if (hasDot) {
             extendName = argv[0];
             implementationObject = argv[1];
         } else {
-            bool validExtend = GetExtendLocation(env, extendLocation, isTypeScriptExtend);
+            useContentKey = ContentKeyedBindingsEnabled();
+
+            // Skipped outright when content keying is on: this walks the stack
+            // purely to build a name, on every class creation.
+            bool validExtend =
+                    useContentKey || GetExtendLocation(env, extendLocation, isTypeScriptExtend);
+
+            if (!validExtend) {
+                // No usable call site -- an anonymous frame, or a bundle the
+                // generator never indexed. Naming by content still works here,
+                // where before this was fatal.
+                useContentKey = true;
+                validExtend = true;
+                extendLocation.clear();
+            }
+
             NAPI_GUARD(napi_create_string_utf8(env, "", 0, &extendName)) {
                 return nullptr;
             }
@@ -2245,12 +2369,36 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                 return nullptr;
             }
         }
-
-
-        string extendNameAndLocation =
-                extendLocation + ArgConverter::ConvertToString(env, extendName);
-        string fullClassName;
         string baseClassName = node->m_name;
+
+        // An explicitly named extend keeps its name in front of the hash. The
+        // generator reads the same name out of the bundle, so the two still
+        // agree, and it buys back two things the bare hash costs: a class name
+        // that says what it is in a stack trace, and uniqueness for the classes
+        // that need it. Anything Java instantiates by name -- an Activity, a
+        // Fragment, a Worker, anything reached by reflection -- cannot share a
+        // generated class, because the runtime has only the class name to find
+        // the JS implementation with. Naming such a class is what makes it
+        // unique; unnamed extends stay shared, which is the common case and the
+        // point of the scheme.
+        string extendNameString = ArgConverter::ConvertToString(env, extendName);
+        string extendNameAndLocation;
+
+        if (useContentKey) {
+            auto interfaceNames = CallbackHandlers::CollectImplementedInterfaceNames(
+                    env, implementationObject);
+            auto methodNames = CallbackHandlers::CollectMethodOverrideNames(
+                    env, implementationObject, /* functionsOnly */ false);
+            string contentKey =
+                    CreateContentKey(baseClassName,
+                                     interfaceNames, methodNames);
+            extendNameAndLocation =
+                    extendNameString.empty() ? contentKey : extendNameString + "_" + contentKey;
+        } else {
+            extendNameAndLocation = extendLocation + extendNameString;
+        }
+
+        string fullClassName;
         if (!hasDot) {
             fullClassName = TNS_PREFIX + CreateFullClassName(baseClassName, extendNameAndLocation);
         } else {
@@ -2263,7 +2411,41 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
                                                     implementationObject, isInterface);
         auto fullExtendedName = CallbackHandlers::ResolveClassName(env, clazz);
 
-        auto cachedData = GetCachedExtendedClassData(env, fullExtendedName);
+        // Which JS constructor to reuse is a different question from which Java
+        // class to load, and only the second one has to agree with the static
+        // binding generator.
+        //
+        // Two extend() calls with the same base, interfaces and overridden names
+        // share one generated Java class -- the Java is identical, and sharing it
+        // is the point. Their JS bodies are not identical, though, so caching the
+        // constructor under the class name would hand the second call the first
+        // call's implementation. Under content keying that is not a rare
+        // collision but the common case, so the constructor is cached per
+        // implementation object instead.
+        // The stamp identifies the object, not the class it was used to build:
+        // combining it with fullExtendedName keeps a second extend() of the same
+        // object against a *different* base a cache miss, so it still reaches the
+        // "used to extend another class" check below instead of silently
+        // returning the first class.
+        string ctorCacheKey = fullExtendedName;
+        if (useContentKey) {
+            napi_value stamped;
+            NAPI_GUARD(napi_get_named_property(env, implementationObject, EXTEND_CTOR_CACHE_KEY,
+                                               &stamped)) {}
+            string implObjectId;
+            if (napi_util::is_of_type(env, stamped, napi_string)) {
+                implObjectId = ArgConverter::ConvertToString(env, stamped);
+            } else {
+                static std::atomic<uint64_t> s_implObjectCounter{0};
+                implObjectId = std::to_string(s_implObjectCounter.fetch_add(1));
+                NAPI_GUARD(napi_set_named_property(
+                        env, implementationObject, EXTEND_CTOR_CACHE_KEY,
+                        ArgConverter::convertToJsString(env, implObjectId))) {}
+            }
+            ctorCacheKey = fullExtendedName + "#" + implObjectId;
+        }
+
+        auto cachedData = GetCachedExtendedClassData(env, ctorCacheKey);
         if (cachedData.extendedCtorFunction != nullptr) {
             auto value = napi_util::get_ref_value(env, cachedData.extendedCtorFunction);
             if (!napi_util::is_null_or_undefined(env, value)) return value;
@@ -2321,10 +2503,31 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
 
         s_name2NodeCache.emplace(fullExtendedName, node);
 
-        ExtendedClassCacheData cacheData(napi_util::make_ref(env, extendFuncCtor), fullExtendedName,
-                                         node);
         auto cache = GetMetadataNodeCache(env);
-        cache->ExtendedCtorFuncCache.emplace(fullExtendedName, cacheData);
+
+        // Two entries, because there are two ways in.
+        //
+        // From JS, extend() asks "have I already built a constructor for this
+        // implementation object?" -- keyed per object, so two identical-looking
+        // extends keep their own bodies.
+        //
+        // From Java, createJSInstanceNative has only the class name of the
+        // instance it is wrapping (CreateExtendedJSWrapper), so the class name
+        // has to resolve too. emplace leaves an existing entry alone, so for a
+        // shared generated class the first implementation registered is the one
+        // Java-side instantiation finds. That is unambiguous for a named extend
+        // -- naming it makes the class unique -- and inherently ambiguous for an
+        // unnamed one, which is why anything Java constructs by name should be
+        // named.
+        ExtendedClassCacheData byImplObject(napi_util::make_ref(env, extendFuncCtor),
+                                            fullExtendedName, node);
+        cache->ExtendedCtorFuncCache.emplace(ctorCacheKey, byImplObject);
+
+        if (ctorCacheKey != fullExtendedName) {
+            ExtendedClassCacheData byClassName(napi_util::make_ref(env, extendFuncCtor),
+                                               fullExtendedName, node);
+            cache->ExtendedCtorFuncCache.emplace(fullExtendedName, byClassName);
+        }
 
         return extendFuncCtor;
 
@@ -2407,6 +2610,8 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
 
         auto callbackData = reinterpret_cast<MethodCallbackData *>(data);
         auto initialCallbackData = reinterpret_cast<MethodCallbackData *>(data);
+        MethodCallbackData *selectedCallbackData = nullptr;
+        std::vector<MetadataEntry *> arityCandidates;
 
         string *className;
         auto &first = callbackData->candidates.front();
@@ -2419,6 +2624,8 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
             !first.isExtensionFunction &&
             first.getParamCount() == argc) {
             className = &callbackData->node->m_name;
+            selectedCallbackData = callbackData;
+            arityCandidates.push_back(&first);
             entry = &first;
         }
 
@@ -2427,27 +2634,29 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
 
             className = &callbackData->node->m_name;
 
-            // Iterates through all methods and finds the best match based on the number of arguments
-            auto found = false;
+            arityCandidates.clear();
             for (auto &c: candidates) {
-                found = (!c.isExtensionFunction && c.getParamCount() == argc) ||
-                        (c.isExtensionFunction && c.getParamCount() == argc + 1);
-                if (found) {
-                    if (c.isExtensionFunction) {
-                        className = &c.getDeclaringType();
-                    }
-                    entry = &c;
-                    DEBUG_WRITE("MetaDataEntry Method %s's signature is: %s",
-                                entry->getName().c_str(),
-                                entry->getSig().c_str());
-                    break;
+                if ((!c.isExtensionFunction && c.getParamCount() == argc) ||
+                    (c.isExtensionFunction && c.getParamCount() == argc + 1)) {
+                    arityCandidates.push_back(&c);
                 }
             }
 
-            // Iterates through the parent class's methods to find a good match
-            if (!found) {
+            if (!arityCandidates.empty()) {
+                selectedCallbackData = callbackData;
+                if (arityCandidates.front()->isExtensionFunction) {
+                    className = &arityCandidates.front()->getDeclaringType();
+                }
+                break;
+            } else {
                 callbackData = callbackData->parent;
             }
+        }
+
+        if (arityCandidates.size() == 1) {
+            entry = arityCandidates.front();
+        } else if (arityCandidates.size() > 1) {
+            entry = arityCandidates.front();
         }
 
 
@@ -2464,13 +2673,313 @@ napi_value MetadataNode::MethodCallback(napi_env env, napi_callback_info info) {
                         initialCallbackData->node->IsNodeTypeInterface() ? 1 : 0;
             }
             bool isFromInterface = initialCallbackData->cachedIsFromInterface == 1;
-            if (initialCallbackData->objectManager == nullptr) {
+        if (initialCallbackData->objectManager == nullptr) {
                 initialCallbackData->objectManager =
                         Runtime::GetRuntime(env)->GetObjectManager();
             }
+
+
+            size_t metadataMatches = 0;
+            MetadataEntry *metadataMatch = nullptr;
+            bool metadataSignatureIsUnambiguous = false;
+            bool forceReflectionFallback = false;
+            bool preserveGenericObject = false;
+            bool hasObjectCandidate = false;
+            bool hasSpecificInterfaceCandidate = false;
+            bool hasExactStringCandidate = false;
+            for (auto *candidate : arityCandidates) {
+                const auto signature = candidate->getSig();
+                hasObjectCandidate |= signature.find("Ljava/lang/Object;") != std::string::npos;
+                hasSpecificInterfaceCandidate |= signature.find("Ljava/io/Serializable;") != std::string::npos ||
+                                                signature.find("Ljava/lang/CharSequence;") != std::string::npos;
+                hasExactStringCandidate |= signature.find("(Ljava/lang/String;") == 0;
+            }
+            preserveGenericObject = hasObjectCandidate && hasSpecificInterfaceCandidate && !hasExactStringCandidate;
+            struct MetadataCandidateMatch {
+                MetadataEntry *entry;
+                std::vector<jclass> parameterClasses;
+            };
+            std::vector<MetadataCandidateMatch> metadataCandidateMatches;
+            JEnv metadataEnv;
+            bool hasNullArgument = false;
+            for (size_t i = 0; i < argc; i++) {
+                napi_valuetype valueType;
+                if (napi_typeof(env, argv[i], &valueType) != napi_ok) {
+                    hasNullArgument = true;
+                    break;
+                }
+                if (valueType != napi_object && valueType != napi_function) {
+                    continue;
+                }
+                napi_value nullNode = nullptr;
+                if (napi_get_named_property(env, argv[i], PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
+                    !napi_util::is_null_or_undefined(env, nullNode)) {
+                    hasNullArgument = true;
+                    break;
+                }
+            }
+            constexpr int kMetadataMismatch = -1;
+            constexpr int kMetadataUnknown = 0;
+            constexpr int kMetadataMatch = 1;
+            auto metadataTypesMatch = [&](MetadataEntry &candidate,
+                                           std::vector<jclass> &parameterClasses) -> int {
+                const auto signature = candidate.getSig();
+                if (signature.empty() || signature[0] != '(') {
+                    return kMetadataMismatch;
+                }
+
+                std::vector<std::string> parameterTypes;
+                size_t index = 1;
+                while (index < signature.size() && signature[index] != ')') {
+                    const size_t start = index;
+                    if (signature[index] == 'L') {
+                        const auto end = signature.find(';', index);
+                        if (end == std::string::npos) return kMetadataMismatch;
+                        index = end + 1;
+                    } else if (signature[index] == '[') {
+                        index++;
+                        if (index < signature.size() && signature[index] == 'L') {
+                            const auto end = signature.find(';', index);
+                            if (end == std::string::npos) return kMetadataMismatch;
+                            index = end + 1;
+                        } else {
+                            index++;
+                        }
+                    } else {
+                        index++;
+                    }
+                    parameterTypes.emplace_back(signature.substr(start, index - start));
+                }
+
+                if (candidate.isExtensionFunction) {
+                    if (parameterTypes.empty()) return kMetadataMismatch;
+                    parameterTypes.erase(parameterTypes.begin());
+                }
+                if (parameterTypes.size() != argc) return kMetadataMismatch;
+
+                parameterClasses.assign(argc, nullptr);
+                bool hasUnknownArgument = false;
+                for (size_t i = 0; i < argc; i++) {
+                    const auto &parameterType = parameterTypes[i];
+                    napi_valuetype valueType;
+                    napi_typeof(env, argv[i], &valueType);
+                    if (valueType == napi_null || valueType == napi_undefined) {
+                        // JsArgConverter maps null/undefined for any parameter
+                        // type; nothing to check statically.
+                        hasUnknownArgument = true;
+                        continue;
+                    }
+                    if (parameterType[0] == 'L' || parameterType[0] == '[') {
+                        jclass expectedClass = nullptr;
+                        auto expectedName = parameterType;
+                        if (expectedName[0] == 'L') {
+                            expectedName = expectedName.substr(1, expectedName.size() - 2);
+                        }
+                        expectedClass = metadataEnv.FindClass(expectedName);
+                        if (expectedClass == nullptr) {
+                            metadataEnv.ExceptionClear();
+                            return kMetadataMismatch;
+                        }
+                        parameterClasses[i] = expectedClass;
+
+                        if (valueType == napi_string) {
+                            if (expectedName != "java/lang/String") {
+                                return kMetadataMismatch;
+                            }
+                            auto stringClass = metadataEnv.FindClass("java/lang/String");
+                            if (stringClass == nullptr) {
+                                metadataEnv.ExceptionClear();
+                                return kMetadataMismatch;
+                            }
+                            if (metadataEnv.IsAssignableFrom(expectedClass, stringClass) != JNI_TRUE) {
+                                return kMetadataMismatch;
+                            }
+                        } else {
+                            if (valueType != napi_object && valueType != napi_function) return kMetadataMismatch;
+                            napi_value nullNode = nullptr;
+                            if (napi_get_named_property(env, argv[i], PROP_KEY_NULL_NODE_NAME, &nullNode) == napi_ok &&
+                                !napi_util::is_null_or_undefined(env, nullNode)) {
+                                return kMetadataMismatch;
+                            }
+                            auto actualObject = initialCallbackData->objectManager->GetJavaObjectByJsObject(argv[i]);
+                            if (actualObject.IsNull()) {
+                                // JS array for an array parameter, or a JS value
+                                // without a Java peer: only the lenient
+                                // JsArgConverter can marshal these.
+                                hasUnknownArgument = true;
+                                continue;
+                            }
+                            if (parameterType[0] == '[' && expectedName == "[Ljava/lang/Object;") {
+                                if (ObjectManager::GetClassName((jobject) actualObject) != expectedName) {
+                                    return kMetadataMismatch;
+                                }
+                            }
+                            bool hasSerializableCandidate = false;
+                            for (auto *arityCandidate : arityCandidates) {
+                                if (arityCandidate->getSig().find("Ljava/io/Serializable;") != std::string::npos) {
+                                    hasSerializableCandidate = true;
+                                    break;
+                                }
+                            }
+                            if (expectedName == "java/lang/Object" && !hasSerializableCandidate) {
+                                return kMetadataMismatch;
+                            }
+                            if (metadataEnv.IsInstanceOf(actualObject, expectedClass) != JNI_TRUE) return kMetadataMismatch;
+                        }
+                    } else if (parameterType[0] == 'Z') {
+                        if (valueType != napi_boolean) return kMetadataMismatch;
+                    } else if (valueType != napi_number ||
+                               (parameterType[0] != 'B' && parameterType[0] != 'C' &&
+                                parameterType[0] != 'S' && parameterType[0] != 'I' &&
+                                parameterType[0] != 'J' && parameterType[0] != 'F' &&
+                                parameterType[0] != 'D')) {
+                        return kMetadataMismatch;
+                    }
+                }
+                return hasUnknownArgument ? kMetadataUnknown : kMetadataMatch;
+            };
+            if (!hasNullArgument && selectedCallbackData != nullptr && arityCandidates.size() > 1 && !preserveGenericObject) {
+                for (auto *candidate : arityCandidates) {
+                    if (candidate->isStatic != first.isStatic) {
+                        continue;
+                    }
+                    std::vector<jclass> parameterClasses;
+                    if (metadataTypesMatch(*candidate, parameterClasses) == kMetadataMatch) {
+                        metadataCandidateMatches.push_back({candidate, std::move(parameterClasses)});
+                    }
+                }
+
+                for (size_t i = 0; i < metadataCandidateMatches.size(); i++) {
+                    bool dominated = false;
+                    for (size_t j = 0; j < metadataCandidateMatches.size(); j++) {
+                        if (i == j) continue;
+
+                        const auto &candidate = metadataCandidateMatches[i];
+                        const auto &other = metadataCandidateMatches[j];
+                        for (size_t parameter = 0; parameter < argc; parameter++) {
+                            auto candidateClass = candidate.parameterClasses[parameter];
+                            auto otherClass = other.parameterClasses[parameter];
+                            if (candidateClass == nullptr || otherClass == nullptr) {
+                                if (candidate.entry->getSig() != other.entry->getSig()) {
+                                    break;
+                                }
+                                continue;
+                            }
+
+                            if (metadataEnv.IsAssignableFrom(candidateClass, otherClass) == JNI_TRUE) {
+                                if (metadataEnv.IsAssignableFrom(otherClass, candidateClass) != JNI_TRUE) {
+                                    dominated = true;
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if (dominated) break;
+                    }
+                    if (!dominated) {
+                        metadataMatches++;
+                        metadataMatch = metadataCandidateMatches[i].entry;
+                    }
+                }
+                metadataSignatureIsUnambiguous = metadataMatches == 1 && metadataMatch != nullptr;
+                bool hasExactStringCandidate = false;
+                for (const auto &candidate : metadataCandidateMatches) {
+                    if (candidate.entry->getSig().find("(Ljava/lang/String;") == 0) {
+                        hasExactStringCandidate = true;
+                        break;
+                    }
+                }
+                if (metadataCandidateMatches.size() > 1 && !hasExactStringCandidate) {
+                    metadataSignatureIsUnambiguous = false;
+                    metadataMatch = nullptr;
+                    forceReflectionFallback = false;
+                }
+                if (!metadataSignatureIsUnambiguous && !metadataCandidateMatches.empty()) {
+                    for (const auto &candidate : metadataCandidateMatches) {
+                        const auto signature = candidate.entry->getSig();
+                        const auto closeParen = signature.find(')');
+                        if (closeParen != std::string::npos && closeParen > 1 &&
+                            signature[1] == '[') {
+                            forceReflectionFallback = true;
+                            break;
+                        }
+                        if (closeParen != std::string::npos && closeParen > 1 &&
+                            signature[1] != 'L' && signature[1] != 'Z') {
+                            forceReflectionFallback = true;
+                            break;
+                        }
+                    }
+                }
+                if (!metadataSignatureIsUnambiguous && metadataCandidateMatches.empty()) {
+                    for (auto *candidate : arityCandidates) {
+                        if (candidate->isExtensionFunction) {
+                            continue;
+                        }
+                        const auto signature = candidate->getSig();
+                        const auto closeParen = signature.find(')');
+                        const bool hasObjectParameter = signature.find("Ljava/lang/Object;") != std::string::npos;
+                        const bool hasArrayParameter = signature.find('[') != std::string::npos;
+                        const bool hasPrimitiveParameter = closeParen != std::string::npos && closeParen > 1 &&
+                                                           signature[1] != 'L' && signature[1] != '[' && signature[1] != 'Z';
+                        if (!hasObjectParameter && !hasArrayParameter && !hasPrimitiveParameter) {
+                            continue;
+                        }
+                        for (size_t i = 0; i < argc; i++) {
+                            napi_valuetype valueType;
+                            napi_typeof(env, argv[i], &valueType);
+                            if (valueType == napi_object || valueType == napi_function || valueType == napi_number) {
+                                forceReflectionFallback = true;
+                                break;
+                            }
+                        }
+                        if (forceReflectionFallback) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!hasNullArgument && entry != nullptr && !entry->isExtensionFunction && arityCandidates.size() == 1) {
+                std::vector<jclass> parameterClasses;
+                const int compatibility = metadataTypesMatch(*entry, parameterClasses);
+                if (compatibility == kMetadataMatch) {
+                    metadataMatch = entry;
+                    metadataSignatureIsUnambiguous = true;
+                } else if (compatibility == kMetadataMismatch) {
+                    // A provable mismatch against the only metadata candidate
+                    // means the metadata may be stale (the runtime class can
+                    // have overloads the generator never saw). Let reflection
+                    // resolve against the real class.
+                    const auto signature = entry->getSig();
+                    if (entry->isStatic || signature.find("Ljava/lang/Object;") == std::string::npos) {
+                        entry = nullptr;
+                    }
+                }
+                // kMetadataUnknown: keep the entry. A generator-resolved entry is
+                // invoked directly through the lenient JsArgConverter (the
+                // pre-metadata-first behavior); unresolved ones still use
+                // reflection. Reflection can't marshal JS arrays or null for
+                // primitives, so demoting here would turn valid calls into
+                // "Failed resolving method" errors.
+            }
+            if (!hasNullArgument && entry != nullptr && entry->isExtensionFunction) {
+                metadataMatch = entry;
+                metadataSignatureIsUnambiguous = true;
+            }
+            if (metadataSignatureIsUnambiguous) {
+                entry = metadataMatch;
+            } else if (forceReflectionFallback) {
+                entry = nullptr;
+            }
+            const bool selectedIsStatic = entry != nullptr
+                                          ? entry->isStatic
+                                          : (arityCandidates.size() == 1
+                                             ? arityCandidates.front()->isStatic
+                                             : first.isStatic);
             napi_value result = CallbackHandlers::CallJavaMethod(env, jsThis, *className, methodName, entry,
-                                                    isFromInterface, first.isStatic, info,
-                                                    argc, argv, initialCallbackData->objectManager);
+                                                    isFromInterface, selectedIsStatic, info,
+                                                    argc, argv, initialCallbackData->objectManager,
+                                                    metadataSignatureIsUnambiguous);
 //            napi_value error;
 //            error = Runtime::GetRuntime(env)->getPendingError();
 //            if (error) {

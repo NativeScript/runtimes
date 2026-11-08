@@ -20,7 +20,12 @@ class AppConfig {
         ForceLog("forceLog", false),
         DiscardUncaughtJsExceptions("discardUncaughtJsExceptions", false),
         EnableLineBreakpoins("enableLineBreakpoints", false),
-        EnableMultithreadedJavascript("enableMultithreadedJavascript", false);
+        EnableMultithreadedJavascript("enableMultithreadedJavascript", false),
+        // Written by the build that ran the static binding generator, not by
+        // hand: the generated class names and the names the runtime looks up
+        // are halves of one scheme. Keep this last -- Runtime.cpp reads this
+        // array by ordinal.
+        ContentKeyedBindings("contentKeyedBindings", false);
 
         private final String name;
         private final Object defaultValue;
@@ -106,6 +111,9 @@ class AppConfig {
                     }
                     if (androidObject.has(KnownKeys.EnableMultithreadedJavascript.getName())) {
                         values[KnownKeys.EnableMultithreadedJavascript.ordinal()] = androidObject.getBoolean(KnownKeys.EnableMultithreadedJavascript.getName());
+                    }
+                    if (androidObject.has(KnownKeys.ContentKeyedBindings.getName())) {
+                        values[KnownKeys.ContentKeyedBindings.ordinal()] = androidObject.getBoolean(KnownKeys.ContentKeyedBindings.getName());
                     }
                 }
             }

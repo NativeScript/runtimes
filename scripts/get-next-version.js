@@ -20,6 +20,12 @@ if (!currentVersion) {
     "ios-node-api": "../packages/ios-node-api/package.json",
     "macos-node-api": "../packages/macos-node-api/package.json",
     "objc-node-api": "../packages/objc-node-api/package.json",
+    android: "../platforms/android/package.json",
+    "android-v8": "../packages/android-v8/package.json",
+    "android-hermes": "../packages/android-hermes/package.json",
+    "android-jsc": "../packages/android-jsc/package.json",
+    "android-quickjs-ng": "../packages/android-quickjs-ng/package.json",
+    "android-primjs": "../packages/android-primjs/package.json",
   };
 
   if (!packageJsonByTarget[target]) {

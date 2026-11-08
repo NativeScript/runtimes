@@ -7,17 +7,22 @@ public class InputParameters {
     // if the flag is passed the generation will exit on error
     private static final String THROW_ON_ERROR = "-throw-on-error";
     private static final String LINE_COL_PRIMJS = "-line-column-primjs";
+    // name generated classes after their content instead of their call site;
+    // must match NS_CONTENT_KEYED_BINDINGS in the runtime
+    private static final String CONTENT_KEYED_BINDINGS = "-content-keyed-bindings";
 
     private static InputParameters current = new InputParameters();
 
     private boolean showDeprecationWarnings;
     private boolean throwOnError;
     private boolean lineColumnPrimjs;
+    private boolean contentKeyedBindings;
 
     public InputParameters() {
         this.showDeprecationWarnings = false;
         this.throwOnError = false;
         this.lineColumnPrimjs = false;
+        this.contentKeyedBindings = false;
     }
 
     public void setShowDeprecationWarnings(boolean value) {
@@ -44,6 +49,14 @@ public class InputParameters {
         return lineColumnPrimjs;
     }
 
+    public void setContentKeyedBindings(boolean value) {
+        this.contentKeyedBindings = value;
+    }
+
+    public boolean getContentKeyedBindings() {
+        return contentKeyedBindings;
+    }
+
     public static void parseCommand(String[] args) {
         InputParameters inputParameters = new InputParameters();
 
@@ -61,6 +74,10 @@ public class InputParameters {
 
                  if (commandArg.equals(LINE_COL_PRIMJS)) {
                     inputParameters.setLineColumnPrimjs(true);
+                }
+
+                if (commandArg.equals(CONTENT_KEYED_BINDINGS)) {
+                    inputParameters.setContentKeyedBindings(true);
                 }
             }
         }

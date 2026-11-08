@@ -502,7 +502,7 @@ void WorkerWrapper::BackgroundLooper(std::shared_ptr<WorkerWrapper> self) {
 
         // Enters the engine scope, tears down the runtime and frees the env,
         // then deletes the Runtime (which frees the underlying engine runtime).
-        Runtime::DisposeWorkerRuntime(runtime_);
+        Runtime::DisposeRuntime(runtime_);
         runtime_ = nullptr;
     }
 
@@ -604,7 +604,7 @@ void WorkerWrapper::EnsureJniCached() {
             env.GetStaticMethodID(RUNTIME_CLASS, "initWorkerRuntime", "(ILjava/lang/String;)I");
     RUN_WORKER_LOOP_METHOD_ID = env.GetStaticMethodID(RUNTIME_CLASS, "runWorkerLoop", "()V");
     DETACH_WORKER_RUNTIME_METHOD_ID =
-            env.GetStaticMethodID(RUNTIME_CLASS, "detachWorkerRuntime", "(I)V");
+            env.GetStaticMethodID(RUNTIME_CLASS, "detachRuntime", "(I)V");
 
     LOOPER_CLASS = env.FindClass("android/os/Looper");
     assert(LOOPER_CLASS != nullptr);

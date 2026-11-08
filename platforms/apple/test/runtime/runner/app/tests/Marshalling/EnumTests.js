@@ -43,6 +43,30 @@ describe(module.id, function () {
         expect(NSOrderedAscending).toBe(-1);
         expect(NSOrderedSame).toBe(0);
         expect(NSOrderedDescending).toBe(1);
+        expect(NSTextAlignmentCenter).toBe(NSTextAlignment.Center);
+        expect(kCLAuthorizationStatusRestricted).toBe(1);
+        expect(NSCaseInsensitiveSearch).toBe(1);
+    });
+
+    it("EnumConstantsWhoseNameDiffersFromTheEnumName", function () {
+        expect(MKMapTypeStandard).toBe(0);
+        expect(MKMapType.MKMapTypeStandard).toBe(0);
+        expect(CKErrorZoneBusy).toBe(23);
+        expect(CKErrorCode.CKErrorZoneBusy).toBe(23);
+        expect(CKRecordZoneCapabilityAtomic).toBe(2);
+        expect(CKRecordZoneEncryptionScopePerZone).toBe(1);
+    });
+
+    it("EnumMemberAliasesAreNotGlobalVariables", function () {
+        expect(NSTextAlignment.Center).toBe(1);
+        expect(CKRecordZoneEncryptionScope.Zone).toBe(1);
+        expect(CKErrorCode.ZoneBusy).toBe(23);
+
+        ["Center", "Zone", "Ascending", "Restricted", "ZoneBusy",
+         "NSComparisonAscending", "kNSTextAlignmentCenter"].forEach(function (name) {
+            expect(name + " in globalThis: " + (name in globalThis))
+                .toBe(name + " in globalThis: false");
+        });
     });
 
     it("EnumWithOneValue", function () {

@@ -18,6 +18,9 @@ typedef uint32_t MDSectionOffset;
 
 enum MDSectionOffsetFlag : uint32_t {
   mdSectionOffsetNext = 1u << 31,
+  // Enum member names only: the stored name is the full C name rather than
+  // one shortened by the enum's member prefix/suffix.
+  mdSectionOffsetEnumMemberCName = 1u << 30,
 };
 
 // Bits 0-1: flags (2 flags)
@@ -113,7 +116,11 @@ enum MDFunctionFlag : uint8_t {
 #define MD_HEADER_MAGIC_SIZE 4
 #define MD_HEADER_MAGIC "NSMD"
 #define MD_HEADER_VERSION_SIZE 2
-#define MD_HEADER_VERSION 1
+#define MD_HEADER_VERSION 2
+#define MD_HEADER_MIN_VERSION 1
+// From this version, enum entries carry the member prefix/suffix and member
+// names carry mdSectionOffsetEnumMemberCName.
+#define MD_HEADER_VERSION_ENUM_MEMBER_C_NAMES 2
 #define MD_HEADER_SIZE (MD_HEADER_MAGIC_SIZE + MD_HEADER_VERSION_SIZE)
 
 #define MD_NUM_SECTIONS 9

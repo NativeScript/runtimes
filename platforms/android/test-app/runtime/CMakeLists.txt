@@ -201,17 +201,20 @@ if (NS_BINDING STREQUAL "jsi")
 endif ()
 
 if (QUICKJS OR QUICKJS_NG)
-    # quickjs-ng, NativeScript-patched, vendored at the repo root and shared with
-    # the Apple build. The patches (JS_WeakRef_Deref, JS_NewString16,
-    # JS_ClearWeakRefKeepAlives) are required by quickjs-api.c and exist in no
-    # upstream release, which is why this is a vendored tree rather than a
-    # submodule.
+    # quickjs-ng, NativeScript-patched, shared with the Apple build. The tree is
+    # a git submodule pinned to an upstream commit; our patches (JS_WeakRef_Deref,
+    # JS_NewString16, JS_ClearWeakRefKeepAlives -- required by quickjs-api.c and
+    # in no upstream release) are applied into its work tree by
+    # scripts/apply_quickjs_patches.js. The pin also fixes BC_VERSION, so the
+    # bytecode compiler must be built from the same commit; see
+    # vendor/quickjs/patches/README.md.
     set(QJS_SOURCE_DIR ${VENDOR_DIR}/quickjs/source_ng)
     add_compile_definitions(__QUICKJS_NG__)
 
     set(SOURCES ${SOURCES}
             # quickjs
-            ${QJS_SOURCE_DIR}/cutils.c
+            # NOTE: no cutils.c -- upstream folded it away after v0.11.0; the
+            # pinned commit no longer ships it.
             ${QJS_SOURCE_DIR}/libregexp.c
             ${QJS_SOURCE_DIR}/libunicode.c
             ${QJS_SOURCE_DIR}/quickjs.c
@@ -457,15 +460,19 @@ if (USE_HOST_OBJECTS)
     target_compile_definitions(NativeScript PRIVATE USE_HOST_OBJECT)
 endif ()
 
-if (IS_NAPI_MODULE)
-    target_compile_definitions(NativeScript PRIVATE IS_NAPI_MODULE)
-endif ()
-
 # Bytecode builds embed app-relative source names (no "file://" scheme). This
 # lets the JS stack-trace parser (BuildStacktraceFrames) accept those frames and
 # rebuild the full runtime URL from the app root. Wired from runtime/build.gradle.
 if (NS_BYTECODE)
     target_compile_definitions(NativeScript PRIVATE NS_BYTECODE_ENABLED)
+endif ()
+
+# Name generated bindings after their content rather than their call site. Must
+# be passed together with -content-keyed-bindings to the static binding
+# generator; the two names are halves of one scheme. Wired from
+# runtime/build.gradle.
+if (NS_CONTENT_KEYED_BINDINGS)
+    target_compile_definitions(NativeScript PRIVATE NS_CONTENT_KEYED_BINDINGS)
 endif ()
 
 # if("${ANDROID_ABI}" MATCHES "armeabi-v7a$" OR "${ANDROID_ABI}" MATCHES "x86$")

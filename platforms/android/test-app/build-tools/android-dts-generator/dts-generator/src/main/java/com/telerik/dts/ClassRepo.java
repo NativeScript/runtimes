@@ -57,6 +57,11 @@ public class ClassRepo {
 			});
 	}
 
+	/** Every class name to be emitted, in emission order. Empty before sortCachedProviders. */
+	public static List<String> getAllClassNames() {
+		return sortedClasses == null ? Collections.<String>emptyList() : sortedClasses;
+	}
+
 	public static JavaClass findClass(String className) {
 		JavaClass clazz = null;
 		for (ClassMapProvider classMapProvider : cachedProviders) {

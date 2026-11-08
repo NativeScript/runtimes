@@ -34,6 +34,17 @@ public class GetInterfaceNames {
             String pathToDependency = dr.getRow();
             if (pathToDependency.endsWith(".jar")) {
                 generateInterfaceNames(pathToDependency, interfacesList);
+            } else {
+                // The app's own compiled classes arrive as a directory, not a
+                // jar. Skipping those meant an interface the app declares was
+                // never in this list, so the parser did not recognise
+                // `new com.tns.tests.InterfaceOne({...})` as implementing one
+                // and no binding was pre-generated -- the class was built on
+                // device instead, which works but costs a dex at startup.
+                File dir = new File(pathToDependency);
+                if (dir.isDirectory()) {
+                    generateInterfaceNamesFromDirectory(dir, interfacesList);
+                }
             }
         };
 
@@ -44,6 +55,34 @@ public class GetInterfaceNames {
         }
 
         out.close();
+    }
+
+    private static void generateInterfaceNamesFromDirectory(File dir, List<String> interfacesList) {
+        File[] entries = dir.listFiles();
+        if (entries == null) {
+            return;
+        }
+
+        for (File entry : entries) {
+            if (entry.isDirectory()) {
+                generateInterfaceNamesFromDirectory(entry, interfacesList);
+                continue;
+            }
+            if (!entry.getName().endsWith(CLASS_EXT)) {
+                continue;
+            }
+            // Unreadable or half-written class files are skipped rather than
+            // fatal: compileAppClassesForSbg is best-effort by design, so a
+            // source it could not compile must not take the build down here.
+            try (FileInputStream in = new FileInputStream(entry)) {
+                JavaClass clazz = new ClassParser(in, entry.getName()).parse();
+                if (clazz.isInterface()) {
+                    interfacesList.add(clazz.getClassName().replace('$', '.'));
+                }
+            } catch (IOException | RuntimeException e) {
+                // ignored -- see above
+            }
+        }
     }
 
     private static void generateInterfaceNames(String pathToJar, List<String> interfacesList) {

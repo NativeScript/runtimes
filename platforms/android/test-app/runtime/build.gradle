@@ -10,7 +10,6 @@ if (hasEngine) {
     jsEngine = engine
 }
 def hasHostObjects = true //project.hasProperty("useHostObjects")
-def isNapiModule = project.hasProperty("asNapiModule");
 
 // Which runtime to compile. These are two complete parallel implementations,
 // not a runtime plus a shim:
@@ -22,6 +21,13 @@ def bindingLayer = project.findProperty("bindingLayer") ?: "napi"
 if (!["napi", "jsi"].contains(bindingLayer)) {
     throw new GradleException("bindingLayer must be 'napi' or 'jsi', got '${bindingLayer}'")
 }
+
+// Name generated bindings after what they contain rather than after the call
+// site that created them. Off here so the standalone runtime keeps its existing
+// names; on by default only where the bundler belongs to an embedder. The static
+// binding generator has to be told the same thing -- see -Pcontent-keyed-bindings
+// in app/build.gradle.
+def contentKeyedBindings = project.hasProperty("content-keyed-bindings")
 
 printf("Compiling NativeScript with %s (runtime: %s).\n", jsEngine, bindingLayer)
 
@@ -190,11 +196,11 @@ android {
                    arguments.add("-DUSE_HOST_OBJECTS=true")
                }
 
-                if (isNapiModule) {
-                    arguments.add("-DIS_NAPI_MODULE=true")
-                }
-
                 arguments.add("-DNS_BINDING=${bindingLayer}")
+
+                if (contentKeyedBindings) {
+                    arguments.add("-DNS_CONTENT_KEYED_BINDINGS=1")
+                }
 
                 if (bytecodeStacktraces) {
                     arguments.add("-DNS_BYTECODE=1")
@@ -469,6 +475,13 @@ tasks.register('downloadHermesLibs', Exec) {
                 new File(hermesEngineLibDir, "${variant}/${abi}/libhermesvm.so").isFile()
             }
         }
+    }
+    doLast {
+        // Any CMake config generated before this fetch recorded no runtimeFiles
+        // for the prebuilts, and AGP would keep reusing it -- building green and
+        // shipping an APK that dlopen-fails at launch. Having had to download at
+        // all means every existing config predates the libraries.
+        delete new File(projectDir, ".cxx")
     }
 }
 

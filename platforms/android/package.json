@@ -4,7 +4,7 @@
   "version": "9.0.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/runtimes.git",
+    "url": "git+https://github.com/NativeScript/runtimes.git",
     "directory": "platforms/android"
   },
   "files": [
@@ -27,9 +27,7 @@
   },
   "scripts": {
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s",
-    "version": "npm run changelog && git add CHANGELOG.md",
-    "build": "node ./scripts/build.js",
-    "setup": "node ./scripts/setup.js"
+    "version": "npm run changelog && git add CHANGELOG.md"
   },
   "devDependencies": {
     "conventional-changelog-cli": "^2.1.1",

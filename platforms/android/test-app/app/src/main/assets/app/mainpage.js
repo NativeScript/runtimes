@@ -30,6 +30,9 @@ require("./tests/testAsserts");
 require("./tests/testWeakRef");
 require("./tests/tests");
 require("./tests/testMethodResolution");
+require("./tests/testOverloadResolutionRegression");
+require("./tests/testReturnTypeResolution");
+require("./tests/testSingleOverloadResolution");
 require("./tests/testMethodResolutionWithNulls");
 require("./tests/testArrays");
 require("./tests/testsForRuntimeBindingGenerator");
@@ -78,5 +81,3 @@ require('./tests/testQueueMicrotask.js');
 require('./tests/testConcurrentAccess.js');
 require('./tests/testClassForNameDiscovery.js');
 require('./tests/testNativeTimers.js');
-
-

@@ -31,6 +31,57 @@
 using namespace std;
 using namespace tns;
 
+namespace {
+bool EnsureMetadataReturnType(MetadataEntry *entry) {
+    if (entry == nullptr) {
+        return false;
+    }
+
+    auto &returnType = entry->getReturnType();
+    if (!returnType.empty()) {
+        return true;
+    }
+
+    const auto &signature = entry->getSig();
+    const auto closeParen = signature.find(')');
+    if (closeParen == std::string::npos || closeParen + 1 >= signature.size()) {
+        return false;
+    }
+
+    const auto candidate = signature.substr(closeParen + 1);
+    switch (candidate[0]) {
+        case 'V':
+        case 'Z':
+        case 'B':
+        case 'C':
+        case 'S':
+        case 'I':
+        case 'J':
+        case 'F':
+        case 'D':
+            if (candidate.size() != 1) {
+                return false;
+            }
+            break;
+        case 'L':
+            if (candidate.size() < 3 || candidate.back() != ';') {
+                return false;
+            }
+            break;
+        case '[':
+            if (candidate.size() < 2) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+    }
+
+    returnType = candidate;
+    return true;
+}
+}
+
 void CallbackHandlers::Init(napi_env env) {
     JEnv jEnv;
 
@@ -71,7 +122,8 @@ void CallbackHandlers::Init(napi_env env) {
 napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, const string &className,
                                  const string &methodName, MetadataEntry *entry,
                                  bool isFromInterface, bool isStatic, napi_callback_info info, size_t argc, napi_value* argv,
-                                 ObjectManager *objectManager) {
+                                 ObjectManager *objectManager,
+                                 bool metadataSignatureIsUnambiguous) {
 
     JEnv jEnv;
     jclass clazz;
@@ -83,9 +135,51 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
     bool isSuper = false;
     napi_status status;
 
-    if ((entry != nullptr) && entry->getIsResolved()) {
+    if (metadataSignatureIsUnambiguous && entry != nullptr &&
+        !EnsureMetadataReturnType(entry)) {
+        entry = nullptr;
+        metadataSignatureIsUnambiguous = false;
+    }
+
+    if (metadataSignatureIsUnambiguous && entry != nullptr && entry->memberId == nullptr) {
+        JEnv metadataEnv;
+        auto metadataClass = metadataEnv.FindClass(className);
+        if (metadataClass != nullptr) {
+            jmethodID metadataMethod;
+            jclass resolvedMetadataClass = metadataClass;
+            if (isStatic && isFromInterface) {
+                auto methodAndClassPair = metadataEnv.GetInterfaceStaticMethodIDAndJClass(
+                        className, methodName, entry->getSig());
+                metadataMethod = methodAndClassPair.first;
+                if (methodAndClassPair.second != nullptr) {
+                    resolvedMetadataClass = methodAndClassPair.second;
+                }
+            } else {
+                metadataMethod = isStatic
+                                 ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
+                                                                  entry->getSig())
+                                 : metadataEnv.GetMethodID(metadataClass, methodName,
+                                                           entry->getSig());
+            }
+            if (metadataMethod != nullptr) {
+                entry->memberId = reinterpret_cast<void *>(metadataMethod);
+                entry->clazz = resolvedMetadataClass;
+            } else {
+                metadataEnv.ExceptionClear();
+                entry = nullptr;
+                metadataSignatureIsUnambiguous = false;
+            }
+        } else {
+            metadataEnv.ExceptionClear();
+            entry = nullptr;
+            metadataSignatureIsUnambiguous = false;
+        }
+    }
+
+    if ((entry != nullptr) && (entry->getIsResolved() || metadataSignatureIsUnambiguous)) {
         auto &entrySignature = entry->getSig();
         isStatic = entry->isStatic;
+
 
         if (entry->memberId == nullptr) {
             clazz = jEnv.FindClass(className);
@@ -188,6 +282,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
         retType = mi.retType;
     }
 
+
     if (!isStatic) {
         DEBUG_WRITE("CallJavaMethod on instance %s", methodName.c_str());
     } else {
@@ -206,6 +301,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                                   : JsArgConverter(env, argv, argc, false, *sig, entry, (JNIEnv *) jEnv, objectManager);
 
 
+
     if (!argConverter.IsValid()) {
         JsArgConverter::Error err = argConverter.GetError();
         throw NativeScriptException(err.msg);
@@ -214,6 +310,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
     JniLocalRef callerJavaObject;
 
     jvalue *javaArgs = argConverter.ToArgs();
+
 
     if (!isStatic) {
         int objectId = -1;
@@ -235,6 +332,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
             throw NativeScriptException(ss.str());
         }
     }
+
 
     napi_value returnValue;
 
@@ -389,6 +487,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                 result = jEnv.CallObjectMethodA(callerJavaObject, mid, javaArgs);
             }
 
+
             if (result != nullptr) {
                 // A declared array return can never be a java.lang.String, so skip
                 // the per-return IsInstanceOf JNI probe on the array-return hot path.
@@ -516,6 +615,7 @@ bool CallbackHandlers::RegisterInstance(napi_env env, napi_value jsObject,
                           fullClassName.c_str());
     }
 
+
     return success;
 }
 
@@ -610,14 +710,21 @@ napi_value CallbackHandlers::CreateJSWrapper(napi_env env, jint javaObjectID,
     return objectManager->CreateJSWrapper(javaObjectID, typeName);
 }
 
-jobjectArray
-CallbackHandlers::GetImplementedInterfaces(napi_env env, JEnv &jEnv,
-                                           napi_value implementationObject) {
-    if (implementationObject == nullptr || napi_util::is_undefined(env, implementationObject)) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+// The two Collect* helpers below define which names take part in a binding.
+// Content-keyed class names hash exactly these sets, so the static binding
+// generator has to reproduce them from the bundle byte for byte -- a name that
+// is collected here but not there (or the reverse) yields two different class
+// names for one extend() site, which fails at runtime as LookedUpClassNotFound.
+// Keeping the JNI arrays and the hash on one implementation is what makes that
+// contract checkable in a single place.
+vector<string>
+CallbackHandlers::CollectImplementedInterfaceNames(napi_env env,
+                                                   napi_value implementationObject) {
+    vector<string> interfaceNames;
 
-    vector<jstring> interfacesToImplement;
+    if (implementationObject == nullptr || napi_util::is_undefined(env, implementationObject)) {
+        return interfaceNames;
+    }
 
     napi_status status;
     napi_value prop;
@@ -629,7 +736,7 @@ CallbackHandlers::GetImplementedInterfaces(napi_env env, JEnv &jEnv,
         uint32_t length;
         NAPI_GUARD(napi_get_array_length(env, prop, &length)) {}
 
-        for (int j = 0; j < length; j++) {
+        for (uint32_t j = 0; j < length; j++) {
             napi_value element;
             NAPI_GUARD(napi_get_element(env, prop, j, &element)) {}
 
@@ -638,10 +745,111 @@ CallbackHandlers::GetImplementedInterfaces(napi_env env, JEnv &jEnv,
 
                 node = Util::ReplaceAll(node, std::string("/"), std::string("."));
 
-                jstring value = jEnv.NewStringUTF(node.c_str());
-                interfacesToImplement.push_back(value);
+                interfaceNames.push_back(node);
             }
         }
+    }
+
+    return interfaceNames;
+}
+
+vector<string>
+CallbackHandlers::CollectMethodOverrideNames(napi_env env, napi_value implementationObject,
+                                             bool functionsOnly) {
+    vector<string> methodNames;
+
+    if (implementationObject == nullptr || napi_util::is_undefined(env, implementationObject)) {
+        return methodNames;
+    }
+
+    napi_status status;
+    napi_value propNames;
+
+    NAPI_GUARD(napi_get_all_property_names(env, implementationObject, napi_key_own_only,
+                                napi_key_all_properties, napi_key_numbers_to_strings, &propNames)) {}
+
+    uint32_t length;
+    NAPI_GUARD(napi_get_array_length(env, propNames, &length)) {}
+
+    for (uint32_t i = 0; i < length; i++) {
+        napi_value element;
+        NAPI_GUARD(napi_get_element(env, propNames, i, &element)) {}
+        auto name = ArgConverter::ConvertToString(env, element);
+
+        if (name == "super") {
+            continue;
+        }
+
+        // Runtime bookkeeping stamped onto the implementation object, not
+        // something the user wrote. napi_key_all_properties returns
+        // non-enumerable properties too, so these have to be filtered by name.
+        if (name == EXTEND_CTOR_CACHE_KEY || name == CLASS_IMPLEMENTATION_OBJECT) {
+            continue;
+        }
+
+        // Written onto the prototype by ts_helpers' __extends before it defers
+        // to extend(), so every TypeScript-transpiled subclass carries them.
+        // They are invisible to the static binding generator, which reads the
+        // class body from source -- hashing them put the two sides permanently
+        // out of step and sent every such class down the on-device dex path.
+        if (name == PROP_KEY_TS_PARENT || name == PROP_KEY_TS_CHILD) {
+            continue;
+        }
+
+        if (!functionsOnly) {
+            // Hashing, not binding. The generator reads the implementation object
+            // out of the bundle, where it cannot tell a function from any other
+            // value -- `{ foo: someIdentifier }` is a method it must assume, and
+            // a statically-typed guess either way would disagree with what this
+            // enumeration sees. Taking every name instead makes the two sides
+            // agree by construction on everything the generator can parse.
+            //
+            // The three exclusions below are the names the generator provably
+            // never puts in the method field: `super` and `constructor` are
+            // artifacts of how the implementation object is built (ts_helpers
+            // extends with the class prototype, which always carries a
+            // constructor), and an array-valued `interfaces` is routed to its own
+            // field instead.
+            if (name == "constructor") {
+                continue;
+            }
+
+            string lowered = name;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            napi_value value;
+            NAPI_GUARD(napi_get_property(env, implementationObject, element, &value)) {}
+            bool valueIsArray = false;
+            NAPI_GUARD(napi_is_array(env, value, &valueIsArray)) {}
+            if (lowered == "interfaces" && valueIsArray) {
+                continue;
+            }
+
+            methodNames.push_back(name);
+            continue;
+        }
+
+        napi_value method;
+        NAPI_GUARD(napi_get_property(env, implementationObject, element, &method)) {}
+
+        if (napi_util::is_of_type(env, method, napi_function)) {
+            methodNames.push_back(name);
+        }
+    }
+
+    return methodNames;
+}
+
+jobjectArray
+CallbackHandlers::GetImplementedInterfaces(napi_env env, JEnv &jEnv,
+                                           napi_value implementationObject) {
+    auto names = CollectImplementedInterfaceNames(env, implementationObject);
+
+    vector<jstring> interfacesToImplement;
+    interfacesToImplement.reserve(names.size());
+    for (const auto &name: names) {
+        interfacesToImplement.push_back(jEnv.NewStringUTF(name.c_str()));
     }
 
     int interfacesCount = interfacesToImplement.size();
@@ -661,40 +869,12 @@ CallbackHandlers::GetImplementedInterfaces(napi_env env, JEnv &jEnv,
 
 jobjectArray
 CallbackHandlers::GetMethodOverrides(napi_env env, JEnv &jEnv, napi_value implementationObject) {
-    if (implementationObject == nullptr || napi_util::is_undefined(env, implementationObject)) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+    auto names = CollectMethodOverrideNames(env, implementationObject, /* functionsOnly */ true);
 
     vector<jstring> methodNames;
-
-    napi_status status;
-    napi_value propNames;
-
-    NAPI_GUARD(napi_get_all_property_names(env, implementationObject, napi_key_own_only,
-                                napi_key_all_properties, napi_key_numbers_to_strings, &propNames)) {}
-
-    uint32_t length;
-    NAPI_GUARD(napi_get_array_length(env, propNames, &length)) {}
-
-    for (int i = 0; i < length; i++) {
-        napi_value element;
-        NAPI_GUARD(napi_get_element(env, propNames, i, &element)) {}
-        auto name = ArgConverter::ConvertToString(env, element);
-
-        if (name == "super") {
-            continue;
-        }
-
-        napi_value method;
-
-        NAPI_GUARD(napi_get_property(env, implementationObject, element, &method)) {}
-
-        bool methodFound = napi_util::is_of_type(env, method, napi_function);
-
-        if (methodFound) {
-            jstring value = jEnv.NewStringUTF(name.c_str());
-            methodNames.push_back(value);
-        }
+    methodNames.reserve(names.size());
+    for (const auto &name: names) {
+        methodNames.push_back(jEnv.NewStringUTF(name.c_str()));
     }
 
     int methodCount = methodNames.size();

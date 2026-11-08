@@ -11,7 +11,8 @@
 #include <libplatform/libplatform.h>
 #endif
 
-#if defined(TARGET_ENGINE_HERMES)
+// Only the VM-owning build needs the Hermes VM headers; see EngineHost.h.
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
 #include <hermes/hermes.h>
 #endif
 
@@ -107,6 +108,21 @@ void EngineHost::SetFlags(const char *flags) {
     v8::V8::SetFlagsFromString(flags);
 #endif
 }
+
+#if defined(NS_JSI_HOST_RUNTIME)
+
+std::shared_ptr<EngineHost> EngineHost::Adopt(::facebook::jsi::Runtime &runtime) {
+    // Not make_shared: the constructor is private.
+    std::shared_ptr<EngineHost> host(new EngineHost());
+    // The non-owning engine::Runtime constructor (jsi/hermes/HermesRuntime.h).
+    // There is no RuntimeConfig to mirror from the Create() path below: the
+    // embedder already built and configured the VM, and re-deciding any of it
+    // here would either be ignored or corrupt a runtime other code is using.
+    host->m_runtime = std::make_unique<engine::Runtime>(runtime);
+    return host;
+}
+
+#else
 
 std::shared_ptr<EngineHost> EngineHost::Create() {
     // Not make_shared: the constructor is private.
@@ -229,10 +245,12 @@ std::shared_ptr<EngineHost> EngineHost::Create() {
     return host;
 }
 
+#endif  // NS_JSI_HOST_RUNTIME
+
 void EngineHost::Lock() {
     m_mutex.lock();
     m_lockDepth++;
-#if defined(TARGET_ENGINE_HERMES)
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
     // Registers the calling thread with the VM. Hermes records per-thread stack
     // bounds for its overflow guard, so entering from a Java thread without this
     // faults rather than raising a RangeError.
@@ -242,7 +260,7 @@ void EngineHost::Lock() {
 
 void EngineHost::Unlock() {
     if (m_lockDepth > 0) m_lockDepth--;
-#if defined(TARGET_ENGINE_HERMES)
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
     if (m_threadSafe != nullptr) m_threadSafe->unlock();
 #endif
     m_mutex.unlock();
@@ -250,7 +268,11 @@ void EngineHost::Unlock() {
 
 void EngineHost::ExecutePendingJobs() {
     if (m_runtime == nullptr) return;
+#if defined(NS_JSI_HOST_RUNTIME)
+    // The embedder owns the queue and decides when it runs; see ~JSScope.
+#else
     m_runtime->drainMicrotasks();
+#endif
 }
 
 engine::Value EngineHost::ExecuteScript(const std::string &source, const std::string &sourceURL) {
@@ -395,8 +417,10 @@ void EngineHost::ReleaseEngineState() {
 }
 
 EngineHost::~EngineHost() {
+    // Under NS_JSI_HOST_RUNTIME this drops the non-owning engine::Runtime
+    // wrapper only; the jsi::Runtime behind it belongs to the embedder.
     m_runtime.reset();
-#if defined(TARGET_ENGINE_HERMES)
+#if defined(TARGET_ENGINE_HERMES) && !defined(NS_JSI_HOST_RUNTIME)
     m_threadSafe.reset();
 #endif
 #if defined(TARGET_ENGINE_QUICKJS)

@@ -29,6 +29,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +96,14 @@ public class DtsApi {
         "volatile", "while", "with", "yield"
     );
 
+    /**
+     * Package prefixes skipped because a segment is a reserved word, discovered
+     * while walking the classpath. Feeds getIgnoredNamespaces() so references to
+     * their types collapse to {@code any} like any other unemitted namespace.
+     */
+    private final Set<String> reservedWordNamespaces = new LinkedHashSet<>();
+    private boolean scannedForReservedWords = false;
+
     public DtsApi(boolean allGenericImplements, InputParameters inputParameters) {
         this.allGenericImplements = allGenericImplements;
         this.ignoreObfuscatedNameLength = inputParameters.getIgnoreObfuscatedNameLength();
@@ -124,7 +133,7 @@ public class DtsApi {
 
 
                 String simpleClassName = getSimpleClassname(currClass);
-                if (isObfuscated(simpleClassName)) {
+                if (isObfuscated(simpleClassName) || !isEmittableClassName(currentFileClassname)) {
                     continue;
                 }
                 Signature signature = this.getSignature(currClass);
@@ -139,7 +148,13 @@ public class DtsApi {
                         currentFileClassname.contains(".debugger.") ||
                         currentFileClassname.endsWith("package-info") ||
                         currentFileClassname.endsWith("module-info") ||
-                        currentFileClassname.endsWith("Kt")) {
+                        currentFileClassname.endsWith("Kt") ||
+                        // ...and classes nested inside one. A Kotlin file facade
+                        // (FooKt) is already skipped above; its synthetic members
+                        // (FooKt$WhenMappings) are just as unreachable from JS, and
+                        // emitting them opens a module for a parent that was never
+                        // written.
+                        currentFileClassname.split("\\$")[0].endsWith("Kt")) {
                     continue;
                 }
 
@@ -232,6 +247,18 @@ public class DtsApi {
                 this.prevClass = currClass;
             }
             closePackage(prevClass, null);
+
+            // closePackage derives how much to close from the last emitted class
+            // name, which does not always match how many modules were actually
+            // opened -- and one unclosed module makes the whole .d.ts unparseable
+            // rather than degrading the declarations it belongs to. Close whatever
+            // is still open.
+            String emitted = sbContent.toString();
+            int unclosed = emitted.length() - emitted.replace("{", "").length()
+                    - (emitted.length() - emitted.replace("}", "").length());
+            while (unclosed > 0) {
+                sbContent.appendln(getTabs(--unclosed) + "}");
+            }
             // process class scope end
 
             String[] refs = references.toArray(new String[references.size()]);
@@ -243,20 +270,157 @@ public class DtsApi {
         return content;
     }
 
+    /**
+     * Replaces every type from a namespace we do not emit with {@code any}.
+     *
+     * <p>Scanned rather than matched with a regular expression. Generic arguments
+     * nest -- {@code androidNative.Array<kotlin.Pair<A,B>>} -- and a pattern
+     * either stops before the arguments (leaving {@code any<A,B>}) or runs past
+     * the closing bracket (leaving {@code Array<any}); both produce a .d.ts the
+     * TypeScript compiler cannot parse. Counting bracket depth gets it right for
+     * any nesting.
+     */
     private String replaceIgnoredNamespaces(String content) {
-        String regexFormat = "(?<Replace>%s(?:(?:\\.[a-zA-Z\\d]*)|<[a-zA-Z\\d\\.<>]*>)*)(?<Suffix>[^a-zA-Z\\d]+)";
-        // these namespaces are not known in some android api levels, so we cannot use them in android-support for instance, so we are replacing them with any
-        for (String ignoredNamespace : this.getIgnoredNamespaces()) {
-            String regexString = String.format(regexFormat, ignoredNamespace.replace(".", "\\."));
-            content = content.replaceAll(regexString, "any$2");
-            regexString = String.format(regexFormat, getGlobalAliasedClassName(ignoredNamespace).replace(".", "\\."));
-            content = content.replaceAll(regexString, "any$2");
+        List<String> ignored = new ArrayList<>();
+        for (String namespace : this.getIgnoredNamespaces()) {
+            ignored.add(namespace);
+            String aliased = getGlobalAliasedClassName(namespace);
+            if (!aliased.equals(namespace)) {
+                ignored.add(aliased);
+            }
+        }
+
+        // Bucketed by first character. Every candidate position used to be
+        // tested against all ~48 entries with startsWith; almost all of those
+        // comparisons fail on the first character, and this made
+        // replaceIgnoredNamespaces the hottest thing in the generator once the
+        // generics pass was fixed (34% of samples). Indexing by that character
+        // leaves one or two real comparisons per position.
+        List<List<String>> ignoredByFirstChar = bucketByFirstChar(ignored);
+
+        // Copied in runs rather than a character at a time. Matches are rare,
+        // so the old loop spent most of its life doing single-char appends and
+        // bounds checks across the whole document.
+        StringBuilder out = new StringBuilder(content.length());
+        int contentLength = content.length();
+        int i = 0;
+        int runStart = 0;
+
+        while (i < contentLength) {
+            int length = ignoredTypeLengthAt(content, i, ignoredByFirstChar);
+            if (length > 0) {
+                if (i > runStart) {
+                    out.append(content, runStart, i);
+                }
+                out.append("any");
+                i += length;
+                runStart = i;
+            } else {
+                i++;
+            }
+        }
+
+        if (runStart < contentLength) {
+            out.append(content, runStart, contentLength);
         }
 
         // replace "extends any" with "extends java.lang.Object"
-        content = content.replace(" extends any ", String.format(" extends %s ", DtsApi.JavaLangObject));
+        return out.toString().replace(" extends any ", String.format(" extends %s ", DtsApi.JavaLangObject));
+    }
 
-        return content;
+    private static boolean isTypeNameChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
+    }
+
+    /**
+     * Length of the ignored-namespace type starting at {@code start}, or 0.
+     * Includes the qualified name and its balanced generic arguments.
+     */
+    private static List<List<String>> bucketByFirstChar(List<String> ignored) {
+        List<List<String>> buckets = new ArrayList<>(ASCII_BUCKETS);
+        for (int i = 0; i < ASCII_BUCKETS; i++) {
+            buckets.add(null);
+        }
+
+        for (String namespace : ignored) {
+            if (namespace.isEmpty()) {
+                continue;
+            }
+            char first = namespace.charAt(0);
+            if (first >= ASCII_BUCKETS) {
+                continue;
+            }
+            if (buckets.get(first) == null) {
+                buckets.set(first, new ArrayList<>());
+            }
+            buckets.get(first).add(namespace);
+        }
+        return buckets;
+    }
+
+    private static final int ASCII_BUCKETS = 128;
+
+    private static int ignoredTypeLengthAt(String content, int start, List<List<String>> ignoredByFirstChar) {
+        // Must begin a name, not land in the middle of one.
+        if (start > 0) {
+            char previous = content.charAt(start - 1);
+            if (isTypeNameChar(previous) || previous == '.') {
+                return 0;
+            }
+        }
+
+        char firstChar = content.charAt(start);
+        List<String> ignored = firstChar < ASCII_BUCKETS ? ignoredByFirstChar.get(firstChar) : null;
+        if (ignored == null) {
+            return 0;
+        }
+
+        for (int n = 0; n < ignored.size(); n++) {
+            String namespace = ignored.get(n);
+            if (!content.startsWith(namespace, start)) {
+                continue;
+            }
+            int at = start + namespace.length();
+            // "kotlin" must not match "kotlinx".
+            if (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                continue;
+            }
+            // Trailing name segments: kotlin -> kotlin.jvm.functions.Function3
+            while (at + 1 < content.length() && content.charAt(at) == '.'
+                    && isTypeNameChar(content.charAt(at + 1))) {
+                at++;
+                while (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                    at++;
+                }
+            }
+            // Generic arguments, to the matching bracket.
+            if (at < content.length() && content.charAt(at) == '<') {
+                int depth = 0;
+                int scan = at;
+                while (scan < content.length()) {
+                    char c = content.charAt(scan);
+                    if (c == '<') {
+                        depth++;
+                    } else if (c == '>') {
+                        depth--;
+                        if (depth == 0) {
+                            scan++;
+                            break;
+                        }
+                    } else if (c == '\n' || c == ';') {
+                        // Unbalanced; leave the arguments alone.
+                        depth = -1;
+                        break;
+                    }
+                    scan++;
+                }
+                if (depth == 0) {
+                    at = scan;
+                }
+            }
+            return at - start;
+        }
+        return 0;
     }
 
     public static String serializeGenerics() {
@@ -299,42 +463,114 @@ public class DtsApi {
     }
 
     // Adds javalangObject types to all generics which are used without types
+    /**
+     * Appends `<any,…>` to every use of a generic type that was written
+     * without type arguments.
+     *
+     * Done in one pass over the document. It used to be one pass *per generic
+     * type*: each compiled its own pattern, scanned the whole file to see
+     * whether it occurred, and on a hit rebuilt the entire multi-megabyte
+     * string with replaceAll. With android.jar that was the single most
+     * expensive thing the generator did -- 52% of samples inside the regex
+     * engine and another 24% copying strings -- and it grew with the product of
+     * the generic count and the output size, so a larger classpath made it
+     * disproportionately worse.
+     *
+     * One alternation of every name, matched longest-first so a nested class
+     * wins over its outer, replaces N scans and N rebuilds with one of each.
+     */
     public static String replaceGenericsInText(String content) {
         String any = "any";
-        String result = content;
 
-        List<Tuple<String, Integer>> allGenerics = Stream.concat(generics.stream(), externalGenerics.stream()).collect(Collectors.toList());
+        List<Tuple<String, Integer>> allGenerics =
+                Stream.concat(generics.stream(), externalGenerics.stream()).collect(Collectors.toList());
+        if (allGenerics.isEmpty()) {
+            return content;
+        }
 
-        for(Tuple<String, Integer> generic: allGenerics) {
-            result = replaceNonGenericUsage(result, generic.x, generic.y, any);
+        Map<String, String> suffixByName = new HashMap<>();
+        for (Tuple<String, Integer> generic : allGenerics) {
+            String suffix = buildGenericArgumentSuffix(generic.y, any);
+            suffixByName.putIfAbsent(generic.x, suffix);
+
             String globalAliasedClassName = getGlobalAliasedClassName(generic.x);
-            if(!generic.x.equals(globalAliasedClassName)) {
-                result = replaceNonGenericUsage(result, globalAliasedClassName, generic.y, any);
+            if (!generic.x.equals(globalAliasedClassName)) {
+                suffixByName.putIfAbsent(globalAliasedClassName, suffix);
             }
         }
 
-        return result;
+        // Scanned in one linear pass rather than with a regex.
+        //
+        // The obvious rewrite -- one alternation of every name -- is three
+        // times *slower* than the original (11.2s vs 3.8s on android.jar): a
+        // large alternation defeats the Boyer-Moore fast path and drops the
+        // engine into generic matching at every position. Matching is really
+        // "is this maximal dotted token a known generic", which is a hash
+        // lookup, so that is what this does.
+        StringBuilder result = new StringBuilder(content.length() + 8192);
+        Set<String> reported = new HashSet<>();
+        boolean replaced = false;
+
+        int i = 0;
+        int length = content.length();
+
+        while (i < length) {
+            char c = content.charAt(i);
+            if (!isGenericTypeNameChar(c)) {
+                result.append(c);
+                i++;
+                continue;
+            }
+
+            int end = i;
+            while (end < length && isGenericTypeNameChar(content.charAt(end))) {
+                end++;
+            }
+
+            String token = content.substring(i, end);
+            String classSuffix = suffixByName.get(token);
+
+            // A use already followed by '<' carries its type arguments; one at
+            // the very end of the file has no following character, which the
+            // original pattern also required.
+            if (classSuffix != null && end < length && content.charAt(end) != '<') {
+                if (reported.add(token)) {
+                    System.out.println(String.format(
+                            "Appending %s to occurrences of class %s without passed generic types",
+                            classSuffix, token));
+                }
+                result.append(token).append(classSuffix);
+                replaced = true;
+            } else {
+                result.append(token);
+            }
+
+            i = end;
+        }
+
+        if (!replaced) {
+            return content;
+        }
+
+        return result.toString();
     }
 
-    private static String replaceNonGenericUsage(String content, String className, Integer occurencies, String javalangObject) {
-        String result = content;
-        Pattern usedAsNonGenericPattern = Pattern.compile(className.replace(".", "\\.") + "(?<Suffix>[^a-zA-Z\\d^\\.^\\$^\\<])");
-        Matcher matcher = usedAsNonGenericPattern.matcher(result);
-        
-        if (!matcher.find())
-            return content;
+    /**
+     * The characters that continue a type name. Deliberately excludes '_',
+     * matching the original pattern, whose trailing class `[^a-zA-Z\\d.$<]`
+     * treated an underscore as a terminator.
+     */
+    private static boolean isGenericTypeNameChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '.' || c == '$';
+    }
 
+    private static String buildGenericArgumentSuffix(int occurencies, String javalangObject) {
         List<String> arguments = new ArrayList<>();
         for (int i = 0; i < occurencies; i++) {
             arguments.add(javalangObject);
         }
-        String classSuffix = "<" + String.join(",", arguments) + ">";
-        
-        System.out.println(String.format("Appending %s to occurrences of class %s without passed generic types", classSuffix, className));
-
-        String replaceString = String.format("%s%s$1", className, classSuffix);
-        result = matcher.replaceAll(replaceString);
-        return result;
+        return "<" + String.join(",", arguments) + ">";
     }
 
     private String getExtendsLine(JavaClass currClass, TypeDefinition typeDefinition) {
@@ -790,7 +1026,12 @@ public class DtsApi {
                     Type[] types = new Type[referenceTypes.size()];
                     types = referenceTypes.toArray(types);
                     return types;
-                } catch (ClassCastException classCast) {
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    // A generic signature the parser does not model -- an
+                    // intersection bound (<T extends ViewGroup & HasSmoothScroll>)
+                    // is the common one. The erased descriptor is always valid and
+                    // always available, so fall back to it rather than failing the
+                    // whole run over one method.
                     return m.getArgumentTypes();
                 }
             }
@@ -826,7 +1067,7 @@ public class DtsApi {
             }
             try {
                 return GenericUtilities.getType(typeSignature);
-            } catch (ClassCastException classCast) {
+            } catch (ClassCastException | IllegalArgumentException parseFailure) {
                 return f.getType();
             }
         }
@@ -843,7 +1084,11 @@ public class DtsApi {
                 if(isVoid.matcher(returnSignature).matches()){
                     return m.getReturnType(); // returning void
                 }
-                return GenericUtilities.getType(returnSignature);
+                try {
+                    return GenericUtilities.getType(returnSignature);
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    return m.getReturnType();
+                }
             }
         }
         return m.getReturnType();
@@ -939,6 +1184,52 @@ public class DtsApi {
         return name;
     }
 
+    /**
+     * Whether a class can be written out at all.
+     *
+     * <p>Every segment of the qualified name becomes either a namespace or a
+     * class identifier, so all of them have to be identifiers. Kotlin breaks this
+     * in both directions: it mangles some internal classes with a leading dash
+     * ({@code -Base64}), and synthesises names with empty segments, which come
+     * out as {@code export module  {}. Neither is reachable from JavaScript, so
+     * they are skipped rather than emitted as unparseable declarations.
+     */
+    private static boolean isEmittableClassName(String qualifiedName) {
+        if (qualifiedName == null || qualifiedName.isEmpty()) {
+            return false;
+        }
+        for (String segment : qualifiedName.replace('$', '.').split("\\.", -1)) {
+            if (!isValidJsIdentifier(segment)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether a name from the bytecode can be used as a TypeScript parameter name.
+     *
+     * <p>Kotlin emits synthetic parameter names that are not identifiers at all --
+     * a property setter's parameter is literally {@code <set-?>} -- and writing
+     * one out produces a .d.ts the compiler cannot parse. Such parameters fall
+     * back to paramN, exactly like the interface case below.
+     */
+    private static boolean isValidJsIdentifier(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        if (!Character.isJavaIdentifierStart(name.charAt(0)) && name.charAt(0) != '$') {
+            return false;
+        }
+        for (int i = 1; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!Character.isJavaIdentifierPart(c) && c != '$') {
+                return false;
+            }
+        }
+        return true;
+    }
+
    private String getMethodParamSignature(JavaClass clazz, TypeDefinition typeDefinition, Method m) {
         LocalVariableTable table = m.getLocalVariableTable();
         LocalVariable[] variables = table != null ? table.getLocalVariableTable() : null;
@@ -956,7 +1247,7 @@ public class DtsApi {
                 ? variables[localVarIndex]
                 : null;
 
-            if (localVariable != null) {
+            if (localVariable != null && isValidJsIdentifier(localVariable.getName())) {
                 String name = localVariable.getName();
                 if(reservedJsKeywords.contains(name)){
                     System.out.println(String.format("Appending _ to reserved JS keyword %s", name));
@@ -1143,13 +1434,19 @@ public class DtsApi {
                 typeName = this.typeOverrides.get(typeName);
             }
 
+            int emittedBaseAt = tsType.length();
             if (!typeBelongsInCurrentTopLevelNamespace(typeName) && !typeName.startsWith("java.util.function.") && !isPrivateGoogleApiClass(typeName)) {
                 tsType.append(getAliasedClassName(typeName));
             } else {
                 tsType.append(typeName);
             }
 
-            if(type instanceof GenericObjectType) {
+            // A base that collapsed to `any` takes no type arguments: `any<K,V>`
+            // is not parseable TypeScript. Kotlin's synthetic inline-function
+            // parameters are the usual way to end up here.
+            boolean baseIsAny = "any".contentEquals(tsType.subSequence(emittedBaseAt, tsType.length()));
+
+            if(!baseIsAny && type instanceof GenericObjectType) {
                 GenericObjectType genericType = (GenericObjectType) type;
                 if (genericType.getNumParameters() > 0) {
                     tsType.append("<");
@@ -1353,45 +1650,125 @@ public class DtsApi {
         globalAliases.put("android", "globalAndroid");
     }
 
-    private List<String> getIgnoredNamespaces(){
-        // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
-        List<String> result = new ArrayList<>();
+    /**
+     * Namespaces referenced by the SDK but not shipped in it; every type from
+     * them becomes `any`.
+     *
+     * Built once. It used to be rebuilt -- a fresh ArrayList and 24 adds -- on
+     * every call, and it is called once per class plus once per pass over the
+     * document. On android.jar that was tens of thousands of throwaway lists
+     * and, with the concatenation in isIgnoredNamespace below, roughly 170,000
+     * throwaway strings.
+     */
+    private static final List<String> IGNORED_NAMESPACES = List.of(
+            "kotlin",
+            "org.jetbrains",
+            "org.intellij",
+            "android.app.job",
+            "android.app.SharedElementCallback",
+            "android.arch",
+            "android.content.pm.ShortcutInfo",
+            "android.graphics.drawable.Icon",
+            "android.graphics.Outline",
+            "android.view.SearchEvent",
+            "android.view.KeyboardShortcutGroup",
+            "android.view.ViewStructure",
+            "android.view.textclassifier",
+            "android.telephony.mbms",
+            "android.text.PrecomputedText",
+            "android.media.browse",
+            "android.media.session",
+            "android.media.AudioAttributes",
+            "android.media.MediaMetadata",
+            "android.media.Rating",
+            "android.service.media",
+            "android.print",
+            "java.util.function",
+            "com.tom_roush.pdfbox.pdmodel.common.function");
 
-        result.add("kotlin");
-        result.add("org.jetbrains");
-        result.add("org.intellij");
+    /** `namespace + "."`, precomputed; the concatenation used to happen inside the loop. */
+    private static final List<String> IGNORED_NAMESPACE_PREFIXES =
+            IGNORED_NAMESPACES.stream().map(n -> n + ".").collect(Collectors.toList());
 
-        result.add("android.app.job");
-        result.add("android.app.SharedElementCallback");
-        result.add("android.arch");
-        result.add("android.content.pm.ShortcutInfo");
-        result.add("android.graphics.drawable.Icon");
-        result.add("android.graphics.Outline");
-        result.add("android.view.SearchEvent");
-        result.add("android.view.KeyboardShortcutGroup");
-        result.add("android.view.ViewStructure");
-        result.add("android.view.textclassifier");
-        result.add("android.telephony.mbms");
-        result.add("android.text.PrecomputedText");
-        result.add("android.media.browse");
-        result.add("android.media.session");
-        result.add("android.media.AudioAttributes");
-        result.add("android.media.MediaMetadata");
-        result.add("android.media.Rating");
-        result.add("android.service.media");
-        result.add("android.print");
-        result.add("java.util.function");
-
-        result.add("com.tom_roush.pdfbox.pdmodel.common.function"); // com.tom_roush:pdfbox-android:1.8.10.0
-
-        return result;
+    /**
+     * Collects the reserved-word packages across the whole classpath, once.
+     *
+     * <p>Discovering them as classes are emitted is not enough: content is
+     * generated and replaced one class group at a time, so a group processed
+     * before the offending package is reached keeps raw references to types we
+     * never declare -- which tsc rejects just as loudly as the bad namespace
+     * did. Scanning every class name up front makes the ignore list complete
+     * from the first group on.
+     */
+    private void ensureReservedWordNamespaces() {
+        if (scannedForReservedWords) {
+            return;
+        }
+        scannedForReservedWords = true;
+        for (String className : ClassRepo.getAllClassNames()) {
+            String[] parts = className.split("\\.");
+            // parts[length-1] is the class name; only package segments matter.
+            for (int i = 0; i < parts.length - 1; i++) {
+                if (reservedJsKeywords.contains(parts[i])) {
+                    String prefix = String.join(".", Arrays.copyOf(parts, i + 1));
+                    if (reservedWordNamespaces.add(prefix)) {
+                        System.out.println(String.format(
+                                "Skipping package %s: \"%s\" is a reserved word and cannot be a TypeScript namespace. "
+                                        + "Types under it are typed as any.",
+                                prefix, parts[i]));
+                    }
+                    break;
+                }
+            }
+        }
     }
 
+    private List<String> getIgnoredNamespaces(){
+        // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
+        ensureReservedWordNamespaces();
+        if (reservedWordNamespaces.isEmpty()) {
+            return IGNORED_NAMESPACES;
+        }
+        List<String> all = new ArrayList<>(IGNORED_NAMESPACES);
+        all.addAll(reservedWordNamespaces);
+        return all;
+    }
+
+    /**
+     * A namespace is skipped when it is listed in IGNORED_NAMESPACES, or when
+     * any of its segments is a word TypeScript will not accept as a namespace
+     * name.
+     *
+     * <p>A package such as org.apache.commons.lang3.function is emitted as
+     * "export module function {", which does not parse -- and because the brace
+     * can never be closed, it takes the rest of the .d.ts down with
+     * it rather than just its own declarations. Java forbids its own keywords in
+     * package names, so the collisions that actually reach here are the words
+     * only JavaScript reserves ({@code function}, {@code in}, {@code with},
+     * {@code let}, {@code yield}, ...). Two of them, java.util.function and
+     * com.tom_roush...common.function, were previously listed by hand above;
+     * this covers every such package on any classpath, including ones we have
+     * never seen.
+     *
+     * <p>The types are dropped rather than escaped: an escaped segment no longer
+     * matches the package path the runtime resolves from metadata, so a name
+     * that type-checks would fail at runtime. Dropping them yields `any`, which
+     * is honest about what we know.
+     */
     private boolean isIgnoredNamespace() {
         String[] namespaceOnlyParts = Arrays.copyOf(namespaceParts, namespaceParts.length-1);
         String namespace = String.join(".", namespaceOnlyParts);
-        for (String ignoredNamespace : getIgnoredNamespaces()) {
-            if(ignoredNamespace.equals(namespace) || namespace.startsWith(ignoredNamespace + ".")) {
+        for (int i = 0; i < IGNORED_NAMESPACES.size(); i++) {
+            if (namespace.equals(IGNORED_NAMESPACES.get(i))
+                    || namespace.startsWith(IGNORED_NAMESPACE_PREFIXES.get(i))) {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < namespaceOnlyParts.length; i++) {
+            if (reservedJsKeywords.contains(namespaceOnlyParts[i])) {
+                // Everything from the reserved segment down is unnameable, so
+                // record that prefix -- not the individual class -- as ignored.
                 return true;
             }
         }

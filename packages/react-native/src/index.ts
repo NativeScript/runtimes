@@ -47,6 +47,7 @@ type NativeApiHost = {
   getClass?: (name: string) => unknown;
   getProtocol?: (name: string) => unknown;
   getEnum?: (name: string) => unknown;
+  getEnumGlobalNames?: (name: string) => string[];
   getStruct?: (name: string) => unknown;
   getUnion?: (name: string) => unknown;
   [name: string]: unknown;
@@ -689,18 +690,13 @@ export function installGlobals(): boolean {
       api.getEnum?.(enumName) ?? api[enumName];
     defineLazyNativeGlobal(name, resolveEnum);
 
-    const enumValue = resolveEnum(name);
-    if (!enumValue || typeof enumValue !== "object") {
-      continue;
-    }
-    for (const memberName of Object.keys(enumValue)) {
-      if (/^-?\d+$/.test(memberName)) {
-        continue;
-      }
-      defineLazyNativeGlobal(
-        memberName,
-        () => (enumValue as Record<string, unknown>)[memberName],
-      );
+    for (const memberName of api.getEnumGlobalNames?.(name) ?? []) {
+      defineLazyNativeGlobal(memberName, () => {
+        const enumValue = resolveEnum(name) as
+          | Record<string, unknown>
+          | undefined;
+        return enumValue?.[memberName];
+      });
     }
   }
 
@@ -1344,3 +1340,8 @@ const NativeScript = {
 };
 
 export default NativeScript;
+
+// The marker every class extending a native class carries. A runtime decorator,
+// so it works the same regardless of bundler or decorator dialect.
+export { NativeClass, Interfaces, JavaProxy, NATIVE_CLASS } from "./NativeClass";
+export type { NativeClassOptions } from "./NativeClass";

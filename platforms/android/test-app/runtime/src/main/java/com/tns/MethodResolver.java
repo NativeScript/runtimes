@@ -359,11 +359,22 @@ class MethodResolver {
             success = assignTo.isAssignableFrom(assignFrom);
 
             if (success) {
-                // TODO: consider interfaces as well
-                Class<?> currClass = assignFrom;
-                while (!assignTo.equals(currClass) && (currClass != null)) {
-                    dist += 10 * 1000;
-                    currClass = currClass.getSuperclass();
+                if (assignTo.isArray() && assignFrom.isArray()) {
+                    Class<?> assignToComponent = assignTo.getComponentType();
+                    Class<?> assignFromComponent = assignFrom.getComponentType();
+                    if (!assignToComponent.equals(assignFromComponent)) {
+                        dist += 10 * 1000;
+                    }
+                } else if (assignTo.isInterface()) {
+                    String interfaceName = assignTo.getName();
+                    dist += ("java.io.Serializable".equals(interfaceName) ||
+                             "java.lang.CharSequence".equals(interfaceName)) ? 30000 : 1000;
+                } else {
+                    Class<?> currClass = assignFrom;
+                    while (!assignTo.equals(currClass) && (currClass != null)) {
+                        dist += 10 * 1000;
+                        currClass = currClass.getSuperclass();
+                    }
                 }
             }
         }

@@ -523,6 +523,46 @@ Array runtimeMembersArray(Runtime& runtime, Class cls, bool staticMembers) {
   return result;
 }
 
+// Preserved expandos (see releaseObjectExpandoOwner) must still die with the
+// native object: they are keyed by address, so the next object allocated there
+// would be served this one's cached methods. The associated block is released
+// while the object deallocates, before its memory can be reused, and that can
+// happen on any thread -- hence retiring rather than forgetting them.
+void retireObjectExpandosOnDealloc(const std::shared_ptr<NativeApiBridge>& bridge,
+                                   id object) {
+  if (bridge == nullptr || object == nil) {
+    return;
+  }
+
+  struct Retire {
+    Retire(std::weak_ptr<NativeApiBridge> bridge, const void* native)
+        : bridge(std::move(bridge)), native(native) {}
+    ~Retire() {
+      if (auto alive = bridge.lock()) {
+        alive->retireObjectExpandos(native);
+      }
+    }
+    std::weak_ptr<NativeApiBridge> bridge;
+    const void* native;
+  };
+
+  // Any value unique per bridge works as an association key.
+  const void* key = reinterpret_cast<const void*>(
+      static_cast<uintptr_t>(bridge->instanceId()));
+  // Wrappers on two runtime threads can get here for one object at once; a
+  // second set would replace, and so release, the first block early.
+  static std::mutex associationMutex;
+  std::lock_guard<std::mutex> lock(associationMutex);
+  if (objc_getAssociatedObject(object, key) != nil) {
+    return;
+  }
+  // Shared so that copying the block does not run the destructor early.
+  auto retire = std::make_shared<Retire>(bridge, (const void*)object);
+  objc_setAssociatedObject(object, key, ^{
+    (void)retire;
+  }, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
 class NativeApiObjectHostObject final
     : public HostObject,
       public std::enable_shared_from_this<NativeApiObjectHostObject> {
@@ -548,7 +588,7 @@ class NativeApiObjectHostObject final
   ~NativeApiObjectHostObject() override {
     if (bridge_ != nullptr && object_ != nil) {
       bridge_->forgetRoundTripValue(object_);
-      bridge_->releaseObjectExpandoOwner(
+      releaseExpandoOwnership(
           object_, class_conformsToProtocol(object_getClass(object_),
                                             @protocol(NativeApiClassBuilderProtocol)));
     }
@@ -583,7 +623,7 @@ class NativeApiObjectHostObject final
     if (object_ == expected) {
       if (bridge_ != nullptr && expected != nil) {
         bridge_->forgetRoundTripValue(expected);
-        bridge_->releaseObjectExpandoOwner(expected, preserveExpandos);
+        releaseExpandoOwnership(expected, preserveExpandos);
       }
       ownsObject_ = false;
       wrapperRetainedObject_ = false;
@@ -611,7 +651,7 @@ class NativeApiObjectHostObject final
     id object = object_;
     bool releaseObject = ownsObject_;
     if (bridge_ != nullptr && expected != nil) {
-      bridge_->releaseObjectExpandoOwner(expected, /*preserveExpandos=*/true);
+      releaseExpandoOwnership(expected, /*preserveExpandos=*/true);
     }
     ownsObject_ = false;
     wrapperRetainedObject_ = false;
@@ -1641,6 +1681,13 @@ class NativeApiObjectHostObject final
   }
 
  private:
+  void releaseExpandoOwnership(id object, bool preserveExpandos) {
+    if (preserveExpandos) {
+      retireObjectExpandosOnDealloc(bridge_, object);
+    }
+    bridge_->releaseObjectExpandoOwner(object, preserveExpandos);
+  }
+
   std::shared_ptr<NativeApiBridge> bridge_;
   id object_ = nil;
   bool ownsObject_ = false;

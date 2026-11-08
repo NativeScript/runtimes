@@ -422,10 +422,10 @@ void WorkerWrapper::BackgroundLooper(std::shared_ptr<WorkerWrapper> self) {
         workerRt_.store(nullptr);
 
         // Enters the engine scope, tears the runtime down and deletes it.
-        Runtime::DisposeWorkerRuntime(runtime_);
+        Runtime::DisposeRuntime(runtime_);
         runtime_ = nullptr;
         // The last reference this thread holds to the worker VM, and it is
-        // dropped only after DisposeWorkerRuntime's scope has fully unwound.
+        // dropped only after DisposeRuntime's scope has fully unwound.
         workerHost_.reset();
     }
 
@@ -529,7 +529,7 @@ void WorkerWrapper::EnsureJniCached() {
             env.GetStaticMethodID(RUNTIME_CLASS, "initWorkerRuntime", "(ILjava/lang/String;)I");
     RUN_WORKER_LOOP_METHOD_ID = env.GetStaticMethodID(RUNTIME_CLASS, "runWorkerLoop", "()V");
     DETACH_WORKER_RUNTIME_METHOD_ID =
-            env.GetStaticMethodID(RUNTIME_CLASS, "detachWorkerRuntime", "(I)V");
+            env.GetStaticMethodID(RUNTIME_CLASS, "detachRuntime", "(I)V");
 
     LOOPER_CLASS = env.FindClass("android/os/Looper");
     assert(LOOPER_CLASS != nullptr);

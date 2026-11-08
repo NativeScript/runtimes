@@ -7,7 +7,9 @@ NativeScript runtime package for Android, built with the PrimJS JavaScript engin
 From the repo root:
 
 ```sh
-./gradlew -Pengine=PRIMJS
+npm run build-android -- --engine=PRIMJS
 ```
 
-This produces the npm artifact in `dist_primjs/`.
+The staged package lands in `dist/android_primjs_napi/` and the tarball in
+`build/npm-tarballs/`. Add `--binding=jsi` for the jsi runtime tree
+(`dist/android_primjs_jsi/`).

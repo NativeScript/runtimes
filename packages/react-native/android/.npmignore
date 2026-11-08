@@ -1,0 +1,4 @@
+# Gradle/CMake output from building the module in a checkout. The package ships
+# sources; the consuming app compiles them.
+build/
+.cxx/

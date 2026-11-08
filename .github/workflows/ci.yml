@@ -41,6 +41,13 @@ jobs:
       - name: Generate macOS metadata
         run: npm run metagen macos
       
+      - name: Apply QuickJS patches
+        # vendor/quickjs/source_ng is a pristine submodule checkout at its pinned
+        # commit; the NativeScript engine changes the Apple build needs (e.g.
+        # JS_EVAL_FLAG_COMPILE_ONLY_NO_RESOLVE for node:vm) live in
+        # vendor/quickjs/patches and are applied into the work tree here.
+        run: npm run patch-quickjs
+
       - name: Build NativeScript
         run: npm run build
 
@@ -91,6 +98,9 @@ jobs:
 
       - name: Generate macOS metadata
         run: npm run metagen macos
+
+      - name: Apply QuickJS patches
+        run: npm run patch-quickjs
 
       - name: Run macOS test suite
         env:
@@ -148,6 +158,7 @@ jobs:
           npm run build-libffi
           METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen
           npm run metagen macos
+          npm run patch-quickjs
 
       - name: Build candidate CLI
         run: |
@@ -169,8 +180,12 @@ jobs:
               rm -rf ./Frameworks/hermes.xcframework ./Frameworks/hermes-headers
               ;;
           esac
+          # A base that still vendors QuickJS-NG as plain files can't be
+          # checked out over the candidate's submodule work tree.
+          git submodule deinit --force vendor/quickjs/source_ng
           git checkout --detach "${BASE_SHA}"
           git submodule update --init --recursive
+          if [ -d vendor/quickjs/patches ]; then npm run patch-quickjs; fi
           npm install
           npm run build-libffi
           METADATA_GENERATOR_ARCHS="$(uname -m)" npm run build-metagen

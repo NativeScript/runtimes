@@ -98,6 +98,7 @@ enum VariableConstEvalKind {
 
 struct EnumConstDecl {
   std::string name;
+  std::string cName;
   int64_t value;
   AvailabilityInfo availability;
 };
@@ -132,6 +133,10 @@ class EnumDecl {
 
   std::string name;
   std::vector<EnumConstDecl> constants;
+  // Stripped from every member's cName to form its name, except members
+  // whose name is their cName.
+  std::string memberPrefix;
+  std::string memberSuffix;
 
   MDSectionOffset mdOffset = MD_SECTION_OFFSET_NULL;
 };

@@ -98,7 +98,26 @@ public class TypeDefinition {
         this.genericDefinitions = new ArrayList<>();
         while (matcher.find()) {
             String label = matcher.group(1);
-            Type type = GenericUtilities.getType(matcher.group(2) + ";");
+            String bound = matcher.group(2);
+
+            // A type parameter may carry an intersection bound -- React Native's
+            // ReactScrollViewHelper has <T extends ViewGroup & HasSmoothScroll> --
+            // which arrives here as the bounds joined by ";:". A TypeScript type
+            // parameter takes a single constraint, and the first bound is the one
+            // the erased signature uses, so the rest are dropped.
+            int intersection = bound.indexOf(";:");
+            if (intersection >= 0) {
+                bound = bound.substring(0, intersection);
+            }
+
+            Type type;
+            try {
+                type = GenericUtilities.getType(bound + ";");
+            } catch (IllegalArgumentException unparsed) {
+                // Some other shape the parser does not model. One unusable
+                // constraint is not worth failing the whole run over.
+                continue;
+            }
             this.genericDefinitions.add(new GenericDefinition(label, type));
         }
     }

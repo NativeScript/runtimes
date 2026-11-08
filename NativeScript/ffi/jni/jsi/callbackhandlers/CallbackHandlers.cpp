@@ -19,8 +19,12 @@
 #include "ArgConverter.h"
 #include "JsArgConverter.h"
 #include "GlobalHelpers.h"
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "WorkerWrapper.h"
+#endif
 #include <regex>
 
 #ifdef USE_MIMALLOC
@@ -34,6 +38,41 @@ using namespace tns;
 
 
 namespace {
+bool EnsureMetadataReturnType(MetadataEntry *entry) {
+    if (entry == nullptr) {
+        return false;
+    }
+
+    auto &returnType = entry->getReturnType();
+    if (!returnType.empty()) {
+        return true;
+    }
+
+    const auto &signature = entry->getSig();
+    const auto closeParen = signature.find(')');
+    if (closeParen == std::string::npos || closeParen + 1 >= signature.size()) {
+        return false;
+    }
+
+    const auto candidate = signature.substr(closeParen + 1);
+    switch (candidate[0]) {
+        case 'V': case 'Z': case 'B': case 'C': case 'S':
+        case 'I': case 'J': case 'F': case 'D':
+            if (candidate.size() != 1) return false;
+            break;
+        case 'L':
+            if (candidate.size() < 3 || candidate.back() != ';') return false;
+            break;
+        case '[':
+            if (candidate.size() < 2) return false;
+            break;
+        default:
+            return false;
+    }
+
+    returnType = candidate;
+    return true;
+}
 // Converts a NativeScriptException into a JS throw, the way every callback in
 // this tree has to. The napi tree needed no equivalent: there a native error
 // was reported with napi_throw and a plain return, so nothing could unwind out
@@ -98,7 +137,8 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
                                  const string &methodName, MetadataEntry *entry,
                                  bool isFromInterface, bool isStatic, bool isConstructorCall,
                                  const JsValue *argv, size_t argc,
-                                 ObjectManager *objectManager) {
+                                 ObjectManager *objectManager,
+                                 bool metadataSignatureIsUnambiguous) {
 
     JEnv jEnv;
     jclass clazz;
@@ -109,7 +149,48 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     MethodCache::CacheMethodInfo mi;
     bool isSuper = false;
 
-    if ((entry != nullptr) && entry->getIsResolved()) {
+    if (metadataSignatureIsUnambiguous && entry != nullptr &&
+        !EnsureMetadataReturnType(entry)) {
+        entry = nullptr;
+        metadataSignatureIsUnambiguous = false;
+    }
+
+    if (metadataSignatureIsUnambiguous && entry != nullptr && entry->memberId == nullptr) {
+        JEnv metadataEnv;
+        auto metadataClass = metadataEnv.FindClass(className);
+        if (metadataClass != nullptr) {
+            jmethodID metadataMethod;
+            jclass resolvedMetadataClass = metadataClass;
+            if (isStatic && isFromInterface) {
+                auto methodAndClassPair = metadataEnv.GetInterfaceStaticMethodIDAndJClass(
+                        className, methodName, entry->getSig());
+                metadataMethod = methodAndClassPair.first;
+                if (methodAndClassPair.second != nullptr) {
+                    resolvedMetadataClass = methodAndClassPair.second;
+                }
+            } else {
+                metadataMethod = isStatic
+                                 ? metadataEnv.GetStaticMethodID(metadataClass, methodName,
+                                                                  entry->getSig())
+                                 : metadataEnv.GetMethodID(metadataClass, methodName,
+                                                           entry->getSig());
+            }
+            if (metadataMethod != nullptr) {
+                entry->memberId = reinterpret_cast<void *>(metadataMethod);
+                entry->clazz = resolvedMetadataClass;
+            } else {
+                metadataEnv.ExceptionClear();
+                entry = nullptr;
+                metadataSignatureIsUnambiguous = false;
+            }
+        } else {
+            metadataEnv.ExceptionClear();
+            entry = nullptr;
+            metadataSignatureIsUnambiguous = false;
+        }
+    }
+
+    if ((entry != nullptr) && (entry->getIsResolved() || metadataSignatureIsUnambiguous)) {
         auto &entrySignature = entry->getSig();
         isStatic = entry->isStatic;
 
@@ -614,14 +695,21 @@ JsValue CallbackHandlers::CreateJSWrapper(JsRuntime &rt, jint javaObjectID,
     return objectManager->CreateJSWrapper(javaObjectID, typeName);
 }
 
-jobjectArray
-CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
-                                           const JsValue &implementationObject) {
-    if (!implementationObject.isObject()) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+// The two Collect* helpers below define which names take part in a binding.
+// Content-keyed class names hash exactly these sets, so the static binding
+// generator has to reproduce them from the bundle byte for byte -- a name that
+// is collected here but not there (or the reverse) yields two different class
+// names for one extend() site, which fails at runtime as LookedUpClassNotFound.
+// Keeping the JNI arrays and the hash on one implementation is what makes that
+// contract checkable in a single place.
+vector<string>
+CallbackHandlers::CollectImplementedInterfaceNames(JsRuntime &rt,
+                                                   const JsValue &implementationObject) {
+    vector<string> interfaceNames;
 
-    vector<jstring> interfacesToImplement;
+    if (!implementationObject.isObject()) {
+        return interfaceNames;
+    }
 
     auto prop = implementationObject.asObjectBorrowed(rt).getProperty(rt, "interfaces");
 
@@ -637,35 +725,23 @@ CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
 
                 node = Util::ReplaceAll(node, std::string("/"), std::string("."));
 
-                jstring value = jEnv.NewStringUTF(node.c_str());
-                interfacesToImplement.push_back(value);
+                interfaceNames.push_back(node);
             }
         }
     }
 
-    int interfacesCount = interfacesToImplement.size();
-
-    jobjectArray implementedInterfaces = CallbackHandlers::GetJavaStringArray(jEnv,
-                                                                              interfacesCount);
-    for (int i = 0; i < interfacesCount; i++) {
-        jEnv.SetObjectArrayElement(implementedInterfaces, i, interfacesToImplement[i]);
-    }
-
-    for (int i = 0; i < interfacesCount; i++) {
-        jEnv.DeleteLocalRef(interfacesToImplement[i]);
-    }
-
-    return implementedInterfaces;
+    return interfaceNames;
 }
 
-jobjectArray
-CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
-                                     const JsValue &implementationObject) {
-    if (!implementationObject.isObject()) {
-        return CallbackHandlers::GetJavaStringArray(jEnv, 0);
-    }
+vector<string>
+CallbackHandlers::CollectMethodOverrideNames(JsRuntime &rt,
+                                             const JsValue &implementationObject,
+                                             bool functionsOnly) {
+    vector<string> methodNames;
 
-    vector<jstring> methodNames;
+    if (!implementationObject.isObject()) {
+        return methodNames;
+    }
 
     auto implObject = implementationObject.asObjectBorrowed(rt);
 
@@ -689,14 +765,101 @@ CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
             continue;
         }
 
+        // Runtime bookkeeping stamped onto the implementation object, not
+        // something the user wrote. getOwnPropertyNames returns non-enumerable
+        // properties too, so these have to be filtered by name.
+        if (name == EXTEND_CTOR_CACHE_KEY || name == CLASS_IMPLEMENTATION_OBJECT) {
+            continue;
+        }
+
+        // Written onto the prototype by ts_helpers' __extends before it defers
+        // to extend(), so every TypeScript-transpiled subclass carries them.
+        // They are invisible to the static binding generator, which reads the
+        // class body from source -- hashing them put the two sides permanently
+        // out of step and sent every such class down the on-device dex path.
+        if (name == PROP_KEY_TS_PARENT || name == PROP_KEY_TS_CHILD) {
+            continue;
+        }
+
+        if (!functionsOnly) {
+            // Hashing, not binding. The generator reads the implementation object
+            // out of the bundle, where it cannot tell a function from any other
+            // value -- `{ foo: someIdentifier }` is a method it must assume, and
+            // a statically-typed guess either way would disagree with what this
+            // enumeration sees. Taking every name instead makes the two sides
+            // agree by construction on everything the generator can parse.
+            //
+            // The three exclusions below are the names the generator provably
+            // never puts in the method field: `super` and `constructor` are
+            // artifacts of how the implementation object is built (ts_helpers
+            // extends with the class prototype, which always carries a
+            // constructor), and an array-valued `interfaces` is routed to its own
+            // field instead.
+            if (name == "constructor") {
+                continue;
+            }
+
+            string lowered = name;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            auto value = implObject.getProperty(rt, element);
+            bool isInterfacesDeclaration = lowered == "interfaces" && js_util::is_array(rt, value);
+            if (isInterfacesDeclaration) {
+                continue;
+            }
+
+            methodNames.push_back(name);
+            continue;
+        }
+
         auto method = implObject.getProperty(rt, element);
 
         bool methodFound = method.isObject() && method.asObjectBorrowed(rt).isFunction(rt);
 
         if (methodFound) {
-            jstring value = jEnv.NewStringUTF(name.c_str());
-            methodNames.push_back(value);
+            methodNames.push_back(name);
         }
+    }
+
+    return methodNames;
+}
+
+jobjectArray
+CallbackHandlers::GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv,
+                                           const JsValue &implementationObject) {
+    auto names = CollectImplementedInterfaceNames(rt, implementationObject);
+
+    vector<jstring> interfacesToImplement;
+    interfacesToImplement.reserve(names.size());
+    for (const auto &name: names) {
+        interfacesToImplement.push_back(jEnv.NewStringUTF(name.c_str()));
+    }
+
+    int interfacesCount = interfacesToImplement.size();
+
+    jobjectArray implementedInterfaces = CallbackHandlers::GetJavaStringArray(jEnv,
+                                                                              interfacesCount);
+    for (int i = 0; i < interfacesCount; i++) {
+        jEnv.SetObjectArrayElement(implementedInterfaces, i, interfacesToImplement[i]);
+    }
+
+    for (int i = 0; i < interfacesCount; i++) {
+        jEnv.DeleteLocalRef(interfacesToImplement[i]);
+    }
+
+    return implementedInterfaces;
+}
+
+jobjectArray
+CallbackHandlers::GetMethodOverrides(JsRuntime &rt, JEnv &jEnv,
+                                     const JsValue &implementationObject) {
+    auto names = CollectMethodOverrideNames(rt, implementationObject);
+
+    vector<jstring> methodNames;
+    methodNames.reserve(names.size());
+    for (const auto &name: names) {
+        methodNames.push_back(jEnv.NewStringUTF(name.c_str()));
     }
 
     int methodCount = methodNames.size();
@@ -1235,6 +1398,11 @@ void CallbackHandlers::RemoveEnvEntries(JsRuntime &rt) {
 }
 
 // Worker
+//
+// A Worker gets its own VM, which a guest cannot build -- the runtime it is
+// attached to belongs to the embedder. Excluded from the guest build along with
+// WorkerWrapper itself; React Native has its own answer for background work.
+#if !defined(NS_JSI_HOST_RUNTIME)
 
 JsValue CallbackHandlers::NewThreadCallback(JsRuntime &rt, const JsValue &thisVal,
                                             const JsValue *args, size_t argc) {
@@ -1604,6 +1772,8 @@ void CallbackHandlers::CallWorkerScopeOnErrorHandle(JsRuntime &rt, const JsError
         nsEx.ReThrowToJs(rt);
     }
 }
+#endif
+
 
 robin_hood::unordered_map<uint64_t, CallbackHandlers::CacheEntry> CallbackHandlers::cache_;
 robin_hood::unordered_map<jclass, jfieldID> CallbackHandlers::jclass_to_runtimeId_cache;

@@ -14,6 +14,12 @@ using namespace tns;
 
 class MetadataNode {
 public:
+    // Set once from Runtime::Init, out of the app's config: the static binding
+    // generator picked the naming scheme at build time and the runtime has to
+    // look names up the same way. Only ever widens -- a runtime compiled to
+    // require content keys cannot be turned back off by an app.
+    static void SetContentKeyedBindings(bool enabled);
+
     static void Init(JsRuntime &rt);
 
     static void BuildMetadata(const std::string &filesPath);
@@ -75,6 +81,16 @@ private:
 
     static string CreateFullClassName(const std::string& className, const std::string& extendNameAndLocation);
 
+    static string CreateContentKey(const std::string& baseClassName,
+                                   std::vector<std::string> interfaceNames,
+                                   std::vector<std::string> methodNames);
+
+    // Whether an unnamed extend() names its class by content rather than by call
+    // site. Always available as a fallback when no usable location exists; the
+    // default is on wherever the bundler is the embedder's, since the generator
+    // and the runtime cannot agree on coordinates there.
+    static bool ContentKeyedBindingsEnabled();
+
     static JsValue CreateArrayObjectConstructor(JsRuntime &rt);
 
     static void SetInstanceMetadata(JsRuntime &rt, const JsValue &object, MetadataNode* node);
@@ -111,7 +127,6 @@ private:
     static bool GetExtendLocation(JsRuntime &rt, std::string& extendLocation, bool isTypeScriptExtend);
     static ExtendedClassCacheData GetCachedExtendedClassData(JsRuntime &rt, const std::string& proxyClassName);
     static std::string GetJniClassName(const MetadataTreeNode* node);
-
 
     static void SetClassAccessor(JsRuntime &rt, JsObject constructor);
 
@@ -358,6 +373,9 @@ private:
         std::vector<FieldCallbackData *> fieldCallbackData;
         std::vector<PropertyCallbackData *> propertyCallbackData;
         std::vector<ExtendedClassCallbackData *> extendedClassCallbackData;
+        // Method callback data no CtorFuncCache entry owns: static methods,
+        // extension-only methods and methods copied from a skipped base class.
+        std::vector<MethodCallbackData *> methodCallbackData;
     };
 
     static bool s_profilerEnabled;

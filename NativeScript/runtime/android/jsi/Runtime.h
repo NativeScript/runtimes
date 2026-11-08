@@ -9,7 +9,13 @@
 #include "FinalizerQueue.h"
 #include <android/looper.h>
 #include "robin_hood.h"
+// The guest has no module loader: the embedder's bundler owns module
+// resolution, and require() never reaches this runtime. Excluded from the guest
+// build entirely rather than merely left uninitialised, so the code does not
+// ship in an app that cannot call it.
+#if !defined(NS_JSI_HOST_RUNTIME)
 #include "ModuleInternal.h"
+#endif
 #include <fcntl.h>
 #include "ObjectManager.h"
 #include "ArrayBufferHelper.h"
@@ -74,6 +80,18 @@ namespace tns {
                   bool isDebuggable, jstring packageName, jobjectArray args, jstring callingDir,
                   int maxLogcatObjectSize, bool forceLog);
 
+#if defined(NS_JSI_HOST_RUNTIME)
+        // The guest counterpart of Init: binds to a jsi::Runtime the embedder
+        // created and still owns. `filesRoot` is where the metadata .dat files
+        // were staged; there is no app root to run a module from.
+        static Runtime *Attach(JNIEnv *_env, jobject obj, int runtimeId,
+                               ::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
+                               bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+
+        void Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &filesRoot,
+                    bool verboseLoggingEnabled, int maxLogcatObjectSize, bool forceLog);
+#endif
+
         jobject GetJavaRuntime() const;
 
         void DestroyRuntime();
@@ -82,11 +100,14 @@ namespace tns {
 
         void RunModule(const char *moduleName);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         void RunWorker(const std::string &filePath);
+#endif
 
-        // Tears down a worker's Runtime (engine scope + engine state release) and
-        // deletes it. Called from the native worker thread during shutdown.
-        static void DisposeWorkerRuntime(Runtime *runtime);
+        // Tears down a Runtime inside its engine scope and deletes it. The engine
+        // must still be alive with no JS running on it, and nothing may reach
+        // `runtime` from another thread once this begins.
+        static void DisposeRuntime(Runtime *runtime);
 
         jobject RunScript(JNIEnv *_env, jobject obj, jstring scriptFile);
 
@@ -152,10 +173,12 @@ namespace tns {
                                 jstring fullStackTrace, jstring jsStackTrace, jboolean isDiscarded,
                                 jboolean isPendingError);
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         void PassUncaughtExceptionFromWorkerToMainHandler(const engine::Value &message,
                                                           const engine::Value &stackTrace,
                                                           const engine::Value &filename,
                                                           int lineno);
+#endif
 
         void AdjustAmountOfExternalAllocatedMemory();
 
@@ -166,6 +189,11 @@ namespace tns {
     private:
 
         Runtime(JNIEnv *env, jobject runtime, int id);
+
+        // The part of startup that does not depend on who owns the runtime.
+        // See the comment on its definition for what `guest` turns off.
+        void InitCommon(const std::string &filesRoot, const std::string &callingDir,
+                        int maxLogcatObjectSize, bool forceLog, bool guest);
 
         int m_id;
         jobject m_runtime;
@@ -187,7 +215,9 @@ namespace tns {
 
         bool m_isMainThread;
 
+#if !defined(NS_JSI_HOST_RUNTIME)
         ModuleInternal m_module;
+#endif
 
         std::shared_ptr<LooperTasks> m_looperTasks;
 

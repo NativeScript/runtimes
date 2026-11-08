@@ -230,7 +230,26 @@ public class Main {
         return false;
     }
 
+    /*
+     * Bundler output is not always named ".js". Metro writes
+     * index.android.bundle, and a RAM bundle scatters further files beside it;
+     * a webpack build writes plain .js. All of them are JavaScript and all of
+     * them can declare a class that needs a binding, so the extension is
+     * treated as a hint rather than a gate. The parser confirms what each file
+     * actually is.
+     *
+     * The old form also indexed blindly three characters from the end, which
+     * threw on any name shorter than that.
+     */
+    private static final String[] JS_FILE_EXTENSIONS =
+            new String[]{".js", ".mjs", ".cjs", ".bundle", ".jsbundle"};
+
     private static boolean isJsFile(String fileName) {
-        return fileName.substring(fileName.length() - 3).equals(".js");
+        for (String extension : JS_FILE_EXTENSIONS) {
+            if (fileName.endsWith(extension)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

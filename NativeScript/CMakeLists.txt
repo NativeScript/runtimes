@@ -429,8 +429,6 @@ if(ENABLE_JS_RUNTIME)
     set(SOURCE_FILES ${SOURCE_FILES}
 
       # quickjs-ng, NativeScript-patched, vendored at the repo root and shared
-      # with the Android build. 0.11.0 replaced libbf with dtoa.
-      ../vendor/quickjs/source_ng/cutils.c
       ../vendor/quickjs/source_ng/libregexp.c
       ../vendor/quickjs/source_ng/libunicode.c
       ../vendor/quickjs/source_ng/quickjs.c

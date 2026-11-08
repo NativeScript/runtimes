@@ -63,7 +63,8 @@ namespace tns {
         CallJavaMethod(JsRuntime &rt, const JsValue &caller, const std::string &className,
                        const std::string &methodName, MetadataEntry *entry, bool isFromInterface,
                        bool isStatic, bool isConstructorCall, const JsValue *argv, size_t argc,
-                       ObjectManager *objectManager = nullptr);
+                       ObjectManager *objectManager = nullptr,
+                       bool metadataSignatureIsUnambiguous = false);
 
         static JsValue
         CallJSMethod(JsRuntime &rt, JNIEnv *jEnv, const JsValue &jsObject, jclass claz,
@@ -121,6 +122,21 @@ namespace tns {
         static jobjectArray
         GetImplementedInterfaces(JsRuntime &rt, JEnv &jEnv, const JsValue &implementationObject);
 
+        /*
+         * The name sets the two Get* helpers above are built from. Exposed so that
+         * content-keyed class names can hash the same sets the generated binding is
+         * built out of, without a second copy of the filtering rules.
+         */
+        // functionsOnly selects what the names are for: true builds the array the
+        // dex generator overrides against, false the set a content-keyed class
+        // name hashes. The two differ deliberately -- see the implementation.
+        static std::vector<std::string>
+        CollectMethodOverrideNames(JsRuntime &rt, const JsValue &implementationObject,
+                                   bool functionsOnly = true);
+
+        static std::vector<std::string>
+        CollectImplementedInterfaceNames(JsRuntime &rt, const JsValue &implementationObject);
+
         static JsValue EnableVerboseLoggingMethodCallback(JsRuntime &rt, const JsValue &thisVal,
                                                           const JsValue *args, size_t argc);
 
@@ -132,6 +148,8 @@ namespace tns {
 
         static JsValue FindClass(JsRuntime &rt, const char *name);
 
+// Worker. Not built for a guest -- see the definitions in CallbackHandlers.cpp.
+#if !defined(NS_JSI_HOST_RUNTIME)
         static JsValue NewThreadCallback(JsRuntime &rt, const JsValue &thisVal,
                                          const JsValue *args, size_t argc);
 
@@ -173,6 +191,7 @@ namespace tns {
          * napi version received) is JSError::value().
          */
         static void CallWorkerScopeOnErrorHandle(JsRuntime &rt, const JsError &error);
+#endif
 
         static JsValue PostFrameCallback(JsRuntime &rt, const JsValue &thisVal,
                                          const JsValue *args, size_t argc);

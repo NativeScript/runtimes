@@ -58,6 +58,12 @@
     var iterations = Math.max(1, Math.floor(baseIterations * factor));
     var warmup = Math.min(warmupIterations, iterations);
     runLoop(warmup, fn);
+    // Collect the garbage earlier cases left behind, so a collection it would
+    // trigger isn't timed against this case. A fast case runs for about a
+    // millisecond, less than one such pause.
+    if (typeof gc === "function") {
+      gc();
+    }
 
     var started = nowMs();
     runLoop(iterations, fn);
