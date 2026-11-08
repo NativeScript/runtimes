@@ -566,7 +566,9 @@ class FunctionInfo : public NativeInfo {
       info->_env->last_exception = nullptr;
     }
 
-    return ToJSValue(result);
+    // Node-API: a callback returning NULL means undefined. JSC would read a
+    // NULL JSValueRef as null.
+    return result != nullptr ? ToJSValue(result) : JSValueMakeUndefined(ctx);
   }
 
   // JSObjectFinalizeCallback
