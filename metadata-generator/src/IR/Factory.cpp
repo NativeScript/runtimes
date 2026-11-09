@@ -113,6 +113,12 @@ bool MetadataFactory::shouldProcess(CXCursor cursor, bool required) {
     return shouldInclude;
   }
 
+  // A category is named for itself, not the class it extends. Its members
+  // only attach to classes that are kept, so it is never filtered by name.
+  if (clang_getCursorKind(cursor) == CXCursor_ObjCCategoryDecl) {
+    return true;
+  }
+
   CXString cxSymbol = clang_getCursorSpelling(cursor);
   const char* symbolCString = clang_getCString(cxSymbol);
   std::string symbol = symbolCString ? symbolCString : "";
