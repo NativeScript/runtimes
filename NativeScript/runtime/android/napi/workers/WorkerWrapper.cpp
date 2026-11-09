@@ -9,6 +9,7 @@
 
 #include "ArgConverter.h"
 #include "CallbackHandlers.h"
+#include "CrashBreadcrumbs.h"
 #include "GlobalHelpers.h"
 #include "JEnv.h"
 #include "JniLocalRef.h"
@@ -366,6 +367,7 @@ void WorkerWrapper::BackgroundLooper(std::shared_ptr<WorkerWrapper> self) {
             runtimeId = env.CallStaticIntMethod(RUNTIME_CLASS, INIT_WORKER_RUNTIME_METHOD_ID,
                                                 workerId_, (jstring) callingDir);
             runtime_ = Runtime::GetRuntime(runtimeId);
+            CrashBreadcrumbs::SetWorkerScript(runtimeId, workerPath_.c_str());
 
             {
                 std::lock_guard<std::mutex> lock(looperMutex_);
