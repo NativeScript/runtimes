@@ -174,10 +174,9 @@ JsValue MetadataNode::CreateJSWrapper(JsRuntime &rt, ObjectManager *objectManage
         return CreateArrayWrapper(rt);
     }
 
-    JsValue obj = objectManager->GetEmptyObject();
+    JsObject plain(rt);
+    JsValue obj(rt, plain);
     JsValue ctorFunc = GetConstructorFunction(rt);
-    auto object = obj.asObjectBorrowed(rt);
-    object.setProperty(rt, "constructor", ctorFunc);
     js_util::setPrototypeOf(rt, obj, js_util::get_prototype(rt, ctorFunc));
     SetInstanceMetadata(rt, obj, this);
 
