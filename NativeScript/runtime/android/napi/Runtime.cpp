@@ -661,7 +661,7 @@ int Runtime::GetReader() {
 
 jobject
 Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclass claz, jstring methodName,
-                            jint retType, jboolean isConstructor, jobjectArray packagedArgs) {
+                            jint retType, jboolean isConstructor, const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
 
     DEBUG_WRITE("CallJSMethodNative called javaObjectID=%d", javaObjectID);
@@ -679,7 +679,7 @@ Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclas
 
     DEBUG_WRITE("CallJSMethodNative called jsObject %s", method_name.c_str());
 
-    auto jsResult = CallbackHandlers::CallJSMethod(env, jEnv, jsObject, claz,method_name, javaObjectID,packagedArgs);
+    auto jsResult = CallbackHandlers::CallJSMethod(env, jEnv, jsObject, claz,method_name, javaObjectID, args);
 
     if (napi_util::is_null_or_undefined(env, jsResult)) return nullptr;
 

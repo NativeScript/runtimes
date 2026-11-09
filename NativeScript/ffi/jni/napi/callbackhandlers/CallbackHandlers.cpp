@@ -1174,7 +1174,7 @@ vector<string> CallbackHandlers::GetTypeMetadata(const string &name, int index) 
 
 napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
                                           napi_value jsObject, jclass claz,const string &methodName,int javaObjectId,
-                                          jobjectArray args) {
+                                          const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
     napi_status status;
     napi_value result;
@@ -1203,7 +1203,7 @@ napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
         bool exceptionPending;
         NAPI_GUARD(napi_is_exception_pending(env, &exceptionPending)) {}
 
-        int argc = jEnv.GetArrayLength(args) / 3;
+        int argc = ArgConverter::GetJavaArgsLength(jEnv, args);
         if (argc > 0) {
             napi_value* jsArgs = nullptr;
             napi_value stack_args[8];

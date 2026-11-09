@@ -1134,7 +1134,7 @@ vector<string> CallbackHandlers::GetTypeMetadata(const string &name, int index) 
 JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
                                        const JsValue &jsObject, jclass claz,
                                        const string &methodName, int javaObjectId,
-                                       jobjectArray args) {
+                                       const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
 
     auto runtime = Runtime::GetRuntime(rt);
@@ -1161,7 +1161,7 @@ JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
     // a throw. engine:: propagates a JS throw as a JSError, so the equivalent is
     // to let it unwind and convert it here.
     try {
-        int argc = jEnv.GetArrayLength(args) / 3;
+        int argc = ArgConverter::GetJavaArgsLength(jEnv, args);
         if (argc > 0) {
             JsValue *jsArgs = nullptr;
             JsValue stack_args[8];

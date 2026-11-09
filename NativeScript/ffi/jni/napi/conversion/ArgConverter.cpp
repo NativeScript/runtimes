@@ -1,4 +1,6 @@
 #include "ArgConverter.h"
+#include <cstring>
+#include <vector>
 #include "ObjectManager.h"
 #include "Util.h"
 #include "NativeScriptException.h"
@@ -183,55 +185,77 @@ napi_value ArgConverter::NativeScriptLongFunctionCallback(napi_env env, napi_cal
     return nullptr;
 }
 
-void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, jobjectArray args, size_t argc, napi_value* arr) {
+int ArgConverter::GetJavaArgsLength(JNIEnv *env, const JavaCallArgs &args) {
+    return args.types == nullptr ? 0 : env->GetArrayLength(args.types);
+}
+
+void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, const JavaCallArgs &args, size_t argc, napi_value* arr) {
     napi_status status;
     JEnv jenv;
+
+    constexpr size_t kInlineArgs = 16;
+    jint inlineTypes[kInlineArgs];
+    jlong inlineValues[kInlineArgs];
+    std::vector<jint> heapTypes;
+    std::vector<jlong> heapValues;
+    jint *types = inlineTypes;
+    jlong *values = inlineValues;
+    if (argc > kInlineArgs) {
+        heapTypes.resize(argc);
+        heapValues.resize(argc);
+        types = heapTypes.data();
+        values = heapValues.data();
+    }
+
+    JNIEnv *jni = jenv;
+    jni->GetIntArrayRegion(args.types, 0, argc, types);
+    jni->GetLongArrayRegion(args.values, 0, argc, values);
 
     auto runtime = Runtime::GetRuntime(env);
     auto objectManager = runtime->GetObjectManager();
 
-    int jArrayIndex = 0;
-    for (int i = 0; i < argc; i++) {
-        JniLocalRef argTypeIDObj(jenv.GetObjectArrayElement(args, jArrayIndex++));
-        JniLocalRef arg(jenv.GetObjectArrayElement(args, jArrayIndex++));
-        JniLocalRef argJavaClassPath(jenv.GetObjectArrayElement(args, jArrayIndex++));
-
-        Type argTypeID = (Type) JType::IntValue(jenv, argTypeIDObj);
-
+    for (size_t i = 0; i < argc; i++) {
+        jlong bits = values[i];
         napi_value jsArg;
-        switch (argTypeID) {
+        switch (static_cast<Type>(types[i])) {
             case Type::Boolean:
-                NAPI_GUARD(napi_get_boolean(env, JType::BooleanValue(jenv, arg), &jsArg)) {}
+                NAPI_GUARD(napi_get_boolean(env, bits != 0, &jsArg)) {}
                 break;
             case Type::Char:
-                jsArg = jcharToJsString(env, JType::CharValue(jenv, arg));
+                jsArg = jcharToJsString(env, static_cast<jchar>(bits));
                 break;
             case Type::Byte:
-                NAPI_GUARD(napi_create_int32(env, JType::ByteValue(jenv, arg), &jsArg)) {}
-                break;
             case Type::Short:
-                NAPI_GUARD(napi_create_int32(env, JType::ShortValue(jenv, arg), &jsArg)) {}
-                break;
             case Type::Int:
-                NAPI_GUARD(napi_create_int32(env, JType::IntValue(jenv, arg), &jsArg)) {}
+                NAPI_GUARD(napi_create_int32(env, static_cast<int32_t>(bits), &jsArg)) {}
                 break;
             case Type::Long:
-                NAPI_GUARD(napi_create_int64(env, JType::LongValue(jenv, arg), &jsArg)) {}
+                NAPI_GUARD(napi_create_int64(env, bits, &jsArg)) {}
                 break;
-            case Type::Float:
-                NAPI_GUARD(napi_create_double(env, JType::FloatValue(jenv, arg), &jsArg)) {}
+            case Type::Float: {
+                auto raw = static_cast<int32_t>(bits);
+                float value;
+                memcpy(&value, &raw, sizeof(value));
+                NAPI_GUARD(napi_create_double(env, value, &jsArg)) {}
                 break;
-            case Type::Double:
-                NAPI_GUARD(napi_create_double(env, JType::DoubleValue(jenv, arg), &jsArg)) {}
+            }
+            case Type::Double: {
+                double value;
+                memcpy(&value, &bits, sizeof(value));
+                NAPI_GUARD(napi_create_double(env, value, &jsArg)) {}
                 break;
-            case Type::String:
-                jsArg = jstringToJsString(env, (jstring) arg);
+            }
+            case Type::String: {
+                JniLocalRef str(jni->GetObjectArrayElement(args.refs, i));
+                jsArg = jstringToJsString(env, (jstring) str);
                 break;
+            }
             case Type::JsObject: {
-                jint javaObjectID = JType::IntValue(jenv, arg);
+                auto javaObjectID = static_cast<jint>(bits);
                 jsArg = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (napi_util::is_null_or_undefined(env, jsArg)) {
+                    JniLocalRef argJavaClassPath(jni->GetObjectArrayElement(args.refs, i));
                     string argClassName = jstringToString(ObjectToString(argJavaClassPath));
                     argClassName = Util::ConvertFromCanonicalToJniName(argClassName);
                     jsArg = objectManager->CreateJSWrapper(javaObjectID, argClassName);
@@ -245,7 +269,6 @@ void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, jobjectArray args, size
 
         arr[i] = jsArg;
     }
-
 }
 
 napi_value ArgConverter::ConvertFromJavaLong(napi_env env, jlong value) {

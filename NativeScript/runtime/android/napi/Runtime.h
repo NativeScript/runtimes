@@ -2,6 +2,7 @@
 #define RUNTIME_H
 
 #include "jni.h"
+#include "JavaCallArgs.h"
 #include <string>
 #include <memory>
 #include "JniLocalRef.h"
@@ -138,7 +139,7 @@ namespace tns {
 
         jobject CallJSMethodNative(JNIEnv *_env, jobject obj, jint javaObjectID, jclass claz,
                                    jstring methodName, jint retType, jboolean isConstructor,
-                                   jobjectArray packagedArgs);
+                                   const JavaCallArgs &args);
 
         void
         PassExceptionToJsNative(JNIEnv *env, jobject obj, jthrowable exception, jstring message,
