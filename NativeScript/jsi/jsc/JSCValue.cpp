@@ -219,6 +219,22 @@ Value Value::createStringFromUtf8(Runtime& runtime, const char* data, size_t len
                                                reinterpret_cast<const uint8_t*>(data), length));
 }
 
+Value Value::createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length) {
+  JSStringRef string = JSStringCreateWithCharacters(reinterpret_cast<const JSChar*>(data), length);
+  Value result(runtime, String(runtime, string));
+  JSStringRelease(string);
+  return result;
+}
+
+size_t Value::copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+  JSStringRef string = JSValueToStringCopy(runtime.context(), local(runtime), nullptr);
+  if (string == nullptr) return 0;
+  size_t length = JSStringGetLength(string);
+  std::memcpy(buffer, JSStringGetCharactersPtr(string), std::min(length, capacity) * sizeof(JSChar));
+  JSStringRelease(string);
+  return length;
+}
+
 BigInt Value::getBigInt(Runtime& runtime) const { return BigInt(runtime, local(runtime)); }
 
 Function Object::getPropertyAsFunction(Runtime& runtime, const char* name) const {

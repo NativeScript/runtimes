@@ -97,11 +97,7 @@ FieldAccessor::GetJavaField(napi_env env, napi_value target, FieldCallbackData *
                     result = jEnv.GetCharField(targetJavaObject, fieldId);
                 }
 
-                JniLocalRef str(jEnv.NewString(&result, 1));
-                jboolean bol = true;
-                const char *resP = jEnv.GetStringUTFChars(str, &bol);
-                fieldResult = ArgConverter::convertToJsString(env, resP, 1);
-                jEnv.ReleaseStringUTFChars(str, resP);
+                fieldResult = ArgConverter::convertToJsString(env, &result, 1);
                 break;
             }
             case 'S': { // short

@@ -31,10 +31,10 @@ namespace tns {
             if (value == nullptr) return js_util::null();
 
             JEnv jenv;
-            auto chars = jenv.GetStringUTFChars(value, JNI_FALSE);
-            auto length = jenv.GetStringUTFLength(value);
+            jsize length = jenv.GetStringLength(value);
+            const jchar *chars = jenv.GetStringChars(value, nullptr);
             auto jsString = convertToJsString(rt, chars, length);
-            jenv.ReleaseStringUTFChars(value, chars);
+            jenv.ReleaseStringChars(value, chars);
 
             return jsString;
         }
@@ -65,14 +65,20 @@ namespace tns {
         static std::u16string ConvertToUtf16String(JsRuntime &rt, const JsValue &s);
 
         inline static jstring ConvertToJavaString(JsRuntime &rt, const JsValue &jsValue) {
+            char16_t stackBuffer[256];
+            size_t length = jsValue.copyUtf16(rt, stackBuffer, std::size(stackBuffer));
             JEnv jenv;
-            return jenv.NewStringUTF(js_util::get_string_value(rt, jsValue).c_str());
+            if (length <= std::size(stackBuffer)) {
+                return jenv.NewString(reinterpret_cast<const jchar *>(stackBuffer), static_cast<jsize>(length));
+            }
+            std::u16string heapBuffer(length, u'\0');
+            jsValue.copyUtf16(rt, heapBuffer.data(), length);
+            return jenv.NewString(reinterpret_cast<const jchar *>(heapBuffer.data()), static_cast<jsize>(length));
         }
 
-        // engine::String is UTF-8 only, so a UTF-16 payload (every jchar/jstring
-        // that reaches here) is transcoded on the way in rather than handed to a
-        // napi_create_string_utf16 equivalent.
-        static JsValue convertToJsString(JsRuntime &rt, const jchar *data, int length);
+        inline static JsValue convertToJsString(JsRuntime &rt, const jchar *data, int length) {
+            return JsValue::createStringFromUtf16(rt, reinterpret_cast<const char16_t *>(data), (size_t) length);
+        }
 
         inline static JsValue convertToJsString(JsRuntime &rt, const std::string &s) {
             return JsValue::createStringFromUtf8(rt, s.data(), s.size());

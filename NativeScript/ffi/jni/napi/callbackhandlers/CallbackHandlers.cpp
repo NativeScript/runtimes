@@ -384,11 +384,7 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                 result = jEnv.CallCharMethodA(callerJavaObject, mid, javaArgs);
             }
 
-            JniLocalRef str(jEnv.NewString(&result, 1));
-            jboolean bol = true;
-            const char *resP = jEnv.GetStringUTFChars(str, &bol);
-            returnValue = ArgConverter::convertToJsString(env, resP, 1);
-            jEnv.ReleaseStringUTFChars(str, resP);
+            returnValue = ArgConverter::convertToJsString(env, &result, 1);
             break;
         }
         case MethodReturnType::Short: {

@@ -661,6 +661,8 @@ class Value {
   // engine so the shared bridge can call one name.
   std::string utf8(Runtime& runtime) const;
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
+  static Value createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length);
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const;
 
   JSValueRef local(Runtime& runtime) const {
     switch (kind_) {

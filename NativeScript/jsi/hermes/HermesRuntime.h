@@ -46,6 +46,7 @@
 
 #include <jsi/jsi.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -405,6 +406,8 @@ class Value {
   // engine so the shared bridge can call one name.
   std::string utf8(Runtime& runtime) const;
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
+  static Value createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length);
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const;
 
   // The jsi handle behind this value, materialising one for the inline scalar
   // kinds. Returned by value because the scalar kinds have no handle to refer
@@ -912,6 +915,32 @@ inline Value Runtime::evaluateJavaScript(std::shared_ptr<StringBuffer> buffer,
 }
 
 // --- String ----------------------------------------------------------------
+
+inline Value Value::createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length) {
+  return hermesengine::guard(runtime, [&] {
+    return Value::fromStorage(hermesengine::makeStorage(::facebook::jsi::Value(
+        ::facebook::jsi::String::createFromUtf16(runtime.jsi(), data != nullptr ? data : u"", length))));
+  });
+}
+
+inline size_t Value::copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+  String string = asString(runtime);
+  return hermesengine::guard(runtime, [&] {
+    size_t length = 0;
+    auto append = [&](bool ascii, const void* data, size_t count) {
+      size_t copied = length < capacity ? std::min(count, capacity - length) : 0;
+      if (ascii) {
+        const char* chars = static_cast<const char*>(data);
+        for (size_t i = 0; i < copied; i++) buffer[length + i] = static_cast<unsigned char>(chars[i]);
+      } else {
+        std::memcpy(buffer + length, data, copied * sizeof(char16_t));
+      }
+      length += count;
+    };
+    string.storage_->string(runtime.jsi()).getStringData(runtime.jsi(), append);
+    return length;
+  });
+}
 
 inline String String::createFromUtf8(Runtime& runtime, const char* value) {
   const char* text = value != nullptr ? value : "";

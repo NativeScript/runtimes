@@ -48,10 +48,6 @@ JsValue ArrayElementAccessor::GetArrayElement(JsRuntime &rt, const JsValue &arra
         case 'C': {
             jchar v;
             jenv.GetCharArrayRegion((jcharArray) arr, startIndex, length, &v);
-            // The napi tree round-trips the jchar through a jstring and then takes
-            // one byte of its UTF-8 form, which truncates anything outside ASCII.
-            // engine::String is UTF-8 only, so the transcode is explicit here and
-            // is the same one every other jchar path in this tree uses.
             return ArgConverter::convertToJsString(rt, &v, 1);
         }
         case 'S': {

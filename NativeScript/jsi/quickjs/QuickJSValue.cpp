@@ -101,6 +101,29 @@ Value Value::createStringFromUtf8(Runtime& runtime, const char* data, size_t len
       JS_NewStringLen(runtime.context(), data != nullptr ? data : "", length);
   return result;
 }
+
+Value Value::createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length) {
+  Value result;
+  result.kind_ = quickjsengine::ValueStorage::Kind::QuickJS;
+  result.storage_ =
+      std::make_shared<quickjsengine::ValueStorage>(quickjsengine::ValueStorage::Kind::QuickJS);
+  result.storage_->context = runtime.context();
+  result.storage_->value = JS_NewStringUTF16(
+      runtime.context(), reinterpret_cast<const uint16_t*>(data != nullptr ? data : u""), length);
+  return result;
+}
+
+size_t Value::copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+  JSContext* context = runtime.context();
+  JSValue value = local(runtime);
+  size_t length = 0;
+  const uint16_t* units = JS_ToCStringLenUTF16(context, &length, value);
+  JS_FreeValue(context, value);
+  if (units == nullptr) return 0;
+  std::memcpy(buffer, units, std::min(length, capacity) * sizeof(char16_t));
+  JS_FreeCStringUTF16(context, units);
+  return length;
+}
 BigInt Value::getBigInt(Runtime& runtime) const {
   JSValue value = local(runtime);
   BigInt result(runtime, value);
