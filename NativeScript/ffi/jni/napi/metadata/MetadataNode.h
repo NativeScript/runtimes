@@ -109,6 +109,8 @@ private:
 
     explicit MetadataNode(MetadataTreeNode *treeNode);
 
+    static int MatchDirectSignature(napi_env env, MethodCallbackData *data, size_t argc, napi_value *argv);
+
     void SetMissingBaseMethods(
             napi_env env, const std::vector<MetadataTreeNode *> &skippedBaseTypes,
             const std::vector<MethodCallbackData *> &instanceMethodData,
@@ -282,6 +284,8 @@ private:
         // (-1 = not yet computed, 0 = false, 1 = true).
         int8_t cachedIsFromInterface = -1;
         int8_t cachedIsValueOf = -1;
+        int8_t cachedIsDirectSignature = -1;
+        std::string directParameterKinds;
         // Cached per-env ObjectManager (this data is created per env, so the
         // pointer's lifetime matches it — no staleness across envs).
         tns::ObjectManager *objectManager = nullptr;
