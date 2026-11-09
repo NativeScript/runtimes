@@ -513,6 +513,7 @@ void Runtime::DestroyRuntime() {
     Runtime::thread_id_to_rt_cache.Remove(this->my_thread_id);
     id_to_runtime_cache.Remove(m_id);
     env_to_runtime_cache.Remove(env);
+    NativeScriptException::ReleaseTransferred(env);
     js_free_napi_env(env);
 
 #ifndef __V8__

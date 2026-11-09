@@ -52,6 +52,18 @@ class NativeScriptException {
          */
         static void CallJsFuncWithErr(napi_env env, napi_value errObj, bool isDiscarded);
 
+        /*
+         * Java cannot free a napi_ref, so a JS error it holds travels as an id into a table that
+         * this class owns, bounded per env: the oldest entry is released when the table is full.
+         * An entry is also released when the error comes back to JS, and with its env. An error
+         * that is no longer in the table when it comes back is rebuilt from its throwable.
+         */
+        static jlong TransferToJava(napi_env env, napi_ref ref);
+
+        static napi_value TakeFromJava(napi_env env, jlong id);
+
+        static void ReleaseTransferred(napi_env env);
+
     private:
         /*
          * Try to get native exception or NativeScriptException from js object

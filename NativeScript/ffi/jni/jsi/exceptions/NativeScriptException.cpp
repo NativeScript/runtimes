@@ -4,10 +4,58 @@
 #include "NativeScriptAssert.h"
 #include "Runtime.h"
 #include "ObjectManager.h"
+#include <deque>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 using namespace std;
 using namespace tns;
+
+namespace {
+struct TransferredError {
+    jlong id;
+    JsValue value;
+};
+
+constexpr size_t kMaxTransferredPerRuntime = 1024;
+
+std::mutex g_transferredMutex;
+std::unordered_map<const void*, std::deque<TransferredError>> g_transferred;
+jlong g_nextTransferredId = 0;
+}  // namespace
+
+jlong NativeScriptException::TransferToJava(JsRuntime& rt, const JsValue& error) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    auto &entries = g_transferred[rt.identity()];
+    entries.push_back({++g_nextTransferredId, JsValue(rt, error)});
+    while (entries.size() > kMaxTransferredPerRuntime) {
+        entries.pop_front();
+    }
+    return entries.back().id;
+}
+
+bool NativeScriptException::TakeFromJava(JsRuntime& rt, jlong id, JsValue& out) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    auto bucket = g_transferred.find(rt.identity());
+    if (bucket == g_transferred.end()) {
+        return false;
+    }
+    auto &entries = bucket->second;
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        if (it->id == id) {
+            out = it->value;
+            entries.erase(std::next(it).base());
+            return true;
+        }
+    }
+    return false;
+}
+
+void NativeScriptException::ReleaseTransferred(JsRuntime& rt) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    g_transferred.erase(rt.identity());
+}
 
 NativeScriptException::NativeScriptException(JEnv& env)
     : m_javascriptException(nullptr) {
@@ -135,12 +183,9 @@ void NativeScriptException::ReThrowToJava(JsRuntime* rt) {
         JniLocalRef stackTrace(jEnv.NewStringUTF(m_stackTrace.c_str()));
 
         if (ex == nullptr) {
-            // The napi tree hands Java the napi_ref itself; here Java gets its own
-            // owned handle, released by WrapJavaToJsException when it comes back.
-            // Ownership is then unambiguous: this exception object keeps its
-            // shared_ptr and Java keeps the copy it was given.
-            auto* javaOwnedValue = new JsValue(*rt, errObj);
-            ex = static_cast<jthrowable>(jEnv.NewObject(NATIVESCRIPTEXCEPTION_CLASS, NATIVESCRIPTEXCEPTION_JSVALUE_CTOR_ID, (jstring)msg, (jstring)stackTrace, reinterpret_cast<jlong>(javaOwnedValue)));
+            jlong transferId = TransferToJava(*rt, errObj);
+            ex = static_cast<jthrowable>(jEnv.NewObject(NATIVESCRIPTEXCEPTION_CLASS, NATIVESCRIPTEXCEPTION_JSVALUE_CTOR_ID, (jstring)msg, (jstring)stackTrace, transferId));
+
         } else {
             auto excClassName = ObjectManager::GetClassName(ex);
             if (excClassName != "com/tns/NativeScriptException") {
@@ -214,10 +259,8 @@ JsValue NativeScriptException::WrapJavaToJsException(JsRuntime& rt) {
         jfieldID fieldID = jenv.GetFieldID(jenv.GetObjectClass(m_javaException), "jsValueAddress", "J");
         jlong addr = jenv.GetLongField(m_javaException, fieldID);
 
-        if (addr != 0) {
-            auto pv = reinterpret_cast<JsValue*>(addr);
-            errObj = *pv;
-            delete pv;
+        if (addr != 0 && TakeFromJava(rt, addr, errObj)) {
+            jenv.SetLongField(m_javaException, fieldID, 0);
         } else {
             errObj = GetJavaExceptionFromEnv(rt, m_javaException, jenv);
         }
