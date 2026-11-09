@@ -56,11 +56,7 @@ napi_value ArrayElementAccessor::GetArrayElement(napi_env env, napi_value array,
         case 'C': {
             jchar v;
             jenv.GetCharArrayRegion((jcharArray) arr, startIndex, length, &v);
-            JniLocalRef s(jenv.NewString(&v, 1));
-            jboolean isCopy = false;
-            const char* singleChar = jenv.GetStringUTFChars(s, &isCopy);
-            NAPI_GUARD(napi_create_string_utf8(env, singleChar, 1, &value)) {}
-            jenv.ReleaseStringUTFChars(s, singleChar);
+            value = ArgConverter::convertToJsString(env, &v, 1);
             break;
         }
         case 'S': {

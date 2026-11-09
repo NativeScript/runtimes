@@ -89,10 +89,6 @@ FieldAccessor::GetJavaField(JsRuntime &rt, const JsValue &target, FieldCallbackD
                     result = jEnv.GetCharField(targetJavaObject, fieldId);
                 }
 
-                // The napi tree round-trips the jchar through a jstring and takes
-                // one byte of its UTF-8 form, which truncates anything outside
-                // ASCII. engine::String is UTF-8 only, so the transcode is
-                // explicit here and matches every other jchar path in this tree.
                 return ArgConverter::convertToJsString(rt, &result, 1);
             }
             case 'S': { // short

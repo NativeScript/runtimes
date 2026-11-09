@@ -263,6 +263,23 @@ Value Value::createStringFromUtf8(Runtime& runtime, const char* data, size_t len
                    .ToLocalChecked());
 }
 
+Value Value::createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length) {
+  v8::Isolate* isolate = runtime.isolate();
+  return Value::borrowed(
+      isolate, v8::String::NewFromTwoByte(isolate,
+                                          reinterpret_cast<const uint16_t*>(data != nullptr ? data : u""),
+                                          v8::NewStringType::kNormal, static_cast<int>(length))
+                   .ToLocalChecked());
+}
+
+size_t Value::copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const {
+  v8::Local<v8::String> string = local(runtime).As<v8::String>();
+  size_t length = static_cast<size_t>(string->Length());
+  string->WriteV2(runtime.isolate(), 0, static_cast<uint32_t>(std::min(length, capacity)),
+                  reinterpret_cast<uint16_t*>(buffer), v8::String::WriteFlags::kNone);
+  return length;
+}
+
 BigInt Value::getBigInt(Runtime& runtime) const {
   return BigInt(runtime, local(runtime).As<v8::BigInt>());
 }
