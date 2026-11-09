@@ -4,10 +4,68 @@
 #include "NativeScriptAssert.h"
 #include "Runtime.h"
 #include "ObjectManager.h"
+#include <deque>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 using namespace std;
 using namespace tns;
+
+namespace {
+struct TransferredError {
+    jlong id;
+    napi_ref ref;
+};
+
+constexpr size_t kMaxTransferredPerEnv = 1024;
+
+std::mutex g_transferredMutex;
+std::unordered_map<napi_env, std::deque<TransferredError>> g_transferred;
+jlong g_nextTransferredId = 0;
+}  // namespace
+
+jlong NativeScriptException::TransferToJava(napi_env env, napi_ref ref) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    auto &entries = g_transferred[env];
+    entries.push_back({++g_nextTransferredId, ref});
+    while (entries.size() > kMaxTransferredPerEnv) {
+        napi_delete_reference(env, entries.front().ref);
+        entries.pop_front();
+    }
+    return entries.back().id;
+}
+
+napi_value NativeScriptException::TakeFromJava(napi_env env, jlong id) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    auto bucket = g_transferred.find(env);
+    if (bucket == g_transferred.end()) {
+        return nullptr;
+    }
+    auto &entries = bucket->second;
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        if (it->id == id) {
+            napi_value value = nullptr;
+            napi_get_reference_value(env, it->ref, &value);
+            napi_delete_reference(env, it->ref);
+            entries.erase(std::next(it).base());
+            return value;
+        }
+    }
+    return nullptr;
+}
+
+void NativeScriptException::ReleaseTransferred(napi_env env) {
+    std::lock_guard<std::mutex> lock(g_transferredMutex);
+    auto bucket = g_transferred.find(env);
+    if (bucket == g_transferred.end()) {
+        return;
+    }
+    for (auto &entry : bucket->second) {
+        napi_delete_reference(env, entry.ref);
+    }
+    g_transferred.erase(bucket);
+}
 
 NativeScriptException::NativeScriptException(JEnv& env)
     : m_javascriptException(nullptr), m_napiEnv(nullptr) {
@@ -141,7 +199,8 @@ void NativeScriptException::ReThrowToJava(napi_env env) {
         JniLocalRef stackTrace(jEnv.NewStringUTF(m_stackTrace.c_str()));
 
         if (ex == nullptr) {
-            ex = static_cast<jthrowable>(jEnv.NewObject(NATIVESCRIPTEXCEPTION_CLASS, NATIVESCRIPTEXCEPTION_JSVALUE_CTOR_ID, (jstring)msg, (jstring)stackTrace, reinterpret_cast<jlong>(m_javascriptException)));
+            jlong transferId = TransferToJava(env, m_javascriptException);
+            ex = static_cast<jthrowable>(jEnv.NewObject(NATIVESCRIPTEXCEPTION_CLASS, NATIVESCRIPTEXCEPTION_JSVALUE_CTOR_ID, (jstring)msg, (jstring)stackTrace, transferId));
             transferredJavascriptException = true;
         } else {
             auto excClassName = ObjectManager::GetClassName(ex);
@@ -233,12 +292,11 @@ napi_value NativeScriptException::WrapJavaToJsException(napi_env env) {
         jfieldID fieldID = jenv.GetFieldID(jenv.GetObjectClass(m_javaException), "jsValueAddress", "J");
         jlong addr = jenv.GetLongField(m_javaException, fieldID);
 
+        errObj = addr != 0 ? TakeFromJava(env, addr) : nullptr;
         if (addr != 0) {
-            auto pv = reinterpret_cast<napi_ref>(addr);
-            NAPI_GUARD(napi_get_reference_value(env, pv, &errObj)) {}
-            NAPI_GUARD(napi_delete_reference(env, pv)) {}
             jenv.SetLongField(m_javaException, fieldID, 0);
-        } else {
+        }
+        if (errObj == nullptr) {
             errObj = GetJavaExceptionFromEnv(env, m_javaException, jenv);
         }
     } else {
