@@ -6,7 +6,7 @@
 using namespace tns;
 
 ArrayBufferHelper::ArrayBufferHelper()
-        : m_objectManager(nullptr), m_ByteBufferClass(nullptr), m_isDirectMethodID(nullptr),
+        : m_objectManager(nullptr), m_ByteBufferClass(nullptr),
           m_remainingMethodID(nullptr), m_getMethodID(nullptr) {
 }
 
@@ -80,19 +80,11 @@ napi_value ArrayBufferHelper::CreateFromCallbackImpl(napi_env env, size_t argc, 
         throw NativeScriptException("Wrong type of argument (ByteBuffer expected)");
     }
 
-    if (m_isDirectMethodID == nullptr) {
-        m_isDirectMethodID = jEnv.GetMethodID(m_ByteBufferClass, "isDirect", "()Z");
-        assert(m_isDirectMethodID != nullptr);
-    }
-
-    auto ret = jEnv.CallBooleanMethod(obj, m_isDirectMethodID);
-
-    auto isDirectBuffer = ret == JNI_TRUE;
-
     napi_value arrayBuffer;
 
-    if (isDirectBuffer) {
-        auto data = jEnv.GetDirectBufferAddress(obj);
+    auto data = jEnv.GetDirectBufferAddress(obj);
+
+    if (data != nullptr) {
         auto size = jEnv.GetDirectBufferCapacity(obj);
 
         void* externalData = data;
@@ -117,19 +109,17 @@ napi_value ArrayBufferHelper::CreateFromCallbackImpl(napi_env env, size_t argc, 
 
         auto byteArrayElements = jEnv.GetByteArrayElements(byteArray, 0);
 
-        jbyte* data = new jbyte[bufferRemainingSize];
-        memcpy(data, byteArrayElements, bufferRemainingSize);
+        jbyte* copy = new jbyte[bufferRemainingSize];
+        memcpy(copy, byteArrayElements, bufferRemainingSize);
 
-        NAPI_GUARD(napi_create_external_arraybuffer(env, data, bufferRemainingSize, [](napi_env env, void* finalize_data, void* finalize_hint) {
+        NAPI_GUARD(napi_create_external_arraybuffer(env, copy, bufferRemainingSize, [](napi_env env, void* finalize_data, void* finalize_hint) {
             delete[] static_cast<jbyte*>(finalize_data);
         }, nullptr, &arrayBuffer)) {}
 
         jEnv.ReleaseByteArrayElements(byteArray, byteArrayElements, 0);
     }
 
-    napi_value nativeObjectKey;
-    NAPI_GUARD(napi_create_string_utf8(env, "nativeObject", NAPI_AUTO_LENGTH, &nativeObjectKey)) {}
-    NAPI_GUARD(napi_set_property(env, arrayBuffer, nativeObjectKey, argObj)) {}
+    NAPI_GUARD(napi_set_named_property(env, arrayBuffer, "nativeObject", argObj)) {}
 
     return arrayBuffer;
 }

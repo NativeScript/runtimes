@@ -127,6 +127,18 @@ public class Benchmarks {
         callback.onString("hello");
     }
 
+    private static final java.nio.ByteBuffer DIRECT_BUFFER = java.nio.ByteBuffer.allocateDirect(1024);
+
+    private static final java.nio.ByteBuffer HEAP_BUFFER = java.nio.ByteBuffer.allocate(1024);
+
+    public static java.nio.ByteBuffer returnDirectBuffer() {
+        return DIRECT_BUFFER;
+    }
+
+    public static java.nio.ByteBuffer returnHeapBuffer() {
+        return HEAP_BUFFER;
+    }
+
     public static int invokeThrowingCallback(BenchmarkCallback callback, int count) {
         int failures = 0;
         for (int i = 0; i < count; i++) {
