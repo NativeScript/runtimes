@@ -15,6 +15,7 @@
 #include "Util.h"
 #include "JniLocalRef.h"
 #include "MetadataNode.h"
+#include "Coercion.h"
 #include "MethodCache.h"
 #include "ArgConverter.h"
 #include "JsArgConverter.h"
@@ -1833,8 +1834,8 @@ void CallbackHandlers::CallWorkerScopeOnErrorHandle(napi_env env, napi_value err
                             line);
                 }
             } else if (!napi_util::is_null_or_undefined(env, result)) {
-                bool handled;
-                NAPI_GUARD(napi_get_value_bool(env, result, &handled)) {}
+                bool handled = false;
+                NAPI_GUARD(coerce::GetBool(env, result, &handled)) {}
                 if (handled) {
                     return;
                 }
