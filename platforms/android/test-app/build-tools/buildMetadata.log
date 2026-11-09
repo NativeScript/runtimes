@@ -1,0 +1,7 @@
+WARNING: Skipping interface androidx.dynamicanimation.animation.DynamicAnimation$OnAnimationUpdateListener implemented in androidx.transition.Transition$SeekController as it cannot be resolved
+Added   Properties 59
+Ignored Properties 2 duplicates.
+Added   Methods 77490
+Ignored Methods 3333 duplicates.
+Added   Fields 43788
+Ignored Fields 5605 duplicates.

@@ -62,6 +62,18 @@ function rn_install_pods() {
 }
 
 function rn_select_ios_simulator() {
+  if [[ -n "${RN_IOS_SIMULATOR_UDID:-}" ]]; then
+    node - "$RN_IOS_SIMULATOR_UDID" <<'NODE'
+const cp = require('child_process');
+const requested = process.argv[2];
+const devices = JSON.parse(cp.execFileSync('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], {encoding: 'utf8'})).devices;
+const match = Object.values(devices).flat().find(device => device.udid === requested && device.isAvailable);
+if (!match) process.exit(1);
+console.log(match.udid);
+NODE
+    return
+  fi
+
   node <<'NODE'
 const cp = require('child_process');
 const devices = JSON.parse(cp.execFileSync('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], {encoding: 'utf8'}));
@@ -96,6 +108,16 @@ function rn_require_ios_simulator() {
   echo "$udid"
 }
 
+function rn_configure_nativescript_app() {
+  local app_dir="$1"
+  local label="$2"
+  checkpoint "Configuring NativeScript transforms for $label..."
+  (
+    cd "$app_dir"
+    npx --no-install nativescript-rn configure
+  )
+}
+
 function rn_build_ios_app() {
   local app_dir="$1"
   local app_root="$2"
@@ -117,6 +139,7 @@ function rn_build_ios_app() {
     -destination "platform=iOS Simulator,id=$udid" \
     -derivedDataPath "$app_dir/ios/build/DerivedData" \
     ONLY_ACTIVE_ARCH=YES \
+    FORCE_BUNDLING=1 \
     build | tee "$app_root/xcodebuild.log" &
   local build_pid=$!
 
@@ -150,6 +173,14 @@ function rn_launch_app_with_marker() {
   data_container=$(xcrun simctl get_app_container "$udid" "$bundle_id" data)
   local marker_file="$data_container/tmp/$marker_file_name"
   rm -f "$marker_file"
+  # A reinstall over an already-installed bundle ID preserves the app's data
+  # container on the simulator, so a leftover dev-reload phase marker
+  # (NativeScriptNativeApiModule's __writeReloadPhaseMarker) from a PRIOR
+  # run of this same app can survive into a fresh launch and make it think
+  # it's already in "phase 2"; confirmed on-sim (a Release-config run
+  # right after a Debug-config JOB2 run misreported phase2-post-reload).
+  # Harmless rm for scripts that never write this file.
+  rm -f "$data_container/tmp/NativeScriptM1ReloadPhase.marker"
 
   SIMCTL_CHILD_NATIVESCRIPT_RN_TURBO_SMOKE_MARKER=1 \
     xcrun simctl launch --terminate-running-process "$udid" "$bundle_id" >/dev/null
@@ -167,16 +198,30 @@ const fs = require('fs');
 const [markerFile, marker, timeoutSecondsText] = process.argv.slice(2);
 const timeoutMs = Number(timeoutSecondsText) * 1000;
 const startedAt = Date.now();
+let lastContent = '';
 
 function poll() {
   if (fs.existsSync(markerFile)) {
-    const content = fs.readFileSync(markerFile, 'utf8');
-    console.log(`${marker} ${JSON.stringify({markerFile, content: content.trim()})}`);
-    process.exit(0);
+    const content = fs.readFileSync(markerFile, 'utf8').trim();
+    if (content && content !== lastContent) {
+      lastContent = content;
+      if (content.startsWith('stage=')) {
+        console.log(`${marker} ${JSON.stringify({markerFile, stage: content.slice('stage='.length)})}`);
+      } else if (!marker || content.includes(marker)) {
+        console.log(`${marker} ${JSON.stringify({markerFile, content})}`);
+        process.exit(0);
+      } else {
+        console.error(`Unexpected ${marker} marker content at ${markerFile}: ${content}`);
+        process.exit(1);
+      }
+    }
   }
 
   if (Date.now() - startedAt > timeoutMs) {
     console.error(`Timed out waiting for ${marker} file at ${markerFile}.`);
+    if (lastContent) {
+      console.error(`Last ${marker} marker content: ${lastContent}`);
+    }
     process.exit(1);
   }
 

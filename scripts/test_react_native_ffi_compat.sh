@@ -15,9 +15,9 @@ LAUNCH_TIMEOUT_SECONDS=${RN_FFI_COMPAT_LAUNCH_TIMEOUT_SECONDS:-120}
 BUNDLE_ID="org.reactjs.native.example.$APP_NAME"
 MARKER="NATIVESCRIPT_RN_FFI_COMPAT"
 MARKER_FILE_NAME="NativeScriptNativeApiSmoke.marker"
-APP_TSX="$REPO_ROOT/test/react-native/ffi-compat/App.tsx"
-RUNTIME_TESTS_SOURCE="$REPO_ROOT/test/runtime/runner/app/tests"
-FIXTURES_SOURCE="$REPO_ROOT/test/runtime/fixtures"
+APP_TSX="$REPO_ROOT/platforms/apple/test/react-native/ffi-compat/App.tsx"
+RUNTIME_TESTS_SOURCE="$REPO_ROOT/platforms/apple/test/runtime/runner/app/tests"
+FIXTURES_SOURCE="$REPO_ROOT/platforms/apple/test/runtime/fixtures"
 GENERATED_METADATA_DIR="$APP_ROOT/metadata"
 
 function rn_generate_ffi_test_metadata() {
@@ -159,6 +159,45 @@ fi
 rn_create_app_if_missing "$APP_DIR" "$APP_ROOT" "$APP_NAME" "$RN_VERSION" "$RN_CLI_VERSION" "React Native FFI compatibility app"
 rn_install_turbo_tarball "$APP_DIR" "$TARBALL" "FFI compatibility app"
 
+checkpoint "Installing react-native-worklets for the FFI compatibility app..."
+(cd "$APP_DIR" && npm install --silent react-native-worklets@0.9.1)
+
+checkpoint "Enabling NativeScript and Worklets Babel plugins for the FFI compatibility app..."
+node - "$APP_DIR/babel.config.js" <<'NODE'
+const fs = require('fs');
+const target = process.argv[2];
+let source = fs.existsSync(target)
+  ? fs.readFileSync(target, 'utf8')
+  : [
+      'module.exports = {',
+      "  presets: ['module:@react-native/babel-preset'],",
+      '};',
+      '',
+    ].join('\n');
+
+const plugins = ['@nativescript/react-native/babel-plugin', 'react-native-worklets/plugin'];
+const missingPlugins = plugins.filter((plugin) => !source.includes(plugin));
+if (missingPlugins.length > 0) {
+  const pluginEntry = missingPlugins.map((plugin) => `'${plugin}'`).join(', ') + ', ';
+  if (/plugins\s*:\s*\[/.test(source)) {
+    source = source.replace(/plugins\s*:\s*\[/, (match) => `${match}${pluginEntry}`);
+  } else if (/return\s*\{/.test(source)) {
+    source = source.replace(
+      /return\s*\{/,
+      (match) => `${match}\n    plugins: [${pluginEntry}],`,
+    );
+  } else if (/module\.exports\s*=\s*\{/.test(source)) {
+    source = source.replace(
+      /module\.exports\s*=\s*\{/,
+      (match) => `${match}\n  plugins: [${pluginEntry}],`,
+    );
+  } else {
+    source += `\n// NativeScript FFI compatibility: add ${missingPlugins.map((plugin) => `'${plugin}'`).join(' and ')} to Babel plugins.\n`;
+  }
+  fs.writeFileSync(target, source);
+}
+NODE
+
 checkpoint "Installing FFI compatibility entrypoint..."
 cp "$APP_TSX" "$APP_DIR/App.tsx"
 rn_install_ffi_runtime_specs
@@ -202,6 +241,7 @@ function poll() {
         if (content.startsWith('stage=')) {
           lastStage = content;
           console.log(`${marker} ${JSON.stringify({markerFile, stage: content.slice('stage='.length)})}`);
+          setTimeout(poll, 2000);
           return;
         }
         console.error(`Invalid ${marker} marker content at ${markerFile}: ${content}`);

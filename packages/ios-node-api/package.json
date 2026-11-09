@@ -4,7 +4,7 @@
   "description": "An embeddable, engine-agnostic NativeScript runtime for iOS based on Node-API",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/napi-ios.git",
+    "url": "git+https://github.com/NativeScript/runtimes.git",
     "directory": "packages/ios-node-api"
   },
   "typings": "index.d.ts",

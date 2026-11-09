@@ -7,25 +7,32 @@
 
 #include <memory>
 
+#ifdef __ANDROID__
+#include "JEnv.h"
+#endif
+
 #include "SimpleAllocator.h"
 #include "jsr_common.h"
 #include "libplatform/libplatform.h"
 #include "v8-api.h"
-// #include "JEnv.h"
-
-typedef struct napi_runtime__* napi_runtime;
 
 class JSR {
  public:
   JSR();
   v8::Isolate* isolate;
-  static bool s_mainThreadInitialized;
-  static v8::Platform* platform;
+  static std::unique_ptr<v8::Platform> platform;
 
   std::recursive_mutex js_mutex;
   void lock() { js_mutex.lock(); }
   void unlock() { js_mutex.unlock(); }
 
+  static JSR* ForEnv(napi_env env);
+  static void RegisterEnv(napi_env env, JSR* runtime);
+  static void UnregisterEnv(napi_env env);
+
+ private:
+  static std::once_flag initialization_once;
+  static std::mutex env_cache_mutex;
   static std::unordered_map<napi_env, JSR*> env_to_jsr_cache;
 };
 
@@ -89,11 +96,15 @@ class NapiEscapableScope {
 
 namespace tns {
 
-// inline static v8::Local<v8::String> ConvertToV8String(v8::Isolate* isolate,
-// const jchar* data, int length) {
-//     return v8::String::NewFromTwoByte(isolate, (const uint16_t*) data,
-//     v8::NewStringType::kNormal, length).ToLocalChecked();
-// }
+#ifdef __ANDROID__
+inline static v8::Local<v8::String> ConvertToV8String(v8::Isolate* isolate,
+                                                      const jchar* data,
+                                                      int length) {
+  return v8::String::NewFromTwoByte(isolate, (const uint16_t*)data,
+                                    v8::NewStringType::kNormal, length)
+      .ToLocalChecked();
+}
+#endif
 
 inline static v8::Local<v8::String> ConvertToV8String(v8::Isolate* isolate,
                                                       const std::string& s) {
@@ -135,20 +146,22 @@ inline static std::string ConvertToString(const v8::Local<v8::String>& s) {
   }
 }
 
-// static v8::Local<v8::Value> jstringToV8String(v8::Isolate* isolate, jstring
-// value) {
-//     if (value == nullptr) {
-//         return Null(isolate);
-//     }
+#ifdef __ANDROID__
+static v8::Local<v8::Value> jstringToV8String(v8::Isolate* isolate,
+                                              jstring value) {
+  if (value == nullptr) {
+    return Null(isolate);
+  }
 
-//     JEnv env;
-//     auto chars = env.GetStringChars(value, NULL);
-//     auto length = env.GetStringLength(value);
-//     auto v8String = tns::ConvertToV8String(isolate, chars, length);
-//     env.ReleaseStringChars(value, chars);
+  JEnv env;
+  auto chars = env.GetStringChars(value, NULL);
+  auto length = env.GetStringLength(value);
+  auto v8String = tns::ConvertToV8String(isolate, chars, length);
+  env.ReleaseStringChars(value, chars);
 
-//     return v8String;
-// }
+  return v8String;
+}
+#endif
 
 inline static std::string ToString(v8::Isolate* isolate,
                                    const v8::Local<v8::Value>& value) {
@@ -171,20 +184,22 @@ inline static std::string ToString(v8::Isolate* isolate,
   return std::string(*result, result.length());
 }
 
-// static std::string jstringToString(jstring value) {
-//     if (value == nullptr) {
-//         return {};
-//     }
+#ifdef __ANDROID__
+static std::string jstringToString(jstring value) {
+  if (value == nullptr) {
+    return {};
+  }
 
-//     JEnv env;
+  JEnv env;
 
-//     jboolean f = JNI_FALSE;
-//     auto chars = env.GetStringUTFChars(value, &f);
-//     std::string s(chars);
-//     env.ReleaseStringUTFChars(value, chars);
+  jboolean f = JNI_FALSE;
+  auto chars = env.GetStringUTFChars(value, &f);
+  std::string s(chars);
+  env.ReleaseStringUTFChars(value, chars);
 
-//     return s;
-// }
+  return s;
+}
+#endif
 }  // namespace tns
 
 #endif  // TEST_APP_JSR_H

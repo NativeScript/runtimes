@@ -1,0 +1,454 @@
+(function () {
+  var __decorate =
+    (this && this.__decorate) ||
+    function (decorators, target, key, desc) {
+      var c = arguments.length;
+      var r =
+          c < 3
+            ? target
+            : desc === null
+            ? (desc = Object.getOwnPropertyDescriptor(target, key))
+            : desc,
+        d;
+
+      if (
+        typeof globalThis.Reflect === "object" &&
+        typeof globalThis.Reflect.decorate === "function"
+      ) {
+        r = globalThis.Reflect.decorate(decorators, target, key, desc);
+      } else {
+        for (var i = decorators.length - 1; i >= 0; i--) {
+          if ((d = decorators[i])) {
+            r =
+              (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+          }
+        }
+      }
+      return c > 3 && r && Object.defineProperty(target, key, r), r;
+    };
+
+  // For backward compatibility.
+  var __native = function (thiz) {
+    // we are setting the __container__ property to the base class when the super method is called
+    // if the constructor returns the __native(this) call we will use the old implementation
+    // copying all the properties to the result
+    // otherwise if we are using the result from the super() method call we won't need such logic
+    // as thiz already contains the parent properties
+    // this way we now support both implementations in typescript generated constructors:
+    // 1: super(); return __native(this);
+    // 2: return super() || this;
+    //    if (thiz.__container__) {
+    //    if (__useHostObjects) {
+    //    for (var prop in thiz) {
+    //            if (thiz.hasOwnProperty(prop)) {
+    //              thiz.__proto__[prop] = thiz[prop];
+    //              delete thiz[prop];
+    //            }
+    //       }
+    //    }
+
+    return thiz;
+    //    } else {
+    //      return thiz;
+    //    }
+  };
+
+  var __extends = function (Child, Parent) {
+    // Detect a native class by a brand the runtime stamps on its native extend() rather than
+    // sniffing Parent.extend.toString() for "[native code]": in release/bytecode builds every
+    // function (JS or native) stringifies to "[native code]", which misdetects a plain JS class
+    // with a static "extend" method as native. The brand works for source and bytecode alike.
+    var extendNativeClass =
+      !!Parent.extend && Parent.extend.__isNativeExtend__ === true;
+
+    if (!extendNativeClass) {
+      __extends_ts(Child, Parent);
+      return;
+    }
+    if (Parent.__isPrototypeImplementationObject) {
+      throw new Error("Can not extend an already extended native object.");
+    }
+
+    function extend(thiz) {
+      var child = thiz.__proto__.__child;
+      if (!child.__extended) {
+        var parent = thiz.__proto__.__parent;
+        child.__extended = parent.extend(child.name, child.prototype, true);
+        // This will deal with "i instanceof child"
+        child[Symbol.hasInstance] = function (instance) {
+          return instance instanceof this.__extended;
+        };
+      }
+      return child.__extended;
+    }
+
+    Parent.__activityExtend = function (parent, name, implementationObject) {
+      __log("__activityExtend called");
+      return parent.extend(name, implementationObject);
+    };
+
+    Parent.call = function (thiz) {
+      var Extended = extend(thiz);
+      thiz.__container__ = true;
+      if (arguments.length > 1) {
+        if (typeof Extended !== "function") {
+          thiz = Reflect.construct(
+            Extended,
+            Array.prototype.slice.call(arguments, 1)
+          );
+        } else {
+          thiz = new (Function.prototype.bind.apply(
+            Extended,
+            [null].concat(Array.prototype.slice.call(arguments, 1))
+          ))();
+        }
+      } else {
+        thiz = new Extended();
+      }
+      return thiz;
+    };
+
+    Parent.apply = function (thiz, args) {
+      var Extended = extend(thiz);
+      thiz.__container__ = true;
+      if (args && args.length > 0) {
+        if (typeof Extended !== "function") {
+          thiz = Reflect.construct(Extended, [null].concat(args));
+        } else {
+          thiz = new (Function.prototype.bind.apply(
+            Extended,
+            [null].concat(args)
+          ))();
+        }
+      } else {
+        thiz = new Extended();
+      }
+      return thiz;
+    };
+    __extends_ns(Child, Parent);
+    Child.__isPrototypeImplementationObject = true;
+    Child.__proto__ = Parent;
+    Child.prototype.__parent = Parent;
+    Child.prototype.__child = Child;
+  };
+
+  var __extends_ts = function (child, parent) {
+    extendStaticFunctions(child, parent);
+    assignPrototypeFromParentToChild(parent, child);
+  };
+
+  var __extends_ns = function (child, parent) {
+    if (!parent.extend) {
+      assignPropertiesFromParentToChild(parent, child);
+    }
+
+    assignPrototypeFromParentToChild(parent, child);
+  };
+
+  var extendStaticFunctions =
+    Object.setPrototypeOf ||
+    (hasInternalProtoProperty() &&
+      function (child, parent) {
+        child.__proto__ = parent;
+      }) ||
+    assignPropertiesFromParentToChild;
+
+  function hasInternalProtoProperty() {
+    return { __proto__: [] } instanceof Array;
+  }
+
+  function assignPropertiesFromParentToChild(parent, child) {
+    for (var property in parent) {
+      if (parent.hasOwnProperty(property)) {
+        child[property] = parent[property];
+      }
+    }
+  }
+
+  function assignPrototypeFromParentToChild(parent, child) {
+    function __() {
+      this.constructor = child;
+    }
+
+    if (parent === null) {
+      child.prototype = Object.create(null);
+    } else {
+      __.prototype = parent.prototype;
+      child.prototype = new __();
+    }
+  }
+
+  function JavaProxy(className) {
+    return function (target) {
+      var extended = target.extend(className, target.prototype);
+      extended.name = className;
+      return extended;
+    };
+  }
+
+  function Interfaces(interfacesArr) {
+    return function (target) {
+      if (interfacesArr instanceof Array) {
+        // attach interfaces: [] to the object
+        target.prototype.interfaces = interfacesArr;
+      }
+    };
+  }
+     Object.defineProperty(globalThis, "__native", { value: __native });
+     Object.defineProperty(globalThis, "__extends", { value: __extends });
+     Object.defineProperty(globalThis, "__decorate", { value: __decorate });
+
+
+
+  if (!globalThis.__ns__worker) {
+    globalThis.JavaProxy = JavaProxy;
+  }
+  globalThis.Interfaces = Interfaces;
+
+  if (globalThis.WeakRef && !globalThis.WeakRef.prototype.get) {
+    globalThis.WeakRef.prototype.get = globalThis.WeakRef.prototype.deref;
+  }
+
+  // Native array access: numeric indexing and the map/forEach/toString/
+  // Symbol.iterator helpers are now implemented natively (see MetadataNode's
+  // array prototype + the host object's indexed accessors), so the old JS
+  // getNativeArrayProp/setNativeArrayProp helpers are gone.
+
+  function findInPrototypeChain(obj, prop) {
+    while (obj) {
+      if (obj.hasOwnProperty(prop)) {
+        return Object.getOwnPropertyDescriptor(obj, prop);
+      }
+      obj = Object.getPrototypeOf(obj);
+    }
+    return undefined;
+  }
+
+  globalThis.__prepareHostObject = function (hostObject, jsThis) {
+    //    const prototype = Object.getPrototypeOf(jsThis);
+    //    Object.setPrototypeOf(hostObject, prototype);
+    Object.defineProperty(hostObject, "super", {
+      get: () => jsThis["super"],
+    });
+  };
+
+  const EXTERNAL_PROP = "[[external]]";
+  const REFERENCE_PROP_JSC = "[[jsc_reference_info]]";
+
+  function __createNativeProxy(object, objectId) {
+    const proxy = new Proxy(object, {
+      get: function (target, prop) {
+        if (prop === EXTERNAL_PROP) return this[EXTERNAL_PROP];
+        if (prop === REFERENCE_PROP_JSC) return this[REFERENCE_PROP_JSC];
+        // Numeric indices go straight to the native element accessor; the
+        // map/forEach/toString/Symbol.iterator helpers live on the array
+        // prototype now, so everything else just forwards to the target.
+        if (target.__is__javaArray && typeof prop !== "symbol" && !isNaN(prop)) {
+          return target.getValueAtIndex(parseInt(prop));
+        }
+        return target[prop];
+      },
+      set: function (target, prop, value) {
+        if (prop === EXTERNAL_PROP) {
+          this[EXTERNAL_PROP] = value;
+          return true;
+        }
+
+        if (prop === REFERENCE_PROP_JSC) {
+          this[REFERENCE_PROP_JSC] = value;
+        }
+
+        if (target.__is__javaArray && !isNaN(prop)) {
+          target.setValueAtIndex(parseInt(prop), value);
+          return true;
+        }
+
+        target[prop] = value;
+        return true;
+      },
+    });
+    return proxy;
+  }
+  globalThis.__createNativeProxy = __createNativeProxy;
+
+  globalThis.getErrorStack = (err) => {
+    if (err) return err.stack;
+    const stack = new Error("").stack;
+    const lines = stack.split("\n");
+    // Line 2 results in invalid stack if not replaced when doing typescript extend.
+    lines[2] = "  at extend(native)";
+    return lines.join("\n");
+  };
+
+  if (globalThis.URL) {
+    const BLOB_STORE = new Map();
+    URL.createObjectURL = function (object, options = null) {
+      try {
+        if (object instanceof Blob || object instanceof File) {
+          const id = java.util.UUID.randomUUID().toString();
+          const ret = `blob:nativescript/${id}`;
+          BLOB_STORE.set(ret, {
+            blob: object,
+            type: object ? object.type : undefined,
+            ext: options ? options.ext : undefined,
+          });
+          return ret;
+        }
+      } catch (error) {
+        return null;
+      }
+      return null;
+    };
+    URL.revokeObjectURL = function (url) {
+      BLOB_STORE.delete(url);
+    };
+    function InternalAccessor() {}
+    InternalAccessor.getData = function (url) {
+      return BLOB_STORE.get(url);
+    };
+    URL.InternalAccessor = InternalAccessor;
+    const searchParamsDescriptor = Object.getOwnPropertyDescriptor(
+      URL.prototype,
+      "searchParams"
+    );
+    if (!searchParamsDescriptor || searchParamsDescriptor.configurable) {
+      Object.defineProperty(URL.prototype, "searchParams", {
+        get() {
+          if (this._searchParams == null) {
+            this._searchParams = new URLSearchParams(this.search);
+            Object.defineProperty(this._searchParams, "_url", {
+              enumerable: false,
+              writable: false,
+              value: this,
+            });
+            this._searchParams._append = this._searchParams.append;
+            this._searchParams.append = function (name, value) {
+              this._append(name, value);
+              this._url.search = this.toString();
+            };
+            this._searchParams._delete = this._searchParams.delete;
+            this._searchParams.delete = function (name) {
+              this._delete(name);
+              this._url.search = this.toString();
+            };
+            this._searchParams._set = this._searchParams.set;
+            this._searchParams.set = function (name, value) {
+              this._set(name, value);
+              this._url.search = this.toString();
+            };
+            this._searchParams._sort = this._searchParams.sort;
+            this._searchParams.sort = function () {
+              this._sort();
+              this._url.search = this.toString();
+            };
+          }
+          return this._searchParams;
+        },
+      });
+    }
+  }
+
+  const pendingUnhandledRejections = [];
+  const hasBeenNotifiedProperty = new WeakMap();
+  function emitPendingUnhandledRejections() {
+    while (pendingUnhandledRejections.length > 0) {
+      var promise = pendingUnhandledRejections.shift();
+      var reason = pendingUnhandledRejections.shift();
+      if (
+        hasBeenNotifiedProperty.get(promise) === false &&
+        globalThis.__onUncaughtError
+      ) {
+        globalThis.__onUncaughtError(reason);
+      }
+    }
+  }
+
+  function unhandledPromise(promise, reason) {
+    pendingUnhandledRejections.push(promise, reason);
+    __ns__setTimeout(() => {
+      emitPendingUnhandledRejections();
+    }, 1);
+  }
+
+  function handledPromise(promise) {
+    const hasBeenNotified = hasBeenNotifiedProperty.get(promise);
+    if (hasBeenNotified != undefined) {
+      hasBeenNotifiedProperty.delete(promise);
+    }
+  }
+
+  function makeRejectionError(reason) {
+    const stringValue = Object.prototype.toString.call(reason);
+    if (
+      stringValue === "[object Error]" ||
+      reason instanceof Error ||
+      typeof reason === "object"
+    ) {
+      reason.message = `(Unhandled promise rejection): ${reason.message}`;
+      
+      if (!reason.stack) {
+        reason.stack = new Error("").stack;
+      }
+      return reason;
+    } else {
+      const error = new Error(reason, {
+        cause: reason,
+      });
+      error.message = `(Unhandled promise rejection): ${error.message}`;
+      return error;
+    }
+  }
+
+  if (globalThis.__engine === "V8") {
+    // Only report errors for promise rejections that go unhandled.
+    globalThis.onUnhandledPromiseRejectionTracker = (
+      event,
+      promise,
+      reason
+    ) => {
+      if (event === globalThis.__promiseUnhandledEvent) {
+        hasBeenNotifiedProperty.set(promise, false);
+        const error = makeRejectionError(reason);
+        unhandledPromise(promise, error);
+      } else {
+        handledPromise(promise);
+      }
+    };
+  } else if (globalThis.__engine === "QuickJS") {
+    globalThis.onUnhandledPromiseRejectionTracker = (
+      promise,
+      reason,
+      isHandled
+    ) => {
+      if (!isHandled) {
+        hasBeenNotifiedProperty.set(promise, false);
+        const error = makeRejectionError(reason);
+        // Preserve original stack trace.
+        if (!promise.then["[[stack]]"]) {
+          promise.then["[[stack]]"] = error.stack;
+        } else {
+          error.stack = promise.then["[[stack]]"];
+        }
+        unhandledPromise(promise, error);
+      } else {
+        handledPromise(promise);
+      }
+    };
+  } else if (globalThis.__engine === "JSC") {
+    // JSC's unhandled-rejection callback only fires for rejections that go
+    // unhandled (there is no "handled later" retraction event), and it is
+    // invoked with (promise, reason).
+    globalThis.onUnhandledPromiseRejectionTracker = (promise, reason) => {
+      hasBeenNotifiedProperty.set(promise, false);
+      const error = makeRejectionError(reason);
+      unhandledPromise(promise, error);
+    };
+  } else if (globalThis.__engine === "Hermes") {
+    HermesInternal.enablePromiseRejectionTracker({
+      allRejections: true,
+      onUnhandled: function (id, error) {
+        globalThis.__onUncaughtError(makeRejectionError(error));
+      },
+    });
+  }
+})();

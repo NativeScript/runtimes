@@ -111,6 +111,12 @@ jobs:
           echo NPM_VERSION=$NPM_VERSION >> $GITHUB_OUTPUT
           echo NPM_TAG=$NPM_TAG >> $GITHUB_OUTPUT
           echo BUILD_ENGINE=$BUILD_ENGINE >> $GITHUB_OUTPUT
+      - name: Apply QuickJS patches
+        # vendor/quickjs/source_ng is a pristine submodule checkout at its pinned
+        # commit; the NativeScript engine changes the Apple build needs (e.g.
+        # JS_EVAL_FLAG_COMPILE_ONLY_NO_RESOLVE for node:vm) live in
+        # vendor/quickjs/patches and are applied into the work tree here.
+        run: npm run patch-quickjs
       - name: Build
         run: ./scripts/build_all_ios.sh --${{ steps.npm_version_output.outputs.BUILD_ENGINE }}
       - name: Upload npm package artifact

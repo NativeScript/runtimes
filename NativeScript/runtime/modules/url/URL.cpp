@@ -16,7 +16,7 @@ struct CoercedUtf8String {
 
 bool CoerceToUtf8String(napi_env env, napi_value value,
                         CoercedUtf8String& out) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   napi_value coerced;
   NAPI_GUARD(napi_coerce_to_string(env, value, &coerced)) { return false; }
 
@@ -74,10 +74,17 @@ bool EnsureConstructorThis(napi_env env, const char* constructorName,
                             nullptr) == napi_ok;
 }
 
+// A 2nd argument only counts as a base URL when it is actually provided and is
+// neither undefined nor null. Without this check `new URL(x, undefined)` would
+// coerce the base to the literal string "undefined" and fail to parse.
+bool HasBaseArgument(napi_env env, size_t argc, napi_value* argv) {
+  return argc > 1 && !napi_util::is_null_or_undefined(env, argv[1]);
+}
+
 URL* GetInstance(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   napi_value jsThis;
-  void* data;
+  void* data = nullptr;
   NAPI_GUARD(napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, &data)) {
     return nullptr;
   }
@@ -93,7 +100,7 @@ URL* GetInstance(napi_env env, napi_callback_info info) {
 template <typename Getter>
 napi_value GetUrlProperty(napi_env env, napi_callback_info info,
                           Getter getter) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URL* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -171,7 +178,7 @@ napi_value URL::GetSearch(napi_env env, napi_callback_info info) {
 }
 
 napi_value URL::GetSearchParams(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URL* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -234,7 +241,7 @@ napi_value URL::SetUserName(napi_env env, napi_callback_info info) {
 
 // Add toString method
 napi_value URL::ToString(napi_env env, napi_callback_info info) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   URL* instance = GetInstance(env, info);
   if (!instance) return nullptr;
 
@@ -271,7 +278,7 @@ napi_value URL::New(napi_env env, napi_callback_info info) {
       ada::parse<ada::url_aggregator>(url_input.view(), nullptr);
 
   // If the input is not absolute, retry with the provided base if available.
-  if (!parse_result && argc > 1) {
+  if (!parse_result && HasBaseArgument(env, argc, argv)) {
     CoercedUtf8String base_input;
     if (!CoerceToUtf8String(env, argv[1], base_input)) return nullptr;
 
@@ -310,7 +317,7 @@ napi_value URL::CanParse(napi_env env, napi_callback_info info) {
   bool result =
       static_cast<bool>(ada::parse<ada::url_aggregator>(input.view(), nullptr));
 
-  if (!result && argc > 1) {
+  if (!result && HasBaseArgument(env, argc, argv)) {
     CoercedUtf8String base_input;
     if (!CoerceToUtf8String(env, argv[1], base_input)) return nullptr;
 
@@ -338,7 +345,7 @@ void URL::Destructor(napi_env env, void* data, void* hint) {
 }
 
 void URL::Init(napi_env env, napi_value global) {
-  NAPI_PREAMBLE
+  NS_NAPI_PREAMBLE
   napi_value ctor;
   static const int instance_prop_count = 13;
   napi_property_descriptor properties[instance_prop_count] = {

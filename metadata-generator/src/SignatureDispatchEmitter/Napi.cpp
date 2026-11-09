@@ -22,23 +22,6 @@ std::string makeNapiWrapperName(DispatchKind kind, size_t index) {
   stream << toBase36(index);
   return stream.str();
 }
-std::string makePreparedWrapperName(DispatchKind kind, size_t index) {
-  std::ostringstream stream;
-  stream << "dp";
-  switch (kind) {
-    case DispatchKind::ObjCMethod:
-      stream << "o";
-      break;
-    case DispatchKind::CFunction:
-      stream << "c";
-      break;
-    case DispatchKind::BlockInvoke:
-      stream << "b";
-      break;
-  }
-  stream << toBase36(index);
-  return stream.str();
-}
 void writeFastNapiArgConversion(std::ostringstream& out, const MDTypeInfo* type,
                                 size_t index, bool hasCleanupArgs) {
   const char* failCleanup = hasCleanupArgs ? "  cleanupManagedArgs();\n" : "";
@@ -249,7 +232,7 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
   cleanupArgIndexes.reserve(argTypes.size());
   noCleanupManagedArgIndexes.reserve(argTypes.size());
   for (size_t i = 0; i < argTypes.size(); i++) {
-    if (!isFastDirectNapiKind(argTypeInfos[i]->kind)) {
+    if (!isFastPrimitiveDispatchKind(argTypeInfos[i]->kind)) {
       if (argKindMayNeedCleanup(argTypeInfos[i]->kind)) {
         cleanupArgIndexes.push_back(i);
       } else {
@@ -271,7 +254,7 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
 
   for (size_t i = 0; i < argTypes.size(); i++) {
     out << "  " << argTypes[i] << " arg" << i << "{};\n";
-    if (!isFastDirectNapiKind(argTypeInfos[i]->kind) &&
+    if (!isFastPrimitiveDispatchKind(argTypeInfos[i]->kind) &&
         argKindMayNeedCleanup(argTypeInfos[i]->kind)) {
       out << "  bool shouldFree" << i << " = false;\n";
     }
@@ -312,9 +295,9 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
   }
 
   for (size_t i = 0; i < argTypes.size(); i++) {
-    if (isFastDirectNapiKind(argTypeInfos[i]->kind)) {
+    if (isFastPrimitiveDispatchKind(argTypeInfos[i]->kind)) {
       writeFastNapiArgConversion(out, argTypeInfos[i], i, hasCleanupArgs);
-    } else if (isFastManagedNapiKind(argTypeInfos[i]->kind)) {
+    } else if (isFastReferenceDispatchKind(argTypeInfos[i]->kind)) {
       out << "  if (!TryFastConvertNapiArgument(env, static_cast<MDTypeKind>("
           << static_cast<int>(argTypeInfos[i]->kind) << "), argv[" << i
           << "], &arg" << i << ")) {\n";
@@ -328,6 +311,15 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
             << "], &arg" << i
             << ", &ignoredShouldFree, &ignoredShouldFreeAny);\n";
       }
+      out << "    bool conversionFailed" << i << " = false;\n";
+      out << "    if (ConsumeNapiArgumentConversionFailure(env) || "
+             "napi_is_exception_pending(env, &conversionFailed"
+          << i << ") != napi_ok || conversionFailed" << i << ") {\n";
+      if (hasCleanupArgs) {
+        out << "      cleanupManagedArgs();\n";
+      }
+      out << "      return false;\n";
+      out << "    }\n";
       out << "  }\n";
     } else {
       if (argKindMayNeedCleanup(argTypeInfos[i]->kind)) {
@@ -340,6 +332,15 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
             << "], &arg" << i
             << ", &ignoredShouldFree, &ignoredShouldFreeAny);\n";
       }
+      out << "  bool conversionFailed" << i << " = false;\n";
+      out << "  if (ConsumeNapiArgumentConversionFailure(env) || "
+             "napi_is_exception_pending(env, &conversionFailed"
+          << i << ") != napi_ok || conversionFailed" << i << ") {\n";
+      if (hasCleanupArgs) {
+        out << "    cleanupManagedArgs();\n";
+      }
+      out << "    return false;\n";
+      out << "  }\n";
     }
   }
 
@@ -371,57 +372,6 @@ void writeNapiWrapper(std::ostringstream& out, DispatchKind kind,
   }
 
   out << "  return true;\n";
-  out << "}\n\n";
-}
-void writePreparedWrapper(std::ostringstream& out, DispatchKind kind,
-                          const std::string& wrapperName,
-                          const MDSignature* signature) {
-  if (kind != DispatchKind::BlockInvoke) {
-    return;
-  }
-
-  std::string returnType;
-  if (!mapTypeToCpp(signature->returnType, &returnType, true)) {
-    return;
-  }
-
-  std::vector<std::string> argTypes;
-  argTypes.reserve(signature->arguments.size());
-  for (const auto* arg : signature->arguments) {
-    std::string argType;
-    if (!mapTypeToCpp(arg, &argType, false)) {
-      return;
-    }
-    argTypes.push_back(argType);
-  }
-
-  out << "static inline void " << wrapperName
-      << "(void* fnptr, void** avalues, void* rvalue) {\n";
-  out << "  using Fn = " << returnType << " (*)(void*";
-  for (const auto& argType : argTypes) {
-    out << ", " << argType;
-  }
-  out << ");\n";
-  out << "  auto fn = reinterpret_cast<Fn>(fnptr);\n";
-  out << "  void* block = *reinterpret_cast<void**>(avalues[0]);\n";
-  for (size_t i = 0; i < argTypes.size(); i++) {
-    out << "  " << argTypes[i] << " arg" << i << " = *reinterpret_cast<"
-        << argTypes[i] << "*>(avalues[" << (i + 1) << "]);\n";
-  }
-
-  std::ostringstream callExpr;
-  callExpr << "fn(block";
-  for (size_t i = 0; i < argTypes.size(); i++) {
-    callExpr << ", arg" << i;
-  }
-  callExpr << ")";
-
-  if (returnType == "void") {
-    out << "  " << callExpr.str() << ";\n";
-  } else {
-    out << "  *reinterpret_cast<" << returnType
-        << "*>(rvalue) = " << callExpr.str() << ";\n";
-  }
   out << "}\n\n";
 }
 

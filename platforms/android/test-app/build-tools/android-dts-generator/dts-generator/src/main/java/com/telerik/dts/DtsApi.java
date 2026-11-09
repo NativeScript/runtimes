@@ -1,0 +1,1777 @@
+package com.telerik.dts;
+
+import com.telerik.InputParameters;
+
+import org.apache.bcel.classfile.Attribute;
+import org.apache.bcel.classfile.Field;
+import org.apache.bcel.classfile.FieldOrMethod;
+import org.apache.bcel.classfile.JavaClass;
+import org.apache.bcel.classfile.LocalVariable;
+import org.apache.bcel.classfile.LocalVariableTable;
+import org.apache.bcel.classfile.Method;
+import org.apache.bcel.classfile.Signature;
+import org.apache.bcel.generic.ArrayType;
+import org.apache.bcel.generic.BasicType;
+import org.apache.bcel.generic.ObjectType;
+import org.apache.bcel.generic.ReferenceType;
+import org.apache.bcel.generic.Type;
+import org.apache.bcel.util.BCELComparator;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import edu.umd.cs.findbugs.ba.generic.GenericObjectType;
+import edu.umd.cs.findbugs.ba.generic.GenericSignatureParser;
+import edu.umd.cs.findbugs.ba.generic.GenericUtilities;
+
+/**
+ * Created by plamen5kov on 6/17/16.
+ */
+public class DtsApi {
+    public static List<Tuple<String, Integer>> externalGenerics = new ArrayList<>();
+    public static List<Tuple<String, Integer>> generics = new ArrayList<>();
+    public static List<String> imports = new ArrayList<>();
+    public static String JavaLangObject = "java.lang.Object";
+
+    private static Map<String, String> globalAliases = new HashMap<>();
+
+    private Map<String, String> extendsOverrides = new HashMap<>();
+    private Map<String, String> superOverrides = new HashMap<>();
+    private Map<String, String> typeOverrides = new HashMap<>();
+
+    private StringBuilder2 sbContent;
+    private Set<String> references;
+    private JavaClass prevClass;
+    private String currentFileClassname;
+    private Set<String> baseMethodNames;
+    private List<Method> baseMethods;
+    private Map<String, Method> mapNameMethod;
+    private Map<String, String> aliasedTypes;
+    private String[] namespaceParts;
+    private int indent = 0;
+    private boolean allGenericImplements;
+    private Pattern methodSignature = Pattern.compile("\\((?<ArgumentsSignature>.*)\\)(?<ReturnSignature>.*)");
+    private Pattern isWordPattern = Pattern.compile("^[\\w\\d]+$");
+    private Pattern isVoid = Pattern.compile("V(\\^.*\\;)?");
+    private int ignoreObfuscatedNameLength;
+    private HashSet<String> warnedMissing = new HashSet<>();
+    private Pattern jsFieldPattern = Pattern.compile("^[a-zA-Z$_][a-zA-Z0-9$_]*$");
+
+    private Set<String> reservedJsKeywords = Set.of(
+        "abstract", "arguments", "await", "boolean",
+        "break", "byte", "case", "catch",
+        "char", "class", "const", "continue",
+        "debugger", "default", "delete", "do",
+        "double", "else", "enum", "eval",
+        "export", "extends", "false", "final",
+        "finally", "float", "for", "function",
+        "goto", "if", "implements", "import",
+        "in", "instanceof", "int", "interface",
+        "let", "long", "native", "new",
+        "null", "package", "private", "protected",
+        "public", "return", "short", "static",
+        "super", "switch", "synchronized", "this",
+        "throw", "throws", "transient", "true",
+        "try", "typeof", "var", "void",
+        "volatile", "while", "with", "yield"
+    );
+
+    /**
+     * Package prefixes skipped because a segment is a reserved word, discovered
+     * while walking the classpath. Feeds getIgnoredNamespaces() so references to
+     * their types collapse to {@code any} like any other unemitted namespace.
+     */
+    private final Set<String> reservedWordNamespaces = new LinkedHashSet<>();
+    private boolean scannedForReservedWords = false;
+
+    public DtsApi(boolean allGenericImplements, InputParameters inputParameters) {
+        this.allGenericImplements = allGenericImplements;
+        this.ignoreObfuscatedNameLength = inputParameters.getIgnoreObfuscatedNameLength();
+        this.indent = 0;
+
+        overrideFieldComparator();
+        setOverrides();
+        setTypeOverrides();
+        setGlobalAliases();
+
+        this.aliasedTypes = new HashMap<>();
+    }
+
+    public String generateDtsContent(List<JavaClass> javaClasses) {
+        this.prevClass = null;
+
+        if ((javaClasses != null) && (javaClasses.size() > 0)) {
+            references = new HashSet<>();
+            sbContent = new StringBuilder2();
+
+            // process class scope
+            for (int i = 0; i < javaClasses.size(); i++) {
+                Set<String> methodsSet = new HashSet<>();
+
+                JavaClass currClass = javaClasses.get(i);
+                currentFileClassname = currClass.getClassName();
+
+
+                String simpleClassName = getSimpleClassname(currClass);
+                if (isObfuscated(simpleClassName) || !isEmittableClassName(currentFileClassname)) {
+                    continue;
+                }
+                Signature signature = this.getSignature(currClass);
+                TypeDefinition typeDefinition = null;
+                if (signature != null) {
+                    typeDefinition = new TypeDefinition(signature.getSignature(), currentFileClassname);
+                }
+
+                if (currentFileClassname.startsWith("java.util.function") ||
+                        currentFileClassname.startsWith("android.support.v4.media.routing.MediaRouterJellybeanMr1") ||
+                        currentFileClassname.startsWith("android.support.v4.media.routing.MediaRouterJellybeanMr2") ||
+                        currentFileClassname.contains(".debugger.") ||
+                        currentFileClassname.endsWith("package-info") ||
+                        currentFileClassname.endsWith("module-info") ||
+                        currentFileClassname.endsWith("Kt") ||
+                        // ...and classes nested inside one. A Kotlin file facade
+                        // (FooKt) is already skipped above; its synthetic members
+                        // (FooKt$WhenMappings) are just as unreachable from JS, and
+                        // emitting them opens a module for a parent that was never
+                        // written.
+                        currentFileClassname.split("\\$")[0].endsWith("Kt")) {
+                    continue;
+                }
+
+                // check if processed class hijacks a namespace
+                // TODO: optimize
+
+                this.namespaceParts = currentFileClassname.split("\\.");
+                if(isIgnoredNamespace()) {
+                    System.out.println(String.format("Found ignored namespace. %s", String.join(".", this.namespaceParts)));
+                    continue;
+                }
+
+                boolean isInterface = currClass.isInterface();
+                boolean isAbstract = currClass.isAbstract();
+
+                this.indent = closePackage(this.prevClass, currClass);
+                this.indent = openPackage(this.prevClass, currClass);
+
+                String tabs = getTabs(this.indent);
+
+                String extendsLine = getExtendsLine(currClass, typeDefinition);
+
+                if (simpleClassName.equals("AccessibilityDelegate")) {
+                    sbContent.appendln(tabs + "export class " + getFullClassNameConcatenated(currClass) + getTypeSuffix(currentFileClassname, typeDefinition, extendsLine) + extendsLine + " {");
+                } else {
+                    sbContent.appendln(tabs + "export" + (isAbstract && !isInterface ? " abstract " : " ") + "class " + simpleClassName + getTypeSuffix(currentFileClassname, typeDefinition, extendsLine) + extendsLine + " {");
+                }
+                // process member scope
+
+                mapNameMethod = new HashMap<>();
+
+                loadBaseMethods(currClass); //loaded in "baseMethodNames" and "baseMethods"
+
+                addClassField(currClass);
+
+                // process constructors for interfaces
+                if (isInterface) {
+                    List<JavaClass> allInterfaces = getAllInterfaces(currClass);
+
+                    List<Method> allInterfacesMethods = getAllInterfacesMethods(allInterfaces);
+                    Set<Field> allInterfaceFields = getAllInterfacesFields(allInterfaces);
+
+                    processInterfaceConstructor(currClass, typeDefinition, allInterfacesMethods);
+
+                    for (Method method : allInterfacesMethods) {
+                        processMethod(method, currClass, typeDefinition, methodsSet);
+                    }
+
+                    for (Field f : allInterfaceFields) {
+                        processField(f, currClass, typeDefinition);
+                    }
+                } else {
+                    List<FieldOrMethod> members = getMembers(currClass, getAllInterfaces(currClass));
+                    for (FieldOrMethod fieldOrMethod : members) {
+                        if (fieldOrMethod instanceof Field) {
+                            processField((Field) fieldOrMethod, currClass, typeDefinition);
+                        } else if (fieldOrMethod instanceof Method) {
+                            processMethod((Method) fieldOrMethod, currClass, typeDefinition, methodsSet);
+                        } else {
+                            throw new IllegalArgumentException("Argument is not method or field");
+                        }
+                    }
+                    // process member scope end
+                }
+
+                if (!isInterface) {
+                    HashSet<JavaClass> allInterfaces = new HashSet<>(getAllInterfaces(currClass));
+
+                    List<JavaClass> allClasses = getAllSuperClasses(currClass);
+
+                    // Include interfaces of extended classes
+                    for (JavaClass jclass : allClasses) {
+                        allInterfaces.addAll(getInterfaces(jclass));
+                    }
+
+                    List<Method> allInterfacesMethods = getAllInterfacesMethods(allInterfaces);
+
+                    for (Method method : allInterfacesMethods) {
+                        processMethod(method, currClass, typeDefinition, methodsSet);
+                    }
+                }
+
+                writeMethods(methodsSet);
+
+                sbContent.appendln(tabs + "}");
+                if (getSimpleClassname(currClass).equals("AccessibilityDelegate")) {
+                    String innerClassAlias = "export type " + getSimpleClassname(currClass) + " = " + getFullClassNameConcatenated(currClass);
+                    sbContent.appendln(tabs + innerClassAlias);
+                }
+                this.prevClass = currClass;
+            }
+            closePackage(prevClass, null);
+
+            // closePackage derives how much to close from the last emitted class
+            // name, which does not always match how many modules were actually
+            // opened -- and one unclosed module makes the whole .d.ts unparseable
+            // rather than degrading the declarations it belongs to. Close whatever
+            // is still open.
+            String emitted = sbContent.toString();
+            int unclosed = emitted.length() - emitted.replace("{", "").length()
+                    - (emitted.length() - emitted.replace("}", "").length());
+            while (unclosed > 0) {
+                sbContent.appendln(getTabs(--unclosed) + "}");
+            }
+            // process class scope end
+
+            String[] refs = references.toArray(new String[references.size()]);
+            Arrays.sort(refs);
+        }
+
+        String content = replaceIgnoredNamespaces(sbContent.toString());
+
+        return content;
+    }
+
+    /**
+     * Replaces every type from a namespace we do not emit with {@code any}.
+     *
+     * <p>Scanned rather than matched with a regular expression. Generic arguments
+     * nest -- {@code androidNative.Array<kotlin.Pair<A,B>>} -- and a pattern
+     * either stops before the arguments (leaving {@code any<A,B>}) or runs past
+     * the closing bracket (leaving {@code Array<any}); both produce a .d.ts the
+     * TypeScript compiler cannot parse. Counting bracket depth gets it right for
+     * any nesting.
+     */
+    private String replaceIgnoredNamespaces(String content) {
+        List<String> ignored = new ArrayList<>();
+        for (String namespace : this.getIgnoredNamespaces()) {
+            ignored.add(namespace);
+            String aliased = getGlobalAliasedClassName(namespace);
+            if (!aliased.equals(namespace)) {
+                ignored.add(aliased);
+            }
+        }
+
+        // Bucketed by first character. Every candidate position used to be
+        // tested against all ~48 entries with startsWith; almost all of those
+        // comparisons fail on the first character, and this made
+        // replaceIgnoredNamespaces the hottest thing in the generator once the
+        // generics pass was fixed (34% of samples). Indexing by that character
+        // leaves one or two real comparisons per position.
+        List<List<String>> ignoredByFirstChar = bucketByFirstChar(ignored);
+
+        // Copied in runs rather than a character at a time. Matches are rare,
+        // so the old loop spent most of its life doing single-char appends and
+        // bounds checks across the whole document.
+        StringBuilder out = new StringBuilder(content.length());
+        int contentLength = content.length();
+        int i = 0;
+        int runStart = 0;
+
+        while (i < contentLength) {
+            int length = ignoredTypeLengthAt(content, i, ignoredByFirstChar);
+            if (length > 0) {
+                if (i > runStart) {
+                    out.append(content, runStart, i);
+                }
+                out.append("any");
+                i += length;
+                runStart = i;
+            } else {
+                i++;
+            }
+        }
+
+        if (runStart < contentLength) {
+            out.append(content, runStart, contentLength);
+        }
+
+        // replace "extends any" with "extends java.lang.Object"
+        return out.toString().replace(" extends any ", String.format(" extends %s ", DtsApi.JavaLangObject));
+    }
+
+    private static boolean isTypeNameChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
+    }
+
+    /**
+     * Length of the ignored-namespace type starting at {@code start}, or 0.
+     * Includes the qualified name and its balanced generic arguments.
+     */
+    private static List<List<String>> bucketByFirstChar(List<String> ignored) {
+        List<List<String>> buckets = new ArrayList<>(ASCII_BUCKETS);
+        for (int i = 0; i < ASCII_BUCKETS; i++) {
+            buckets.add(null);
+        }
+
+        for (String namespace : ignored) {
+            if (namespace.isEmpty()) {
+                continue;
+            }
+            char first = namespace.charAt(0);
+            if (first >= ASCII_BUCKETS) {
+                continue;
+            }
+            if (buckets.get(first) == null) {
+                buckets.set(first, new ArrayList<>());
+            }
+            buckets.get(first).add(namespace);
+        }
+        return buckets;
+    }
+
+    private static final int ASCII_BUCKETS = 128;
+
+    private static int ignoredTypeLengthAt(String content, int start, List<List<String>> ignoredByFirstChar) {
+        // Must begin a name, not land in the middle of one.
+        if (start > 0) {
+            char previous = content.charAt(start - 1);
+            if (isTypeNameChar(previous) || previous == '.') {
+                return 0;
+            }
+        }
+
+        char firstChar = content.charAt(start);
+        List<String> ignored = firstChar < ASCII_BUCKETS ? ignoredByFirstChar.get(firstChar) : null;
+        if (ignored == null) {
+            return 0;
+        }
+
+        for (int n = 0; n < ignored.size(); n++) {
+            String namespace = ignored.get(n);
+            if (!content.startsWith(namespace, start)) {
+                continue;
+            }
+            int at = start + namespace.length();
+            // "kotlin" must not match "kotlinx".
+            if (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                continue;
+            }
+            // Trailing name segments: kotlin -> kotlin.jvm.functions.Function3
+            while (at + 1 < content.length() && content.charAt(at) == '.'
+                    && isTypeNameChar(content.charAt(at + 1))) {
+                at++;
+                while (at < content.length() && isTypeNameChar(content.charAt(at))) {
+                    at++;
+                }
+            }
+            // Generic arguments, to the matching bracket.
+            if (at < content.length() && content.charAt(at) == '<') {
+                int depth = 0;
+                int scan = at;
+                while (scan < content.length()) {
+                    char c = content.charAt(scan);
+                    if (c == '<') {
+                        depth++;
+                    } else if (c == '>') {
+                        depth--;
+                        if (depth == 0) {
+                            scan++;
+                            break;
+                        }
+                    } else if (c == '\n' || c == ';') {
+                        // Unbalanced; leave the arguments alone.
+                        depth = -1;
+                        break;
+                    }
+                    scan++;
+                }
+                if (depth == 0) {
+                    at = scan;
+                }
+            }
+            return at - start;
+        }
+        return 0;
+    }
+
+    public static String serializeGenerics() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("//Generics information:\n");
+        for (Tuple<String, Integer> generic : generics) {
+            sb.append(String.format("//%s:%s\n", generic.x, generic.y));
+        }
+        return sb.toString();
+    }
+
+    public static void loadGenericsFromStream(InputStream stream) throws Exception {
+        List<String> doc =
+            new BufferedReader(new InputStreamReader(stream,
+                    StandardCharsets.UTF_8)).lines().collect(Collectors.toList());
+        loadGenericsLines(doc);
+    }
+    public static void loadGenericsLines(List<String> lines) throws Exception {
+        for(String line: lines) {
+            if(!line.equals("")) {
+                while(line.startsWith("/")){
+                    line = line.substring(1, line.length());
+                }
+                String[] parts = line.split(":");
+                if (parts.length != 2) {
+                    throw new Exception(String.format("Invalid generic info(%s)", line));
+                }
+                externalGenerics.add(new Tuple<>(parts[0], Integer.parseInt(parts[1])));
+            }
+        }
+    }
+    public static void loadGenerics(File inputFile) throws Exception {
+        System.out.println("loadGenerics from file: " + inputFile.getAbsolutePath());
+        try {
+            List<String> lines = Files.readAllLines(inputFile.toPath());
+            loadGenericsLines(lines);
+        } catch (Exception e) {
+            throw new Exception(String.format("%s in file %s", e.getMessage(), inputFile));
+        }
+    }
+
+    // Adds javalangObject types to all generics which are used without types
+    /**
+     * Appends `<any,…>` to every use of a generic type that was written
+     * without type arguments.
+     *
+     * Done in one pass over the document. It used to be one pass *per generic
+     * type*: each compiled its own pattern, scanned the whole file to see
+     * whether it occurred, and on a hit rebuilt the entire multi-megabyte
+     * string with replaceAll. With android.jar that was the single most
+     * expensive thing the generator did -- 52% of samples inside the regex
+     * engine and another 24% copying strings -- and it grew with the product of
+     * the generic count and the output size, so a larger classpath made it
+     * disproportionately worse.
+     *
+     * One alternation of every name, matched longest-first so a nested class
+     * wins over its outer, replaces N scans and N rebuilds with one of each.
+     */
+    public static String replaceGenericsInText(String content) {
+        String any = "any";
+
+        List<Tuple<String, Integer>> allGenerics =
+                Stream.concat(generics.stream(), externalGenerics.stream()).collect(Collectors.toList());
+        if (allGenerics.isEmpty()) {
+            return content;
+        }
+
+        Map<String, String> suffixByName = new HashMap<>();
+        for (Tuple<String, Integer> generic : allGenerics) {
+            String suffix = buildGenericArgumentSuffix(generic.y, any);
+            suffixByName.putIfAbsent(generic.x, suffix);
+
+            String globalAliasedClassName = getGlobalAliasedClassName(generic.x);
+            if (!generic.x.equals(globalAliasedClassName)) {
+                suffixByName.putIfAbsent(globalAliasedClassName, suffix);
+            }
+        }
+
+        // Scanned in one linear pass rather than with a regex.
+        //
+        // The obvious rewrite -- one alternation of every name -- is three
+        // times *slower* than the original (11.2s vs 3.8s on android.jar): a
+        // large alternation defeats the Boyer-Moore fast path and drops the
+        // engine into generic matching at every position. Matching is really
+        // "is this maximal dotted token a known generic", which is a hash
+        // lookup, so that is what this does.
+        StringBuilder result = new StringBuilder(content.length() + 8192);
+        Set<String> reported = new HashSet<>();
+        boolean replaced = false;
+
+        int i = 0;
+        int length = content.length();
+
+        while (i < length) {
+            char c = content.charAt(i);
+            if (!isGenericTypeNameChar(c)) {
+                result.append(c);
+                i++;
+                continue;
+            }
+
+            int end = i;
+            while (end < length && isGenericTypeNameChar(content.charAt(end))) {
+                end++;
+            }
+
+            String token = content.substring(i, end);
+            String classSuffix = suffixByName.get(token);
+
+            // A use already followed by '<' carries its type arguments; one at
+            // the very end of the file has no following character, which the
+            // original pattern also required.
+            if (classSuffix != null && end < length && content.charAt(end) != '<') {
+                if (reported.add(token)) {
+                    System.out.println(String.format(
+                            "Appending %s to occurrences of class %s without passed generic types",
+                            classSuffix, token));
+                }
+                result.append(token).append(classSuffix);
+                replaced = true;
+            } else {
+                result.append(token);
+            }
+
+            i = end;
+        }
+
+        if (!replaced) {
+            return content;
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * The characters that continue a type name. Deliberately excludes '_',
+     * matching the original pattern, whose trailing class `[^a-zA-Z\\d.$<]`
+     * treated an underscore as a terminator.
+     */
+    private static boolean isGenericTypeNameChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '.' || c == '$';
+    }
+
+    private static String buildGenericArgumentSuffix(int occurencies, String javalangObject) {
+        List<String> arguments = new ArrayList<>();
+        for (int i = 0; i < occurencies; i++) {
+            arguments.add(javalangObject);
+        }
+        return "<" + String.join(",", arguments) + ">";
+    }
+
+    private String getExtendsLine(JavaClass currClass, TypeDefinition typeDefinition) {
+        String override = this.extendsOverrides.get(currClass.getClassName());
+        if(override != null) {
+            System.out.println(String.format("Found extends override for class %s - %s", currClass.getClassName(), override));
+            return " extends " + override;
+        }
+        if (typeDefinition != null) {
+            StringBuilder result = new StringBuilder();
+            ReferenceType parent = typeDefinition.getParent();
+
+            List<ReferenceType> interfaces = typeDefinition.getInterfaces();
+            if(parent != null) {
+                result.append(" extends ");
+                result.append(getTypeScriptTypeFromJavaType(parent, typeDefinition));
+            }
+            if(interfaces.size() == 1 || (this.allGenericImplements && interfaces.size() > 0)) {
+                result.append(" implements ");
+
+                for (ReferenceType referenceType : interfaces) {
+                    String tsType = getTypeScriptTypeFromJavaType(referenceType, typeDefinition);
+                    if(!this.isPrimitiveTSType(tsType)) {
+                        result.append(tsType + ", ");
+                    }
+                }
+                result.deleteCharAt(result.lastIndexOf(","));
+            }
+            return result.toString();
+        } else {
+            JavaClass superClass = getSuperClass(currClass);
+            List<JavaClass> interfaces = getInterfaces(currClass);
+            if(interfaces.size() == 1 && superClass == null && currClass.getSuperclassName().equals(DtsApi.JavaLangObject)) {
+                superClass = interfaces.get(0);
+                interfaces.clear();
+            }
+            return getExtendsLine(superClass, interfaces);
+        }
+    }
+
+    private String getExtendsLine(JavaClass superClass, List<JavaClass> interfaces) {
+        StringBuilder implementsSegmentSb = new StringBuilder();
+        String implementsSegment = "";
+        if (interfaces.size() > 0) {
+            implementsSegmentSb.append(" implements ");
+
+            for (JavaClass clazz : interfaces) {
+                String implementedInterface = clazz.getClassName().replaceAll("\\$", "\\.");
+                if (!typeBelongsInCurrentTopLevelNamespace(implementedInterface)) {
+                    implementedInterface = getAliasedClassName(implementedInterface);
+                }
+
+                implementsSegmentSb.append(implementedInterface + ", ");
+            }
+
+            implementsSegment = implementsSegmentSb.substring(0, implementsSegmentSb.lastIndexOf(","));
+
+        }
+
+        if(superClass != null) {
+            String extendedClass = superClass.getClassName().replaceAll("\\$", "\\.");
+
+            if(!extendedClass.equals(DtsApi.JavaLangObject)) {
+                // check for type override
+                String override = this.typeOverrides.get(extendedClass);
+                if(override != null) {
+                    System.out.println(String.format("Found type override for class %s - %s", extendedClass, override));
+                    extendedClass = override;
+                }
+            }
+
+            if (!typeBelongsInCurrentTopLevelNamespace(extendedClass)) {
+                extendedClass = getAliasedClassName(extendedClass);
+            }
+
+            return " extends " + extendedClass + implementsSegment;
+        } else {
+            return implementsSegment;
+        }
+    }
+
+    private String getAliasedClassName(String className) {
+        return mangleRootClassname(className);
+    }
+
+    private boolean typeBelongsInCurrentTopLevelNamespace(String className) {
+        return className.startsWith(this.namespaceParts[0] + ".");
+    }
+
+    private static String getGlobalAliasedClassName(String className) {
+        String[] parts = className.split("\\.");
+        String rootNamespace = parts[0];
+        if(globalAliases.containsKey(parts[0])) {
+            String aliasedNamespace = globalAliases.get(rootNamespace);
+            parts = Arrays.copyOfRange(parts, 1, parts.length);
+            String result = aliasedNamespace;
+            if(parts.length > 0) {
+                result += "." + String.join(".", parts);
+            }
+            return result;
+        } else {
+            return className;
+        }
+    }
+
+    private static void addImport(String importToAdd) {
+        if(!imports.stream().anyMatch(x -> x.equals(importToAdd))){
+            imports.add(importToAdd);
+        }
+    }
+
+    private String mangleRootClassname(String className) {
+        String[] parts = className.split("\\.");
+        String rootNamespace = parts[0];
+        if(globalAliases.containsKey(parts[0])) {
+            String aliasedNamespace = DtsApi.globalAliases.get(rootNamespace);
+            String aliasedType = aliasedTypes.get(rootNamespace);
+            if(aliasedType == null) {
+                aliasedTypes.put(rootNamespace, aliasedNamespace);
+                addImport(String.format("import %s = %s;\n", aliasedNamespace, rootNamespace));
+            }
+
+            parts = Arrays.copyOfRange(parts, 1, parts.length);
+            String result = aliasedNamespace;
+            if(parts.length > 0) {
+                result += "." + String.join(".", parts);
+            }
+            return result;
+        }
+        return className;
+    }
+
+    private int closePackage(JavaClass prevClass, JavaClass currClass) {
+        int indent = 0;
+
+        if (prevClass == null) {
+            return indent;
+        }
+
+        String prevClassName = prevClass.getClassName();
+        int prevDotCount = prevClassName.length() - prevClassName.replace(".", "").length();
+        int prevDollarCount = prevClassName.length() - prevClassName.replace("$", "").length();
+        int prevCount = prevDotCount + prevDollarCount;
+
+        if (currClass == null) {
+            indent = prevCount;
+            while (indent > 0) {
+                String tabs = getTabs(--indent);
+                sbContent.appendln(tabs + "}");
+            }
+            return indent;
+        }
+
+        String currClassName = currClass.getClassName();
+        int currDotCount = currClassName.length() - currClassName.replace(".", "").length();
+        int currDollarCount = currClassName.length() - currClassName.replace("$", "").length();
+        int currCount = currDotCount + currDollarCount;
+
+        while (prevCount > currCount) {
+            String tabs = getTabs(--prevCount);
+            sbContent.appendln(tabs + "}");
+        }
+
+        boolean isNested = isNested(currClass);
+
+        if (!isNested) {
+            throw new UnsupportedOperationException("TODO: implement");
+            // String prevClassName = prevClass.getClassName();
+            // int dotCount = prevClassName.length() -
+            // prevClassName.replace(".", "").length();
+            // int dollarCount = prevClassName.length() -
+            // prevClassName.replace("$", "").length();
+            // indent = dotCount + dollarCount;
+            //
+            // String[] prevParts = prevClassName.replace('$',
+            // '.').split("\\.");
+            // String[] currParts = currClass.getClassName().replace('$',
+            // '.').split("\\.");
+            //
+            // int diffIdx = 0;
+            // while ((diffIdx < prevParts.length) && (diffIdx <
+            // currParts.length) &&
+            // prevParts[diffIdx].equals(currParts[diffIdx])) {
+            // ++diffIdx;
+            // }
+            //
+            // int count = prevParts.length - diffIdx - 1;
+            // while (count-- > 0) {
+            // String tabs = getTabs(--indent);
+            // ps.println(tabs + "}");
+            // }
+        }
+
+        return indent;
+    }
+
+    private int openPackage(JavaClass prevClass, JavaClass currClass) {
+        int indent = 0;
+
+        String prevClassName = (prevClass != null) ? prevClass.getClassName() : "";
+        String[] prevParts = prevClassName.replace('$', '.').split("\\.");
+        String[] currParts = currClass.getClassName().replace('$', '.').split("\\.");
+
+        int diffIdx = 0;
+        while ((diffIdx < prevParts.length) && (diffIdx < currParts.length)
+                && prevParts[diffIdx].equals(currParts[diffIdx])) {
+            ++diffIdx;
+        }
+
+        indent = diffIdx;
+        for (int idx = diffIdx; idx < currParts.length - 1; idx++) {
+            ++indent;
+            String tabs = getTabs(idx);
+            if (idx == 0) {
+                sbContent.append(tabs + "declare ");
+            } else {
+                sbContent.append(tabs + "export ");
+            }
+            sbContent.appendln("module " + currParts[idx] + " {");
+        }
+
+        if (isNested(currClass) && (prevParts.length < currParts.length)) {
+            String tabs = getTabs(prevParts.length - 1);
+            sbContent.appendln(tabs + "export module " + prevParts[prevParts.length - 1] + " {");
+        }
+
+        return indent;
+    }
+
+    private void processInterfaceConstructor(JavaClass classInterface, TypeDefinition typeDefinition, List<Method> allInterfacesMethods) {
+        String tabs = getTabs(this.indent + 1);
+
+        generateInterfaceConstructorContent(classInterface, typeDefinition, tabs, allInterfacesMethods);
+    }
+
+    private void generateInterfaceConstructorContent(JavaClass classInterface, TypeDefinition typeDefinition, String tabs, List<Method> methods) {
+        generateInterfaceConstructorCommentBlock(classInterface, tabs);
+
+        sbContent.appendln(tabs + "public constructor(implementation: {");
+
+        for (Method m : methods) {
+            sbContent.append(getTabs(this.indent + 2) + getMethodName(m) + getMethodParamSignature(classInterface, typeDefinition, m));
+            String bmSig = "";
+            if (!isConstructor(m)) {
+                bmSig += ": " + getTypeScriptTypeFromJavaType(this.getReturnType(m), typeDefinition);
+            }
+            sbContent.appendln(bmSig + ";");
+        }
+
+        sbContent.appendln(tabs + "});");
+
+        sbContent.appendln(tabs + "public constructor();");
+    }
+
+    private void generateInterfaceConstructorCommentBlock(JavaClass classInterface, String tabs) {
+        sbContent.appendln(tabs + "/**");
+        sbContent.appendln(tabs + " * Constructs a new instance of the " + classInterface.getClassName() + " interface with the provided implementation. An empty constructor exists calling super() when extending the interface class.");
+        // sbContent.appendln(tabs + " * @param implementation - allows implementor to define their own logic for all public methods."); // <- causes too much noise
+        sbContent.appendln(tabs + " */");
+    }
+
+    private List<JavaClass> getAllInterfaces(JavaClass classInterface) {
+        ArrayList<JavaClass> interfaces = new ArrayList<>();
+
+        Queue<JavaClass> classQueue = new LinkedList<>();
+        classQueue.add(classInterface);
+
+        while (!classQueue.isEmpty()) {
+            JavaClass clazz = classQueue.poll();
+
+            interfaces.add(clazz);
+
+            classQueue.addAll(getInterfaces(clazz));
+        }
+
+        return interfaces;
+    }
+
+    private List<JavaClass> getAllSuperClasses(JavaClass clazz) {
+        ArrayList<JavaClass> classes = new ArrayList<>();
+
+        Queue<JavaClass> classQueue = new LinkedList<>();
+        classQueue.add(clazz);
+
+        while (!classQueue.isEmpty()) {
+            JavaClass currClazz = classQueue.poll();
+
+            if (currClazz.getClassName().equals(DtsApi.JavaLangObject)) {
+                break;
+            }
+
+            classes.add(currClazz);
+
+            JavaClass sClass = getSuperClass(currClazz);
+
+            if (sClass != null) {
+                classQueue.add(getSuperClass(currClazz));
+            }
+        }
+
+        return classes;
+    }
+
+    private List<JavaClass> getInterfaces(JavaClass classInterface) {
+        List<JavaClass> interfaces = new ArrayList<>();
+
+        String[] interfaceNames = classInterface.getInterfaceNames();
+        for (String intface : interfaceNames) {
+            JavaClass clazz1 = ClassRepo.findClass(intface);
+
+            // Added guard to prevent NullPointerExceptions in case libs are not provided - the dev can choose to include it and rerun the generator
+            if (clazz1 == null) {
+                if (!warnedMissing.contains(intface)) {
+                    warnedMissing.add(intface);
+                    System.out.println("ignoring definitions in missing dependency: " + intface);
+                }
+                continue;
+            }
+
+            String className = clazz1.getClassName();
+
+            // TODO: Pete: Hardcoded until we figure out how to go around the 'type incompatible with Object' issue
+            if (className.equals("java.util.Iterator") ||
+                    className.equals("android.animation.TypeEvaluator") ||
+                    className.equals("java.lang.Comparable") ||
+                    className.startsWith("java.util.function")) {
+                continue;
+            }
+
+            interfaces.add(clazz1);
+        }
+
+        return interfaces;
+    }
+
+    private List<Method> getAllInterfacesMethods(Collection<JavaClass> interfaces) {
+        ArrayList<Method> allInterfacesMethods = new ArrayList<>();
+
+        for (JavaClass clazz : interfaces) {
+            Method[] intfaceMethods = clazz.getMethods();
+            allInterfacesMethods.addAll(Arrays.asList(intfaceMethods));
+        }
+
+        return allInterfacesMethods;
+    }
+
+    private Set<Field> getAllInterfacesFields(List<JavaClass> interfaces) {
+        HashSet<Field> allInterfacesFields = new HashSet<>();
+
+        for (JavaClass clazz : interfaces) {
+            allInterfacesFields.addAll(Arrays.asList(clazz.getFields()));
+        }
+
+        return allInterfacesFields;
+    }
+
+    //method related
+    private void processMethod(Method method, JavaClass clazz, TypeDefinition typeDefinition, Set<String> methodsSet) {
+        String name = method.getName();
+
+        if (shouldIgnoreMember(name)) return;
+
+        if (method.isSynthetic() || (!method.isPublic() && !method.isProtected())) {
+            return;
+        }
+
+        // TODO: Pete: won't generate static initializers as invalid typescript properties
+        if (clazz.isInterface() && name.equals("<clinit>")) {
+            return;
+        }
+
+        String tabs = getTabs(this.indent + 1);
+
+        cacheMethodBySignature(method); //cached in "mapNameMethod"
+
+        //generate base method content
+        if (baseMethodNames.contains(name)) {
+            for (Method baseMethod : baseMethods) {
+                if (baseMethod.getName().equals(name)) {
+                    String sig = getMethodFullSignature(baseMethod);
+                    if (!mapNameMethod.containsKey(sig)) {
+                        mapNameMethod.put(sig, baseMethod);
+                        methodsSet.add(generateMethodContent(clazz, typeDefinition, tabs, baseMethod));
+                    }
+                }
+            }
+        }
+
+        methodsSet.add(generateMethodContent(clazz, typeDefinition, tabs, method));
+    }
+
+    private boolean methodIsDeprecated(Method method) {
+        return Arrays.stream(
+                        method
+                        .getAttributes())
+                        .anyMatch(x ->
+                            x.getClass()
+                            .isAssignableFrom(org.apache.bcel.classfile.Deprecated.class));
+    }
+
+    private String generateMethodContent(JavaClass clazz, TypeDefinition typeDefinition, String tabs, Method method) {
+        StringBuilder2 sbTemp = new StringBuilder2();
+        if(methodIsDeprecated(method)) {
+            sbTemp.appendln(tabs + "/** @deprecated */");
+        }
+
+        sbTemp.append(tabs + "public ");
+
+        if (method.isStatic()) {
+            sbTemp.append("static ");
+        }
+
+        sbTemp.append(getMethodName(method) + getMethodParamSignature(clazz, typeDefinition, method));
+        String bmSig = "";
+        if (!isConstructor(method)) {
+            bmSig += ": " + getTypeScriptTypeFromJavaType(this.getReturnType(method), typeDefinition);
+        }
+
+        sbTemp.append(bmSig + ";");
+
+        return sbTemp.toString();
+    }
+
+    private Signature getSignature(FieldOrMethod fieldOrMethod) {
+        for (Attribute attribute : fieldOrMethod.getAttributes()) {
+            if (attribute instanceof Signature) {
+                return (Signature) attribute;
+            }
+        }
+        return null;
+    }
+
+    private Signature getSignature(JavaClass clazz) {
+        for (Attribute attribute : clazz.getAttributes()) {
+            if (attribute instanceof Signature) {
+                return (Signature) attribute;
+            }
+        }
+        return null;
+    }
+
+    private Type[] getArgumentTypes(Method m) {
+        Signature signature = this.getSignature(m);
+        if(signature != null) {
+            Matcher matcher = methodSignature.matcher(signature.getSignature());
+            if(matcher.matches()) {
+                String argumentsSignature = matcher.group(1);
+                if(argumentsSignature.equals("")){
+                    return m.getArgumentTypes();
+                }
+                try {
+                    List<Type> referenceTypes = DtsApi.getTypeParameters(argumentsSignature);
+                    Type[] types = new Type[referenceTypes.size()];
+                    types = referenceTypes.toArray(types);
+                    return types;
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    // A generic signature the parser does not model -- an
+                    // intersection bound (<T extends ViewGroup & HasSmoothScroll>)
+                    // is the common one. The erased descriptor is always valid and
+                    // always available, so fall back to it rather than failing the
+                    // whole run over one method.
+                    return m.getArgumentTypes();
+                }
+            }
+        }
+        return m.getArgumentTypes();
+    }
+
+    private static List<Type> getTypeParameters(String signature) {
+        GenericSignatureParser parser = new GenericSignatureParser("(" + signature + ")V");
+        List<Type> types = new ArrayList<>();
+        Iterator<String> iter = parser.parameterSignatureIterator();
+
+        while(iter.hasNext()) {
+            String parameterString = iter.next();
+            Type t = GenericUtilities.getType(parameterString);
+            if (t == null) {
+                return null;
+            }
+
+            types.add(t);
+        }
+
+        return types;
+    }
+
+    // gets the full field type including generic types
+    private Type getFieldType(Field f) {
+        Signature signature = this.getSignature(f);
+        if(signature != null) {
+            String typeSignature = signature.getSignature();
+            if(typeSignature.equals("")){
+                return f.getType();
+            }
+            try {
+                return GenericUtilities.getType(typeSignature);
+            } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                return f.getType();
+            }
+        }
+        return f.getType();
+    }
+
+    // gets the full method return type including generic types
+    private Type getReturnType(Method m) {
+        Signature signature = this.getSignature(m);
+        if(signature != null) {
+            Matcher matcher = methodSignature.matcher(signature.getSignature());
+            if(matcher.matches()) {
+                String returnSignature = matcher.group(2);
+                if(isVoid.matcher(returnSignature).matches()){
+                    return m.getReturnType(); // returning void
+                }
+                try {
+                    return GenericUtilities.getType(returnSignature);
+                } catch (ClassCastException | IllegalArgumentException parseFailure) {
+                    return m.getReturnType();
+                }
+            }
+        }
+        return m.getReturnType();
+    }
+
+    private void writeMethods(Set<String> methodsSet) {
+        for (String m : methodsSet) {
+            sbContent.appendln(m);
+        }
+    }
+
+    private void cacheMethodBySignature(Method m) {
+        String methodName = getMethodFullSignature(m);
+        if (!mapNameMethod.containsKey(methodName)) {
+            mapNameMethod.put(methodName, m);
+        }
+    }
+
+    private void loadBaseMethods(JavaClass clazz) {
+        baseMethodNames = new HashSet<String>();
+        baseMethods = new ArrayList<Method>();
+
+        JavaClass currClass = getSuperClass(clazz);
+
+        if (currClass != null) {
+
+            //get all base methods and method names
+            while (true && currClass != null) {
+                boolean isJavaLangObject = currClass.getClassName().equals(DtsApi.JavaLangObject);
+
+                for (Method m : currClass.getMethods()) {
+                    if (!m.isSynthetic() && (m.isPublic() || m.isProtected())) {
+                        // don't write empty constructor typings for java objects
+                        if (isJavaLangObject && isConstructor(m)) {
+                            continue;
+                        }
+
+                        baseMethods.add(m);
+                        baseMethodNames.add(m.getName());
+                    }
+                }
+                
+                if(isJavaLangObject){
+                    break;
+                }
+
+                String scn = currClass.getSuperclassName();
+                JavaClass baseClass = ClassRepo.findClass(scn);
+                assert baseClass != null : "baseClass=" + currClass.getClassName() + " scn=" + scn;
+                currClass = baseClass;
+            }
+        }
+    }
+
+    private JavaClass getSuperClass(JavaClass clazz) {
+        if (clazz.getClassName().equals(DtsApi.JavaLangObject)) {
+            return null;
+        }
+
+        String scn = clazz.getSuperclassName();
+        String override = this.superOverrides.get(clazz.getClassName());
+        if(override != null) {
+            scn = override;
+        }
+
+        if(scn.equals("") || scn == null) {
+            return null;
+        }
+        JavaClass currClass = ClassRepo.findClass(scn);
+        return currClass;
+    }
+
+    private String getMethodFullSignature(Method m) {
+        String sig = m.getName() + m.getSignature();
+        return sig;
+    }
+
+    private boolean isConstructor(Method m) {
+        return m.getName().equals("<init>");
+    }
+
+    private String getMethodName(Method m) {
+        String name = m.getName();
+
+        if (isConstructor(m)) {
+            name = "constructor";
+        }
+
+        if (!jsFieldPattern.matcher(name).matches()) {
+            name = "\"" + name +"\"";
+        }
+
+        return name;
+    }
+
+    /**
+     * Whether a class can be written out at all.
+     *
+     * <p>Every segment of the qualified name becomes either a namespace or a
+     * class identifier, so all of them have to be identifiers. Kotlin breaks this
+     * in both directions: it mangles some internal classes with a leading dash
+     * ({@code -Base64}), and synthesises names with empty segments, which come
+     * out as {@code export module  {}. Neither is reachable from JavaScript, so
+     * they are skipped rather than emitted as unparseable declarations.
+     */
+    private static boolean isEmittableClassName(String qualifiedName) {
+        if (qualifiedName == null || qualifiedName.isEmpty()) {
+            return false;
+        }
+        for (String segment : qualifiedName.replace('$', '.').split("\\.", -1)) {
+            if (!isValidJsIdentifier(segment)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether a name from the bytecode can be used as a TypeScript parameter name.
+     *
+     * <p>Kotlin emits synthetic parameter names that are not identifiers at all --
+     * a property setter's parameter is literally {@code <set-?>} -- and writing
+     * one out produces a .d.ts the compiler cannot parse. Such parameters fall
+     * back to paramN, exactly like the interface case below.
+     */
+    private static boolean isValidJsIdentifier(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        if (!Character.isJavaIdentifierStart(name.charAt(0)) && name.charAt(0) != '$') {
+            return false;
+        }
+        for (int i = 1; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!Character.isJavaIdentifierPart(c) && c != '$') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+   private String getMethodParamSignature(JavaClass clazz, TypeDefinition typeDefinition, Method m) {
+        LocalVariableTable table = m.getLocalVariableTable();
+        LocalVariable[] variables = table != null ? table.getLocalVariableTable() : null;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("(");
+        int idx = 0;
+        for (Type type : this.getArgumentTypes(m)) {
+            if (idx > 0) {
+                sb.append(", ");
+            }
+
+            int localVarIndex = m.isStatic() ? idx : idx + 1; // skip "this" variable name
+            LocalVariable localVariable = variables != null && variables.length > localVarIndex
+                ? variables[localVarIndex]
+                : null;
+
+            if (localVariable != null && isValidJsIdentifier(localVariable.getName())) {
+                String name = localVariable.getName();
+                if(reservedJsKeywords.contains(name)){
+                    System.out.println(String.format("Appending _ to reserved JS keyword %s", name));
+                    sb.append(name + "_");
+                } else {
+                    sb.append(name);
+                }
+            } else {
+                // interface declarations will fallback to paramN since they don't have names in the bytecode
+                sb.append("param");
+                sb.append(idx);
+            }
+            idx++;
+            sb.append(": ");
+
+            String paramTypeName = getTypeScriptTypeFromJavaType(type, typeDefinition);
+
+            // TODO: Pete:
+            if (paramTypeName.startsWith("java.util.function")) {
+                sb.append("any /* " + paramTypeName + "*/");
+            } else {
+                addReference(type);
+                sb.append(paramTypeName);
+            }
+        }
+        sb.append(")");
+        String sig = sb.toString();
+        return sig;
+    }
+
+    //field related
+    private void processField(Field f, JavaClass clazz, TypeDefinition typeDefinition) {
+        String fieldName = f.getName();
+
+        if (shouldIgnoreMember(fieldName)) return;
+
+        //
+        // handle member names that conflict with an inner class. For example:
+        // 
+        // class OuterClass {
+        //   public static InnerClass: OuterClass.InnerClass;
+        // 
+        //   class InnerClass {}   
+        // }
+        //
+        // the static field on the OuterClass will have a field type of OuterClass$InnerClass
+        // which we can check for and skip writing the static field to the definitions
+        // since typescript cannot handle this scenario well.
+        //
+
+        // the name of the field eg. InnerClass
+        String name = f.getName();
+
+        // the type of the field eg. OuterClass$InnerClass
+        String fieldTypeString = this.getFieldType(f).toString();
+
+        // we check if the name matches OuterClass (which we are currently in) + "$" + InnerClass
+        if(fieldTypeString.equals(clazz.getClassName() + "$" + name)) {
+            return;
+        }
+
+        String tabs = getTabs(this.indent + 1);
+        sbContent.append(tabs + "public ");
+        if (f.isStatic()) {
+            sbContent.append("static ");
+        }
+
+        if (!jsFieldPattern.matcher(name).matches()) {
+            name = "\"" + name + "\"";
+        }
+        
+        sbContent.append(name + ": " + getTypeScriptTypeFromJavaType(this.getFieldType(f), typeDefinition));
+        if (f.getConstantValue() != null) {
+            sbContent.appendln( " = " + f.getConstantValue() + ";");
+        } else {
+            sbContent.appendln(";");
+
+        }
+    }
+
+    private void addClassField(JavaClass clazz) {
+        String tabs = getTabs(this.indent + 1);
+        sbContent.append(String.format("%spublic static class: java.lang.Class<%s>;\n", tabs, clazz.getClassName().replace("$", ".")));
+    }
+
+    private boolean isPrimitiveTSType(String tsType) {
+        switch (tsType) {
+            case "void":
+            case "string":
+            case "boolean":
+            case "number":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private String getTypeScriptTypeFromJavaType(Type type, TypeDefinition typeDefinition) {
+        String tsType;
+        String typeSig = type.getSignature();
+
+        switch (typeSig) {
+            case "V":
+                tsType = "void";
+                break;
+            case "C":
+                tsType = "string";
+                break;
+            case "Z":
+                tsType = "boolean";
+                break;
+            case "B":
+            case "S":
+            case "I":
+            case "J":
+            case "F":
+            case "D":
+                tsType = "number";
+                break;
+            case "Ljava/lang/CharSequence;":
+            case "Ljava/lang/String;":
+                tsType = "string";
+                break;
+            default:
+                StringBuilder sb = new StringBuilder();
+                convertToTypeScriptType(type, typeDefinition, sb);
+                tsType = sb.toString();
+
+                if (tsType.startsWith("java.util.function") || isPrivateGoogleApiClass(tsType)) {
+                    tsType = "any /* " + tsType + "*/";
+                }
+        }
+
+        return tsType;
+    }
+
+    private void convertToTypeScriptType(Type type, TypeDefinition typeDefinition, StringBuilder tsType) {
+        boolean isPrimitive = type instanceof BasicType;
+        boolean isArray = type instanceof ArrayType;
+        boolean isObjectType = type instanceof ObjectType;
+        boolean isGenericObjectType = type instanceof GenericObjectType;
+
+        if (isPrimitive) {
+            if (type.equals(Type.BOOLEAN)) {
+                tsType.append("boolean");
+            } else if (type.equals(Type.BYTE) || type.equals(Type.SHORT)
+                    || type.equals(Type.INT) || type.equals(Type.LONG)
+                    || type.equals(Type.FLOAT) || type.equals(Type.DOUBLE)) {
+                tsType.append("number");
+            } else if (type.equals(Type.CHAR)) {
+                tsType.append("string");
+            } else {
+                throw new RuntimeException("Unexpected type=" + type.getSignature());
+            }
+        } else if (isArray) {
+            tsType.append("androidNative.Array<");
+            Type elementType = ((ArrayType) type).getElementType();
+            useAnyInsteadOfJavaLangObject(elementType, typeDefinition, tsType);
+            tsType.append(">");
+        } else if (type.equals(Type.STRING)) {
+            tsType.append("string");
+        } else if (isObjectType) {
+            if(isGenericObjectType) {
+                GenericObjectType genericObjectType = (GenericObjectType)type;
+                String genericVariable = genericObjectType.getVariable();
+                if(genericVariable != null && isWordPattern.matcher(genericVariable).matches()) {
+                    if(typeDefinition != null && typeDefinition.getGenericDefinitions() != null
+                            && typeDefinition.getGenericDefinitions().stream()
+                                .filter(definition -> definition.getLabel().equals(genericVariable)).count() > 0
+                            && ((ObjectType) typeDefinition.getParent()).getClassName().equals(DtsApi.JavaLangObject)){
+                        tsType.append(genericObjectType.getVariable());
+                        addReference(type);
+                        return;
+                    }
+                }
+            }
+            ObjectType objType = (ObjectType) type;
+            String typeName = objType.getClassName();
+            if (typeName.contains("$")) {
+                typeName = typeName.replaceAll("\\$", "\\.");
+            }
+
+            if(this.typeOverrides.containsKey(typeName)){
+                typeName = this.typeOverrides.get(typeName);
+            }
+
+            int emittedBaseAt = tsType.length();
+            if (!typeBelongsInCurrentTopLevelNamespace(typeName) && !typeName.startsWith("java.util.function.") && !isPrivateGoogleApiClass(typeName)) {
+                tsType.append(getAliasedClassName(typeName));
+            } else {
+                tsType.append(typeName);
+            }
+
+            // A base that collapsed to `any` takes no type arguments: `any<K,V>`
+            // is not parseable TypeScript. Kotlin's synthetic inline-function
+            // parameters are the usual way to end up here.
+            boolean baseIsAny = "any".contentEquals(tsType.subSequence(emittedBaseAt, tsType.length()));
+
+            if(!baseIsAny && type instanceof GenericObjectType) {
+                GenericObjectType genericType = (GenericObjectType) type;
+                if (genericType.getNumParameters() > 0) {
+                    tsType.append("<");
+                    for (ReferenceType refType: genericType.getParameters()){
+                        useAnyInsteadOfJavaLangObject(refType, typeDefinition, tsType);
+                        tsType.append(',');
+                    }
+                    tsType.deleteCharAt(tsType.lastIndexOf(","));
+                    tsType.append(">");
+                }
+            }
+
+            addReference(type);
+        } else {
+            throw new RuntimeException("Unhandled type=" + type.getSignature());
+        }
+    }
+
+    private void useAnyInsteadOfJavaLangObject(Type refType, TypeDefinition typeDefinition, StringBuilder tsType) {
+//        if (refType instanceof ObjectType) {
+//            ObjectType currentType = (ObjectType)refType;
+//            if (currentType.getClassName().equals(DtsApi.JavaLangObject)) {
+//                tsType.append("any");
+//                return;
+//            }
+//        }
+        this.convertToTypeScriptType(refType, typeDefinition, tsType);
+    }
+
+    private void addReference(Type type) {
+        boolean isObjectType = type instanceof ObjectType;
+        if (isObjectType) {
+            ObjectType objType = (ObjectType) type;
+            String typeName = objType.getClassName();
+            if (!typeName.equals(currentFileClassname)) {
+                boolean isNested = typeName.contains("$");
+                if (!isNested) {
+                    references.add(typeName);
+                }
+            }
+        }
+    }
+
+    private List<FieldOrMethod> getMembers(JavaClass javaClass, List<JavaClass> interfaces) {
+        Set<String> methodNames = new HashSet<>();
+        ArrayList<FieldOrMethod> members = new ArrayList<>();
+
+        List<Method> allInterfacesMethods = getAllInterfacesMethods(interfaces);
+        List<Method> methods = new ArrayList<>();
+        methods.addAll(Arrays.asList(javaClass.getMethods()));
+        methods.addAll(allInterfacesMethods);
+
+        for (Method m : methods) {
+            if ((m.isPublic() || m.isProtected()) && !m.isSynthetic()) {
+                members.add(m);
+                methodNames.add(m.getName());
+            }
+        }
+        for (Field f : javaClass.getFields()) {
+            if ((f.isPublic() || f.isProtected()) && !f.isSynthetic() && !methodNames.contains(f.getName())) {
+                members.add(f);
+            }
+        }
+
+        return members;
+    }
+
+    // HELPER METHODS
+    private boolean isNested(JavaClass javaClass) {
+        boolean isNested = javaClass.getClassName().contains("$");
+        return isNested;
+    }
+
+    private String getSimpleClassname(JavaClass javaClass) {
+        String[] parts = javaClass.getClassName().replace('$', '.')
+                .split("\\.");
+        return parts[parts.length - 1];
+    }
+
+    private String getFullClassNameConcatenated(JavaClass javaClass) {
+        String fullName = javaClass.getClassName().replaceAll("[$.]", "");
+        return fullName;
+    }
+
+    // gets the suffix like <T extends javalangComparable<T>>
+    private String getTypeSuffix(String fullClassName, TypeDefinition typeDefinition, String extendsLine) {
+        if(typeDefinition == null) {
+            return "";
+        }
+        List<TypeDefinition.GenericDefinition> genericDefinitions = typeDefinition.getGenericDefinitions();
+        if(genericDefinitions != null) {
+            List<String> parts = new ArrayList<>();
+            String genericClassName = fullClassName.replace("$", ".");
+
+            // remove the current class name if it already exists
+            generics = generics.stream().filter(generic -> generic.x != genericClassName).collect(Collectors.toList());
+
+            generics.add(new Tuple<>(fullClassName.replace("$", "."), genericDefinitions.size()));
+            for (TypeDefinition.GenericDefinition definition: genericDefinitions) {
+                ObjectType genericObjectType = (ObjectType)definition.getType();
+                String baseClassName = getAliasedClassName(genericObjectType.getClassName());
+                String resultType = definition.getType().toString();
+                String typeToExtend = resultType.replace(genericObjectType.getClassName(), baseClassName);
+                //parts.add(String.format("%s extends %s", definition.getLabel(), typeToExtend));
+                parts.add(definition.getLabel());
+            }
+            return "<" + String.join(", ", parts) + "> ";
+        } else {
+            return "";
+        }
+    }
+
+    private String getTabs(int count) {
+        String tabs = new String(new char[count]).replace("\0", "\t");
+        return tabs;
+    }
+
+    private boolean isPrivateGoogleApiMember(String memberName) {
+        return memberName.startsWith("zz");
+    }
+    private boolean isObfuscated(String memberName) {
+        if (this.ignoreObfuscatedNameLength > 0) {
+
+            // basic test to remove obfuscated classes
+            return memberName.length() <= this.ignoreObfuscatedNameLength && !memberName.equals("R");
+        }
+        return false;
+    }
+
+    private boolean shouldIgnoreMember(String memberName) {
+        return isPrivateGoogleApiMember(memberName) || isObfuscated(memberName);
+    }
+
+    private boolean isPrivateGoogleApiClass(String name) {
+        String[] classNameParts = name.replace('$', '.').split("\\.");
+        return classNameParts.length > 0 && classNameParts[classNameParts.length - 1].startsWith("zz");
+    }
+
+    private void overrideFieldComparator() {
+        BCELComparator<Field> cmp = Field.getComparator();
+
+        Field.setComparator(new BCELComparator<>() {
+            @Override
+            public boolean equals(Field o, Field o1) {
+                return o.getName().equals(o1.getName());
+            }
+
+            @Override
+            public int hashCode(Field o) {
+                return cmp.hashCode(o);
+            }
+        });
+    }
+
+    private void setOverrides() {
+        this.setTypeOverrides();
+        this.setExtendsOverrides();
+        this.setSuperOverrides();
+    }
+
+    private void setExtendsOverrides() {
+        // here we put extends overrides to avoid manual work to fix the generated .d.ts file
+        this.extendsOverrides.put("android.renderscript.ProgramFragmentFixedFunction$Builder",
+                "android.renderscript.Program.BaseProgramBuilder"); // android-17
+        this.extendsOverrides.put("android.renderscript.ProgramVertexFixedFunction$Builder",
+                "android.renderscript.ProgramVertex.Builder"); // android-17
+        this.extendsOverrides.put("android.support.v4.app.JobIntentService$JobServiceEngineImpl",
+                "android.support.v4.app.JobIntentService.CompatJobEngine"); // android-support
+        this.extendsOverrides.put("com.telerik.widget.autocomplete.RadAutoCompleteTextView$SavedState",
+                "com.telerik.widget.primitives.panels.RadScrollView.SavedState"); // nativescript-ui-autocomplete
+
+        this.extendsOverrides.put("androidx.core.app.JobIntentService$JobServiceEngineImpl",
+                "androidx.core.app.JobIntentService.CompatJobEngine"); // androidx
+
+        this.extendsOverrides.put("androidx.core.text.PrecomputedTextCompat", "android.text.Spannable"); // androidx
+        this.extendsOverrides.put("androidx.collection.ArrayMap", "java.util.Map"); // androidx
+    }
+
+    private void setSuperOverrides() {
+        // here we put super overrides
+        this.superOverrides.put("android.support.v4.view.GestureDetectorCompat", "android.view.GestureDetector"); // android-support
+    }
+
+    private void setTypeOverrides() {
+        // here we put type overrides if we want to change return types of java.lang.Object for instance to any
+        this.typeOverrides.put(DtsApi.JavaLangObject, "any");
+        this.typeOverrides.put("java.lang.CharSequence", "string");
+        this.typeOverrides.put("android.view.View.AccessibilityDelegate", "any");
+        this.typeOverrides.put("android.view.PointerIcon", "any");
+        this.typeOverrides.put("android.app.Person", "any");
+        this.typeOverrides.put("android.app.RemoteAction", "any");
+        this.typeOverrides.put("android.os.PersistableBundle", "any");
+        this.typeOverrides.put("android.os.LocaleList", "any");
+        this.typeOverrides.put("android.text.TextDirectionHeuristic", "any");
+        this.typeOverrides.put("android.util.SizeF", "any");
+        this.typeOverrides.put("android.util.Size", "any");
+    }
+
+    private void setGlobalAliases() {
+        // here we put extends overrides to avoid manual work to fix the generated .d.ts file
+        globalAliases.put("android", "globalAndroid");
+    }
+
+    /**
+     * Namespaces referenced by the SDK but not shipped in it; every type from
+     * them becomes `any`.
+     *
+     * Built once. It used to be rebuilt -- a fresh ArrayList and 24 adds -- on
+     * every call, and it is called once per class plus once per pass over the
+     * document. On android.jar that was tens of thousands of throwaway lists
+     * and, with the concatenation in isIgnoredNamespace below, roughly 170,000
+     * throwaway strings.
+     */
+    private static final List<String> IGNORED_NAMESPACES = List.of(
+            "kotlin",
+            "org.jetbrains",
+            "org.intellij",
+            "android.app.job",
+            "android.app.SharedElementCallback",
+            "android.arch",
+            "android.content.pm.ShortcutInfo",
+            "android.graphics.drawable.Icon",
+            "android.graphics.Outline",
+            "android.view.SearchEvent",
+            "android.view.KeyboardShortcutGroup",
+            "android.view.ViewStructure",
+            "android.view.textclassifier",
+            "android.telephony.mbms",
+            "android.text.PrecomputedText",
+            "android.media.browse",
+            "android.media.session",
+            "android.media.AudioAttributes",
+            "android.media.MediaMetadata",
+            "android.media.Rating",
+            "android.service.media",
+            "android.print",
+            "java.util.function",
+            "com.tom_roush.pdfbox.pdmodel.common.function");
+
+    /** `namespace + "."`, precomputed; the concatenation used to happen inside the loop. */
+    private static final List<String> IGNORED_NAMESPACE_PREFIXES =
+            IGNORED_NAMESPACES.stream().map(n -> n + ".").collect(Collectors.toList());
+
+    /**
+     * Collects the reserved-word packages across the whole classpath, once.
+     *
+     * <p>Discovering them as classes are emitted is not enough: content is
+     * generated and replaced one class group at a time, so a group processed
+     * before the offending package is reached keeps raw references to types we
+     * never declare -- which tsc rejects just as loudly as the bad namespace
+     * did. Scanning every class name up front makes the ignore list complete
+     * from the first group on.
+     */
+    private void ensureReservedWordNamespaces() {
+        if (scannedForReservedWords) {
+            return;
+        }
+        scannedForReservedWords = true;
+        for (String className : ClassRepo.getAllClassNames()) {
+            String[] parts = className.split("\\.");
+            // parts[length-1] is the class name; only package segments matter.
+            for (int i = 0; i < parts.length - 1; i++) {
+                if (reservedJsKeywords.contains(parts[i])) {
+                    String prefix = String.join(".", Arrays.copyOf(parts, i + 1));
+                    if (reservedWordNamespaces.add(prefix)) {
+                        System.out.println(String.format(
+                                "Skipping package %s: \"%s\" is a reserved word and cannot be a TypeScript namespace. "
+                                        + "Types under it are typed as any.",
+                                prefix, parts[i]));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    private List<String> getIgnoredNamespaces(){
+        // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
+        ensureReservedWordNamespaces();
+        if (reservedWordNamespaces.isEmpty()) {
+            return IGNORED_NAMESPACES;
+        }
+        List<String> all = new ArrayList<>(IGNORED_NAMESPACES);
+        all.addAll(reservedWordNamespaces);
+        return all;
+    }
+
+    /**
+     * A namespace is skipped when it is listed in IGNORED_NAMESPACES, or when
+     * any of its segments is a word TypeScript will not accept as a namespace
+     * name.
+     *
+     * <p>A package such as org.apache.commons.lang3.function is emitted as
+     * "export module function {", which does not parse -- and because the brace
+     * can never be closed, it takes the rest of the .d.ts down with
+     * it rather than just its own declarations. Java forbids its own keywords in
+     * package names, so the collisions that actually reach here are the words
+     * only JavaScript reserves ({@code function}, {@code in}, {@code with},
+     * {@code let}, {@code yield}, ...). Two of them, java.util.function and
+     * com.tom_roush...common.function, were previously listed by hand above;
+     * this covers every such package on any classpath, including ones we have
+     * never seen.
+     *
+     * <p>The types are dropped rather than escaped: an escaped segment no longer
+     * matches the package path the runtime resolves from metadata, so a name
+     * that type-checks would fail at runtime. Dropping them yields `any`, which
+     * is honest about what we know.
+     */
+    private boolean isIgnoredNamespace() {
+        String[] namespaceOnlyParts = Arrays.copyOf(namespaceParts, namespaceParts.length-1);
+        String namespace = String.join(".", namespaceOnlyParts);
+        for (int i = 0; i < IGNORED_NAMESPACES.size(); i++) {
+            if (namespace.equals(IGNORED_NAMESPACES.get(i))
+                    || namespace.startsWith(IGNORED_NAMESPACE_PREFIXES.get(i))) {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < namespaceOnlyParts.length; i++) {
+            if (reservedJsKeywords.contains(namespaceOnlyParts[i])) {
+                // Everything from the reserved segment down is unnameable, so
+                // record that prefix -- not the individual class -- as ignored.
+                return true;
+            }
+        }
+        return false;
+    }
+}

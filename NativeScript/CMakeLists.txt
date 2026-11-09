@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Metadata
-project(NativeScript CXX OBJCXX)
+# C is required for the quickjs engine sources (quickjs.c, libregexp.c, …) and
+# quickjs-api.c. It used to be enabled as a side effect of add_subdirectory()ing
+# mimalloc; without it CMake silently drops every .c file from the target and the
+# build fails at link with undefined JS_* symbols.
+project(NativeScript C CXX OBJCXX)
 
 set(NAME NativeScript)
 set(VERSION 0.1.0)
@@ -20,12 +24,12 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_FLAGS}")
 # Arguments
 set(TARGET_PLATFORM "macos" CACHE STRING "Target platform for the Objective-C bridge")
 set(TARGET_ENGINE "v8" CACHE STRING "Target JS engine for the NativeScript runtime")
-set(NS_FFI_BACKEND "auto" CACHE STRING "FFI backend: auto, napi, or direct")
+set(NS_FFI_BACKEND "auto" CACHE STRING "FFI backend: auto, napi, v8, jsc, quickjs, or hermes")
 set(NS_GSD_BACKEND "auto" CACHE STRING "Generated signature dispatch backend: auto, v8, jsc, quickjs, hermes, napi, or none")
 set(METADATA_SIZE 0 CACHE STRING "Size of embedded metadata in bytes")
 set(BUILD_CLI_BINARY OFF CACHE BOOL "Build the NativeScript CLI binary")
 set(BUILD_MACOS_NODE_API OFF CACHE BOOL "Build the NativeScript macOS Node API dylib")
-set_property(CACHE NS_FFI_BACKEND PROPERTY STRINGS auto napi direct)
+set_property(CACHE NS_FFI_BACKEND PROPERTY STRINGS auto napi v8 jsc quickjs hermes)
 set_property(CACHE NS_GSD_BACKEND PROPERTY STRINGS auto v8 jsc quickjs hermes napi none)
 
 if (BUILD_MACOS_NODE_API)
@@ -115,7 +119,12 @@ elseif(TARGET_ENGINE STREQUAL "v8")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_V8")
 elseif(TARGET_ENGINE STREQUAL "quickjs")
   set(TARGET_ENGINE_QUICKJS TRUE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_QUICKJS")
+  # The shared quickjs backend selects between the quickjs-ng and bellard APIs
+  # with __QJS_NG__ / __QUICKJS_NG__. Only quickjs-ng is vendored now, so both
+  # platforms must define them or the bellard branches get compiled against an
+  # ng header (JS_IsArray, JS_FreeValue, … then mismatch on arity).
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__QJS_NG__ -D__QUICKJS_NG__")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_QUICKJS -D__QJS_NG__ -D__QUICKJS_NG__")
 elseif(TARGET_ENGINE STREQUAL "jsc")
   set(TARGET_ENGINE_JSC TRUE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++20 -DTARGET_ENGINE_JSC")
@@ -143,36 +152,46 @@ message(STATUS "GENERIC_NAPI = ${GENERIC_NAPI}")
 if(NS_FFI_BACKEND STREQUAL "auto")
   if(GENERIC_NAPI OR TARGET_ENGINE_NONE)
     set(NS_EFFECTIVE_FFI_BACKEND "napi")
-  elseif(TARGET_ENGINE_HERMES OR TARGET_ENGINE_V8 OR TARGET_ENGINE_JSC OR TARGET_ENGINE_QUICKJS)
-    set(NS_EFFECTIVE_FFI_BACKEND "direct")
+  elseif(TARGET_ENGINE_HERMES)
+    set(NS_EFFECTIVE_FFI_BACKEND "hermes")
+  elseif(TARGET_ENGINE_V8)
+    set(NS_EFFECTIVE_FFI_BACKEND "v8")
+  elseif(TARGET_ENGINE_JSC)
+    set(NS_EFFECTIVE_FFI_BACKEND "jsc")
+  elseif(TARGET_ENGINE_QUICKJS)
+    set(NS_EFFECTIVE_FFI_BACKEND "quickjs")
   else()
     set(NS_EFFECTIVE_FFI_BACKEND "napi")
   endif()
-elseif(NS_FFI_BACKEND STREQUAL "napi" OR NS_FFI_BACKEND STREQUAL "direct")
+elseif(NS_FFI_BACKEND STREQUAL "napi" OR
+       NS_FFI_BACKEND STREQUAL "v8" OR
+       NS_FFI_BACKEND STREQUAL "jsc" OR
+       NS_FFI_BACKEND STREQUAL "quickjs" OR
+       NS_FFI_BACKEND STREQUAL "hermes")
   set(NS_EFFECTIVE_FFI_BACKEND "${NS_FFI_BACKEND}")
 else()
   message(FATAL_ERROR "Unknown NS_FFI_BACKEND: ${NS_FFI_BACKEND}")
 endif()
 
-if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct" AND
+if(NOT NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi" AND
    (GENERIC_NAPI OR TARGET_ENGINE_NONE OR BUILD_MACOS_NODE_API))
-  message(FATAL_ERROR "NS_FFI_BACKEND=direct requires an embedded JS runtime build")
+  message(FATAL_ERROR
+    "NS_FFI_BACKEND=${NS_EFFECTIVE_FFI_BACKEND} requires an embedded JS runtime build")
+endif()
+
+if(NOT NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi" AND
+   NOT NS_EFFECTIVE_FFI_BACKEND STREQUAL "${TARGET_ENGINE}")
+  message(FATAL_ERROR
+    "NS_FFI_BACKEND=${NS_EFFECTIVE_FFI_BACKEND} requires TARGET_ENGINE=${NS_EFFECTIVE_FFI_BACKEND}")
 endif()
 
 message(STATUS "NS_FFI_BACKEND = ${NS_FFI_BACKEND} (${NS_EFFECTIVE_FFI_BACKEND})")
 
-if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct" AND
-   NOT (NS_GSD_BACKEND STREQUAL "auto" OR NS_GSD_BACKEND STREQUAL "none"))
-  message(FATAL_ERROR
-    "NS_GSD_BACKEND is only used by the Node-API FFI backend. "
-    "Use NS_GSD_BACKEND=auto or none with NS_FFI_BACKEND=direct.")
-endif()
-
 if(NS_GSD_BACKEND STREQUAL "auto")
-  if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
-    set(NS_EFFECTIVE_GSD_BACKEND "none")
-  else()
+  if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi")
     set(NS_EFFECTIVE_GSD_BACKEND "napi")
+  else()
+    set(NS_EFFECTIVE_GSD_BACKEND "${NS_EFFECTIVE_FFI_BACKEND}")
   endif()
 elseif(NS_GSD_BACKEND STREQUAL "v8" OR
        NS_GSD_BACKEND STREQUAL "jsc" OR
@@ -204,81 +223,92 @@ if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi" AND
     "NS_FFI_BACKEND=napi is the pure Node-API FFI backend and only supports "
     "NS_GSD_BACKEND=napi or none.")
 endif()
+if(NOT NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi" AND
+   NS_EFFECTIVE_GSD_BACKEND STREQUAL "napi")
+  message(FATAL_ERROR
+    "NS_FFI_BACKEND=${NS_EFFECTIVE_FFI_BACKEND} cannot use NS_GSD_BACKEND=napi. "
+    "Use the matching engine backend or none.")
+endif()
 
 message(STATUS "NS_GSD_BACKEND = ${NS_GSD_BACKEND} (${NS_EFFECTIVE_GSD_BACKEND})")
 
 # Set up sources
 include_directories(
   ./
-  ffi/shared
   ../metadata-generator/include
   napi/common
   libffi/${LIBFFI_BUILD}/include
 )
 
 set(FFI_SHARED_SOURCE_FILES
-  ffi/shared/Tasks.cpp
+  jsi/shared/Tasks.cpp
 )
 
 set(FFI_NAPI_SOURCE_FILES
-  ffi/napi/AutoreleasePool.mm
-  ffi/napi/Protocol.mm
-  ffi/napi/ObjCBridge.mm
-  ffi/napi/Block.mm
-  ffi/napi/Class.mm
-  ffi/napi/Closure.mm
-  ffi/napi/ClassMember.mm
-  ffi/napi/Cif.mm
-  ffi/napi/TypeConv.mm
-  ffi/napi/Util.mm
-  ffi/napi/Struct.mm
-  ffi/napi/ObjectRef.mm
-  ffi/napi/JSObject.mm
-  ffi/napi/Enum.mm
-  ffi/napi/Variable.mm
-  ffi/napi/Object.mm
-  ffi/napi/CFunction.mm
-  ffi/napi/Interop.mm
-  ffi/napi/InlineFunctions.mm
-  ffi/napi/ClassBuilder.mm
+  ffi/objc/napi/AutoreleasePool.mm
+  ffi/objc/napi/Protocol.mm
+  ffi/objc/napi/ObjCBridge.mm
+  ffi/objc/napi/Block.mm
+  ffi/objc/napi/Class.mm
+  ffi/objc/napi/Closure.mm
+  ffi/objc/napi/ClassMember.mm
+  ffi/objc/napi/Cif.mm
+  ffi/objc/napi/TypeConv.mm
+  ffi/objc/napi/Util.mm
+  ffi/objc/napi/Struct.mm
+  ffi/objc/napi/ObjectRef.mm
+  ffi/objc/napi/JSObject.mm
+  ffi/objc/napi/Enum.mm
+  ffi/objc/napi/Variable.mm
+  ffi/objc/napi/Object.mm
+  ffi/objc/napi/CFunction.mm
+  ffi/objc/napi/Interop.mm
+  ffi/objc/napi/InlineFunctions.mm
+  ffi/objc/napi/ClassBuilder.mm
 )
 
-set(FFI_DIRECT_SHARED_SOURCE_FILES
-  ffi/shared/direct/EmbeddedMetadata.mm
+set(FFI_ENGINE_SHARED_SOURCE_FILES
+  ffi/objc/shared/MetadataState.mm
 )
 
-set(FFI_HERMES_DIRECT_SOURCE_FILES
-  ${FFI_DIRECT_SHARED_SOURCE_FILES}
-  ffi/hermes/jsi/NativeApiJsi.mm
+set(FFI_HERMES_ENGINE_SOURCE_FILES
+  ${FFI_ENGINE_SHARED_SOURCE_FILES}
+  ffi/objc/hermes/NativeApiJsi.mm
 )
 
-set(FFI_V8_DIRECT_SOURCE_FILES
-  ${FFI_DIRECT_SHARED_SOURCE_FILES}
-  ffi/v8/NativeApiV8.mm
-  ffi/v8/NativeApiV8HostObjects.mm
-  ffi/v8/NativeApiV8Runtime.mm
-  ffi/v8/NativeApiV8Value.mm
+set(FFI_V8_ENGINE_SOURCE_FILES
+  ${FFI_ENGINE_SHARED_SOURCE_FILES}
+  # Platform-neutral engine layer, shared with the Android runtime.
+  jsi/v8/V8HostObjects.cpp
+  jsi/v8/V8Runtime.cpp
+  jsi/v8/V8Value.cpp
+  # Apple-only ObjC bridge on top of it.
+  ffi/objc/v8/NativeApiV8.mm
 )
 
-set(FFI_JSC_DIRECT_SOURCE_FILES
-  ${FFI_DIRECT_SHARED_SOURCE_FILES}
-  ffi/jsc/NativeApiJSC.mm
-  ffi/jsc/NativeApiJSCHostObjects.mm
-  ffi/jsc/NativeApiJSCRuntime.mm
-  ffi/jsc/NativeApiJSCValue.mm
+set(FFI_JSC_ENGINE_SOURCE_FILES
+  ${FFI_ENGINE_SHARED_SOURCE_FILES}
+  # Platform-neutral engine layer, shared with the Android runtime.
+  jsi/jsc/JSCHostObjects.cpp
+  jsi/jsc/JSCRuntime.cpp
+  jsi/jsc/JSCValue.cpp
+  # Apple-only ObjC bridge on top of it.
+  ffi/objc/jsc/NativeApiJSC.mm
 )
 
-set(FFI_QUICKJS_DIRECT_SOURCE_FILES
-  ${FFI_DIRECT_SHARED_SOURCE_FILES}
-  ffi/quickjs/NativeApiQuickJSHostObjects.mm
-  ffi/quickjs/NativeApiQuickJS.mm
-  ffi/quickjs/NativeApiQuickJSRuntime.mm
-  ffi/quickjs/NativeApiQuickJSValue.mm
+set(FFI_QUICKJS_ENGINE_SOURCE_FILES
+  ${FFI_ENGINE_SHARED_SOURCE_FILES}
+  # Platform-neutral engine layer, shared with the Android runtime.
+  jsi/quickjs/QuickJSHostObjects.cpp
+  jsi/quickjs/QuickJSRuntime.cpp
+  jsi/quickjs/QuickJSValue.cpp
+  # Apple-only ObjC bridge on top of it.
+  ffi/objc/quickjs/NativeApiQuickJS.mm
 )
 
 set(SOURCE_FILES
   ${FFI_SHARED_SOURCE_FILES}
-  runtime/NativeScriptException.mm
+  runtime/apple/NativeScriptException.mm
 )
 
 if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi")
@@ -291,140 +321,151 @@ endif()
 if(ENABLE_JS_RUNTIME)
   set(SOURCE_FILES
     ${SOURCE_FILES}
-    runtime/modules/console/Console.cpp
-    runtime/Runtime.cpp
-    runtime/modules/worker/Worker.mm
-    runtime/modules/worker/MessageJSON.cpp
-    runtime/modules/worker/MessageV8.cpp
-    runtime/modules/worker/ConcurrentQueue.cpp
-    runtime/modules/worker/WorkerImpl.mm
-    runtime/modules/worker/WorkerImpl.mm
-    runtime/modules/module/ModuleInternal.cpp
-    runtime/modules/node/Node.cpp
-    runtime/modules/node/FS.cpp
-    runtime/modules/node/Path.cpp
-    runtime/modules/node/Process.cpp
-    runtime/modules/node/VM.cpp
-    runtime/modules/performance/Performance.cpp
-    runtime/ThreadSafeFunction.mm
-    runtime/Bundle.mm
-    runtime/modules/timers/Timers.mm
-    runtime/modules/app/App.mm
-    runtime/modules/web/Web.mm
-    runtime/NativeScript.mm
-    runtime/RuntimeConfig.cpp
+    runtime/apple/modules/console/Console.cpp
+    runtime/apple/Runtime.cpp
+    runtime/apple/modules/worker/Worker.mm
+    runtime/apple/modules/worker/MessageJSON.cpp
+    runtime/apple/modules/worker/MessageV8.cpp
+    runtime/apple/modules/worker/ConcurrentQueue.cpp
+    runtime/apple/modules/worker/WorkerImpl.mm
+    runtime/apple/modules/module/ModuleInternal.cpp
+    runtime/apple/modules/node/Node.cpp
+    runtime/apple/modules/node/FS.cpp
+    runtime/apple/modules/node/Path.cpp
+    runtime/apple/modules/node/Process.cpp
+    runtime/apple/modules/node/VM.cpp
+    runtime/apple/modules/performance/Performance.cpp
+    runtime/apple/ThreadSafeFunction.mm
+    runtime/apple/Bundle.mm
+    runtime/apple/modules/timers/Timers.mm
+    runtime/apple/modules/app/App.mm
+    runtime/apple/modules/web/Web.mm
+    runtime/apple/NativeScript.mm
+    runtime/apple/RuntimeConfig.cpp
+    # resolveMainPath() (cli/BundleLoader.h) is called directly from
+    # NativeScript.mm's runMainApplication, so it must be compiled into every
+    # framework/app target that includes NativeScript.mm -- not only the
+    # BUILD_CLI_BINARY executable. cli/main.cpp and cli/segappend.cpp stay
+    # CLI-binary-only below (main.cpp defines main(), which cannot also be
+    # linked into the NativeScript shared library).
+    cli/BundleLoader.mm
     runtime/modules/url/ada/ada.cpp
     runtime/modules/url/URL.cpp
     runtime/modules/url/URLSearchParams.cpp
   )
 
   if(TARGET_ENGINE_V8)
+    # V8's headers come from the pinned release via scripts/download_v8.sh, the
+    # same set Android uses. Both spellings are needed: <v8.h> from the napi
+    # backend, and "src/inspector/..." from the console/inspector code, which
+    # spells paths relative to the V8 checkout root.
+    set(V8_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/v8")
+    if(NOT EXISTS "${V8_VENDOR_DIR}/src/inspector/v8-console-message.h")
+      message(FATAL_ERROR
+        "V8 headers missing at ${V8_VENDOR_DIR}. Run scripts/download_v8.sh.")
+    endif()
+
     include_directories(
       napi/v8
-      napi/v8/v8_inspector
+      ${V8_VENDOR_DIR}
+      ${V8_VENDOR_DIR}/v8_inspector
+      ${V8_VENDOR_DIR}/include
+      # V8 14.9's internals include Abseil as <absl/...>.
+      ${V8_VENDOR_DIR}/third_party/abseil-cpp
     )
 
     set(SOURCE_FILES
       ${SOURCE_FILES}
-      napi/v8/v8-api.cpp
-      napi/v8/v8-module-loader.cpp
+      ${V8_VENDOR_DIR}/v8-api.cpp
+      ${V8_VENDOR_DIR}/v8-module-loader.cpp
       napi/v8/jsr.cpp
-      napi/v8/SimpleAllocator.cpp
+      ${V8_VENDOR_DIR}/SimpleAllocator.cpp
     )
 
-    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
+    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "v8")
       set(SOURCE_FILES
         ${SOURCE_FILES}
-        ${FFI_V8_DIRECT_SOURCE_FILES}
+        ${FFI_V8_ENGINE_SOURCE_FILES}
       )
     endif()
 
   elseif(TARGET_ENGINE_HERMES)
-    set(HERMES_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Frameworks/hermes-headers")
+    set(HERMES_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/hermes/include")
 
     include_directories(
       napi/hermes
     )
 
-    if(EXISTS "${HERMES_HEADERS_DIR}/jsi/jsi.h" AND EXISTS "${HERMES_HEADERS_DIR}/hermes/hermes.h")
-      include_directories(
-        ${HERMES_HEADERS_DIR}
-      )
-    else()
-      include_directories(
-        napi/hermes/include
-        napi/hermes/include/hermes
-        napi/hermes/include/jsi
-      )
+    # Fetched by scripts/download_hermes.sh alongside hermes.xcframework, not
+    # committed -- these headers must match the prebuilt binary, and a stale
+    # in-tree copy silently compiling against the wrong ABI is worse than a
+    # missing one.
+    if(NOT EXISTS "${HERMES_HEADERS_DIR}/jsi/jsi.h")
+      message(FATAL_ERROR
+        "Hermes headers missing at ${HERMES_HEADERS_DIR}. Run scripts/download_hermes.sh.")
     endif()
+
+    include_directories(
+      ${HERMES_HEADERS_DIR}
+    )
 
     set(SOURCE_FILES
       ${SOURCE_FILES}
       napi/hermes/jsr.cpp
     )
 
-    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
+    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "hermes")
       set(SOURCE_FILES
         ${SOURCE_FILES}
-        ${FFI_HERMES_DIRECT_SOURCE_FILES}
+        ${FFI_HERMES_ENGINE_SOURCE_FILES}
       )
     endif()
 
   elseif(TARGET_ENGINE_QUICKJS)
-    set(MI_BUILD_OBJECT OFF)
-    set(MI_OVERRIDE OFF)
-    set(MI_BUILD_SHARED OFF)
-    set(MI_BUILD_TESTS OFF)
-
     set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO")
-
-    add_subdirectory(napi/quickjs/mimalloc-dev mimalloc)
 
     include_directories(
       napi/quickjs
-      napi/quickjs/source
+      ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/quickjs/source_ng
       napi/common
-      mimalloc
-      napi/quickjs/mimalloc-dev/include
     )
 
     set(SOURCE_FILES ${SOURCE_FILES}
 
-      # quickjs
-      napi/quickjs/source/cutils.c
-      napi/quickjs/source/libregexp.c
-      napi/quickjs/source/libbf.c
-      napi/quickjs/source/libunicode.c
-      napi/quickjs/source/quickjs.c
+      # quickjs-ng, NativeScript-patched, vendored at the repo root and shared
+      ../vendor/quickjs/source_ng/libregexp.c
+      ../vendor/quickjs/source_ng/libunicode.c
+      ../vendor/quickjs/source_ng/quickjs.c
+      ../vendor/quickjs/source_ng/dtoa.c
 
       # napi
-      napi/quickjs/quickjs-api.c
+      ../vendor/quickjs/quickjs-api.c
       napi/quickjs/jsr.cpp
     )
 
-    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
+    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "quickjs")
       set(SOURCE_FILES
         ${SOURCE_FILES}
-        ${FFI_QUICKJS_DIRECT_SOURCE_FILES}
+        ${FFI_QUICKJS_ENGINE_SOURCE_FILES}
       )
     endif()
 
   elseif(TARGET_ENGINE_JSC)
     include_directories(
       napi/jsc
-      napi/jsc/include
+      ../vendor/jsc
       napi/common
     )
 
     set(SOURCE_FILES ${SOURCE_FILES}
-      napi/jsc/jsc-api.cpp
+      ../vendor/jsc/jsc-api.cpp
       napi/jsc/jsr.cpp
     )
 
-    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
+    if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "jsc")
       set(SOURCE_FILES
         ${SOURCE_FILES}
-        ${FFI_JSC_DIRECT_SOURCE_FILES}
+        ${FFI_JSC_ENGINE_SOURCE_FILES}
       )
     endif()
 
@@ -439,7 +480,6 @@ if(BUILD_CLI_BINARY)
   set(SOURCE_FILES ${SOURCE_FILES}
     cli/main.cpp
     cli/segappend.cpp
-    cli/BundleLoader.mm
   )
 endif()
 
@@ -486,16 +526,13 @@ target_sources(
   "NativeScript.h"
 )
 
-if(TARGET_ENGINE_V8 AND TARGET_PLATFORM_IOS)
-  # iOS V8 slices are built with pointer compression enabled. Keep embedder
-  # build flags in sync to satisfy V8::Initialize() build config checks.
-  target_compile_definitions(
-    ${NAME}
-    PRIVATE
-    V8_COMPRESS_POINTERS
-    V8_31BIT_SMIS_ON_64BIT_ARCH
-  )
-endif()
+# NOTE: the Apple V8 slices are built with v8_enable_pointer_compression=false
+# (see scripts/matrix/build-ios.sh in v8-buildscripts), so the embedder must NOT
+# declare V8_COMPRESS_POINTERS -- V8::Initialize() aborts on a mismatch in
+# either direction. This previously defined it for iOS, which was correct for
+# the old 14.3 xcframework but would abort at startup against 14.9. The Android
+# slices differ: they leave the gn arg at its default, which is ON for 64-bit.
+
 
 if(ENABLE_JS_RUNTIME)
   target_compile_definitions(${NAME} PRIVATE ENABLE_JS_RUNTIME)
@@ -515,40 +552,48 @@ elseif(TARGET_ENGINE_JSC)
   target_compile_definitions(${NAME} PRIVATE TARGET_ENGINE_JSC)
 endif()
 
-set(NS_GSD_BACKEND_V8_VALUE 0)
-set(NS_GSD_BACKEND_JSC_VALUE 0)
-set(NS_GSD_BACKEND_QUICKJS_VALUE 0)
 set(NS_GSD_BACKEND_HERMES_VALUE 0)
 set(NS_GSD_BACKEND_NAPI_VALUE 0)
-set(NS_FFI_BACKEND_DIRECT_VALUE 0)
+set(NS_GSD_BACKEND_PREPARED_VALUE 0)
 set(NS_FFI_BACKEND_NAPI_VALUE 0)
+set(NS_FFI_BACKEND_V8_VALUE 0)
+set(NS_FFI_BACKEND_JSC_VALUE 0)
+set(NS_FFI_BACKEND_QUICKJS_VALUE 0)
+set(NS_FFI_BACKEND_HERMES_VALUE 0)
 
 if(NS_EFFECTIVE_GSD_BACKEND STREQUAL "v8")
-  set(NS_GSD_BACKEND_V8_VALUE 1)
+  set(NS_GSD_BACKEND_PREPARED_VALUE 1)
 elseif(NS_EFFECTIVE_GSD_BACKEND STREQUAL "jsc")
-  set(NS_GSD_BACKEND_JSC_VALUE 1)
+  set(NS_GSD_BACKEND_PREPARED_VALUE 1)
 elseif(NS_EFFECTIVE_GSD_BACKEND STREQUAL "quickjs")
-  set(NS_GSD_BACKEND_QUICKJS_VALUE 1)
+  set(NS_GSD_BACKEND_PREPARED_VALUE 1)
 elseif(NS_EFFECTIVE_GSD_BACKEND STREQUAL "hermes")
   set(NS_GSD_BACKEND_HERMES_VALUE 1)
 elseif(NS_EFFECTIVE_GSD_BACKEND STREQUAL "napi")
   set(NS_GSD_BACKEND_NAPI_VALUE 1)
 endif()
 
-if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "direct")
-  set(NS_FFI_BACKEND_DIRECT_VALUE 1)
-elseif(NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi")
+if(NS_EFFECTIVE_FFI_BACKEND STREQUAL "napi")
   set(NS_FFI_BACKEND_NAPI_VALUE 1)
+elseif(NS_EFFECTIVE_FFI_BACKEND STREQUAL "v8")
+  set(NS_FFI_BACKEND_V8_VALUE 1)
+elseif(NS_EFFECTIVE_FFI_BACKEND STREQUAL "jsc")
+  set(NS_FFI_BACKEND_JSC_VALUE 1)
+elseif(NS_EFFECTIVE_FFI_BACKEND STREQUAL "quickjs")
+  set(NS_FFI_BACKEND_QUICKJS_VALUE 1)
+elseif(NS_EFFECTIVE_FFI_BACKEND STREQUAL "hermes")
+  set(NS_FFI_BACKEND_HERMES_VALUE 1)
 endif()
 
 target_compile_definitions(${NAME} PRIVATE
-  NS_GSD_BACKEND_V8=${NS_GSD_BACKEND_V8_VALUE}
-  NS_GSD_BACKEND_JSC=${NS_GSD_BACKEND_JSC_VALUE}
-  NS_GSD_BACKEND_QUICKJS=${NS_GSD_BACKEND_QUICKJS_VALUE}
   NS_GSD_BACKEND_HERMES=${NS_GSD_BACKEND_HERMES_VALUE}
   NS_GSD_BACKEND_NAPI=${NS_GSD_BACKEND_NAPI_VALUE}
-  NS_FFI_BACKEND_DIRECT=${NS_FFI_BACKEND_DIRECT_VALUE}
+  NS_GSD_BACKEND_PREPARED=${NS_GSD_BACKEND_PREPARED_VALUE}
   NS_FFI_BACKEND_NAPI=${NS_FFI_BACKEND_NAPI_VALUE}
+  NS_FFI_BACKEND_V8=${NS_FFI_BACKEND_V8_VALUE}
+  NS_FFI_BACKEND_JSC=${NS_FFI_BACKEND_JSC_VALUE}
+  NS_FFI_BACKEND_QUICKJS=${NS_FFI_BACKEND_QUICKJS_VALUE}
+  NS_FFI_BACKEND_HERMES=${NS_FFI_BACKEND_HERMES_VALUE}
 )
 
 set(FRAMEWORK_VERSION_VALUE "${VERSION}")
@@ -661,13 +706,13 @@ if(TARGET_ENGINE_V8)
         # Prefer universal sim slice if present
         set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64-simulator/libv8_monolith.framework")
         if(NOT EXISTS "${V8_SLICE_DIR}")
-          set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64-simulator/libv8_monolith.framework") # fallback
+          set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64-simulator/libv8_monolith.framework")
         endif()
     elseif(TARGET_PLATFORM STREQUAL "ios")
         # Prefer universal sim slice if present
         set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64/libv8_monolith.framework")
         if(NOT EXISTS "${V8_SLICE_DIR}")
-          set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64/libv8_monolith.framework") # fallback
+          set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/ios-arm64/libv8_monolith.framework")
         endif()
     elseif(TARGET_PLATFORM STREQUAL "visionos-sim")
       set(V8_SLICE_DIR "${V8_XCFRAMEWORK}/xrsimulator-arm64/libv8_monolith.framework")
@@ -715,14 +760,6 @@ elseif(TARGET_PLATFORM_IOS)
     ${NAME}
     PRIVATE
     "-framework UIKit"
-  )
-endif()
-
-if(TARGET_ENGINE_QUICKJS)
-  target_link_libraries(
-    ${NAME}
-    PRIVATE
-    mimalloc-static
   )
 endif()
 

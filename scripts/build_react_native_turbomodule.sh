@@ -6,7 +6,32 @@ PACKAGE_DIR="packages/react-native"
 OUTPUT_DIR="$PACKAGE_DIR/dist"
 PACK_DESTINATION=${NPM_PACK_DESTINATION:-"$REPO_ROOT/build/npm-tarballs"}
 VERSION_OVERRIDE=${NPM_PACKAGE_VERSION:-}
+GENERATED_SIGNATURE_DISPATCH_OVERRIDE=${NS_SIGNATURE_BINDINGS_CPP_PATH:-${TNS_SIGNATURE_BINDINGS_CPP_PATH:-}}
+GENERATED_SIGNATURE_DISPATCH=${GENERATED_SIGNATURE_DISPATCH_OVERRIDE:-"$REPO_ROOT/dist/intermediates/react-native/GeneratedSignatureDispatch.ios-sim.tmp.inc"}
+DEVICE_SIGNATURE_DISPATCH="$REPO_ROOT/dist/intermediates/react-native/GeneratedSignatureDispatch.ios-device.tmp.inc"
 SKIP_PACK=false
+
+function metadata_generator_source_hash {
+  find "$REPO_ROOT/metadata-generator/src" "$REPO_ROOT/metadata-generator/include" \
+    "$REPO_ROOT/metadata-generator/tests" "$REPO_ROOT/metadata-generator/symbol-analyzer" \
+    "$REPO_ROOT/metadata-generator/CMakeLists.txt" "$REPO_ROOT/metadata-generator/build-step-metadata-generator.py" \
+    \( -name target -type d -prune \) -o -type f -print | \
+    LC_ALL=C sort | xargs shasum | awk '{print $1}' | shasum | awk '{print $1}'
+}
+
+function ensure_metadata_generator {
+  local expected_hash
+  expected_hash=$(metadata_generator_source_hash)
+  local hash_file="$REPO_ROOT/metadata-generator/dist/.source_hash"
+  local host_arch
+  host_arch=$(uname -m)
+  if [ ! -x "$REPO_ROOT/metadata-generator/dist/$host_arch/bin/objc-metadata-generator" ] || \
+     [ ! -x "$REPO_ROOT/metadata-generator/dist/$host_arch/bin/ns-metadata-symbols" ] || \
+     [ ! -f "$hash_file" ] || \
+     [ "$(cat "$hash_file")" != "$expected_hash" ]; then
+    METADATA_GENERATOR_ARCHS="$host_arch" "$SCRIPT_DIR/build_metadata_generator.sh"
+  fi
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -23,26 +48,75 @@ done
 
 checkpoint "Preparing @nativescript/react-native TurboModule package..."
 
+ensure_metadata_generator
+
+checkpoint "Generating iOS device metadata for the TurboModule..."
+mkdir -p "$(dirname "$DEVICE_SIGNATURE_DISPATCH")"
+NS_SIGNATURE_BINDINGS_CPP_PATH="$DEVICE_SIGNATURE_DISPATCH" npm run metagen ios
+rm -f "$DEVICE_SIGNATURE_DISPATCH" "$DEVICE_SIGNATURE_DISPATCH.stamp"
+
+checkpoint "Generating Hermes signature dispatch bindings for the TurboModule..."
+mkdir -p "$(dirname "$GENERATED_SIGNATURE_DISPATCH")"
+NS_SIGNATURE_BINDINGS_CPP_PATH="$GENERATED_SIGNATURE_DISPATCH" npm run metagen ios-sim
+
+# Only the trees this script stages. It used to wipe native-api/ whole, which
+# also deleted what build_react_native_android.sh had put there
+# (native-api/runtime/android, native-api/ffi/jni, native-api/napi/common) --
+# so whichever of the two ran last was the only half the tarball carried.
 rm -rf \
-  "$PACKAGE_DIR/native-api-jsi" \
+  "$PACKAGE_DIR/native-api/ffi/objc" \
+  "$PACKAGE_DIR/native-api/jsi" \
+  "$PACKAGE_DIR/native-api/metadata" \
   "$PACKAGE_DIR/metadata" \
   "$PACKAGE_DIR/ios/vendor" \
   "$PACKAGE_DIR/types"
 mkdir -p \
-  "$PACKAGE_DIR/native-api-jsi/jsi" \
-  "$PACKAGE_DIR/native-api-jsi/metadata/include" \
+  "$PACKAGE_DIR/native-api/ffi/objc/hermes" \
+  "$PACKAGE_DIR/native-api/ffi/objc/shared" \
+  "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge" \
+  "$PACKAGE_DIR/native-api/ffi/objc/shared/bridge/host_objects" \
+  "$PACKAGE_DIR/native-api/jsi/hermes" \
+  "$PACKAGE_DIR/native-api/jsi/shared" \
+  "$PACKAGE_DIR/native-api/jsi" \
+  "$PACKAGE_DIR/native-api/metadata/include" \
   "$PACKAGE_DIR/metadata" \
   "$PACKAGE_DIR/ios/vendor/libffi/include" \
   "$PACKAGE_DIR/types/ios" \
   "$PACKAGE_DIR/types/objc-node-api" \
   "$PACK_DESTINATION"
 
-cp NativeScript/ffi/hermes/jsi/NativeApiJsi.h "$PACKAGE_DIR/native-api-jsi/"
-cp NativeScript/ffi/hermes/jsi/NativeApiJsi.mm "$PACKAGE_DIR/native-api-jsi/"
-cp NativeScript/ffi/shared/jsi/NativeApiJsi*.h "$PACKAGE_DIR/native-api-jsi/jsi/"
-cp NativeScript/ffi/hermes/jsi/NativeApiJsiReactNative.h "$PACKAGE_DIR/native-api-jsi/"
-cp metadata-generator/include/Metadata.h "$PACKAGE_DIR/native-api-jsi/metadata/include/"
-cp metadata-generator/include/MetadataReader.h "$PACKAGE_DIR/native-api-jsi/metadata/include/"
+# The platform-neutral engine layer. The Apple headers under ffi/objc are thin
+# forwarders onto it -- NativeApiJsi.h is a one-line #include of
+# "jsi/hermes/NativeApiJsi.h" -- so the pod does not compile without this tree,
+# even though it compiles nothing out of it directly. Header-only as far as the
+# TurboModule is concerned; it is on the pod's header search path via
+# native-api. Staged here as well as by the Android step: either half of the
+# package must be able to build from a tarball the other never contributed to.
+cp -R "$REPO_ROOT/NativeScript/jsi/." "$PACKAGE_DIR/native-api/jsi/"
+
+# The Apple side of the bridge, staged whole rather than file by file.
+#
+# Only NativeApiJsi.mm is compiled: everything else arrives through #include,
+# either as a header or as a .mm folded into that translation unit (see
+# HostObjects.mm, which assembles host_objects/*.mm). An enumerated list has to
+# name every one of those transitively, so it silently goes stale whenever the
+# sources grow a file or a directory -- which is what happened here. Copying the
+# trees keeps the staged set equal to the source set by construction.
+cp -R "$REPO_ROOT/NativeScript/ffi/objc/hermes/." "$PACKAGE_DIR/native-api/ffi/objc/hermes/"
+cp -R "$REPO_ROOT/NativeScript/ffi/objc/shared/." "$PACKAGE_DIR/native-api/ffi/objc/shared/"
+# Build leftovers, not sources.
+find "$PACKAGE_DIR/native-api/ffi/objc" -name '*.stamp' -delete
+cp "$GENERATED_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/shared/GeneratedSignatureDispatch.inc"
+GENERATED_GSD_SIGNATURE_DISPATCH="$(dirname "$GENERATED_SIGNATURE_DISPATCH")/GeneratedGsdSignatureDispatch.inc"
+if [ -f "$GENERATED_GSD_SIGNATURE_DISPATCH" ]; then
+  cp "$GENERATED_GSD_SIGNATURE_DISPATCH" "$PACKAGE_DIR/native-api/ffi/objc/shared/GeneratedGsdSignatureDispatch.inc"
+fi
+if [ -z "$GENERATED_SIGNATURE_DISPATCH_OVERRIDE" ]; then
+  rm -f "$GENERATED_SIGNATURE_DISPATCH" "$GENERATED_SIGNATURE_DISPATCH.stamp" \
+    "$GENERATED_GSD_SIGNATURE_DISPATCH"
+fi
+cp metadata-generator/include/Metadata.h "$PACKAGE_DIR/native-api/metadata/include/"
+cp metadata-generator/include/MetadataReader.h "$PACKAGE_DIR/native-api/metadata/include/"
 cp NativeScript/libffi/iphonesimulator-universal/include/ffi.h "$PACKAGE_DIR/ios/vendor/libffi/include/"
 cp NativeScript/libffi/iphonesimulator-universal/include/ffitarget.h "$PACKAGE_DIR/ios/vendor/libffi/include/"
 
@@ -175,11 +249,52 @@ fi
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
+# The package ships an iOS half and an Android half, and this script only stages
+# the iOS one. The Android half is generated by build_react_native_android.sh and
+# build_react_native_android_tools.sh, and both of its trees are gitignored -- so
+# a checkout that never ran them packs an android/ directory containing gradle
+# files and nothing to build. That publishes cleanly and fails in every consuming
+# app, which is why it is a hard error here rather than a warning.
+missing=()
+[ -d "$PACKAGE_DIR/android/src/main/java-runtime" ] || missing+=("android/src/main/java-runtime (scripts/build_react_native_android.sh)")
+[ -d "$PACKAGE_DIR/native-api/runtime/android" ] || missing+=("native-api/runtime/android (scripts/build_react_native_android.sh)")
+for jar in android-metadata-generator dts-generator static-binding-generator; do
+  [ -f "$PACKAGE_DIR/android/tools/$jar.jar" ] || missing+=("android/tools/$jar.jar (scripts/build_react_native_android_tools.sh)")
+done
+[ -d "$PACKAGE_DIR/android/tools/jsparser" ] || missing+=("android/tools/jsparser (scripts/build_react_native_android_tools.sh)")
+[ -f "$PACKAGE_DIR/android/tools/metadata-filter/seed.js" ] || missing+=("android/tools/metadata-filter/seed.js (scripts/build_react_native_android_tools.sh)")
+[ -f "$PACKAGE_DIR/android/tools/metadata-filter/harvest.js" ] || missing+=("android/tools/metadata-filter/harvest.js (scripts/build_react_native_android_tools.sh)")
+
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "error: the Android half of @nativescript/react-native is not staged; refusing to pack:" >&2
+  printf '  - %s\n' "${missing[@]}" >&2
+  echo "Run the staging scripts named above before packing, or pass --no-pack to stage only." >&2
+  exit 1
+fi
+
 checkpoint "Packing @nativescript/react-native..."
 (
   cd "$PACKAGE_DIR"
   npm pack --pack-destination "$REPO_ROOT/$OUTPUT_DIR"
 )
+
+# npm honours .npmignore and the files list; check the artifact itself rather
+# than trusting that what was staged is what shipped.
+tarball=$(find "$OUTPUT_DIR" -name '*.tgz' | head -1)
+for required in package/android/tools/static-binding-generator.jar \
+                package/android/src/main/java-runtime \
+                package/android/nativescript.gradle \
+                package/android/tools/metadata-filter/seed.js \
+                package/android/tools/metadata-filter/harvest.js \
+                package/native-api/runtime/android \
+                package/native-api/ffi/jni \
+                package/native-api/ffi/objc \
+                package/ios; do
+  if ! tar tzf "$tarball" | grep -q "^${required}"; then
+    echo "error: ${tarball##*/} is missing ${required#package/}." >&2
+    exit 1
+  fi
+done
 
 cp "$OUTPUT_DIR"/*.tgz "$PACK_DESTINATION/"
 

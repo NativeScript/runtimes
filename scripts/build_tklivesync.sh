@@ -34,7 +34,7 @@ mkdir -p $DIST/intermediates
 if $BUILD_SIMULATOR; then
 # generates library for simulator targets (usually includes arm64, x86_64)
 checkpoint "Building TKLiveSync for iphone simulators (multi-arch)"
-xcodebuild archive -project NativeScriptRuntime.xcodeproj \
+xcodebuild archive -project platforms/apple/NativeScriptRuntime.xcodeproj \
                    -scheme TKLiveSync \
                    -configuration Release \
                    -destination "generic/platform=iOS Simulator" \
@@ -47,7 +47,7 @@ fi
 if $BUILD_IPHONE; then
 #generates library for device target
 checkpoint "Building TKLiveSync for ARM64 device"
-xcodebuild archive -project NativeScriptRuntime.xcodeproj \
+xcodebuild archive -project platforms/apple/NativeScriptRuntime.xcodeproj \
                    -scheme TKLiveSync \
                    -configuration Release \
                    -destination "generic/platform=iOS" \
@@ -60,7 +60,7 @@ fi
 if $BUILD_CATALYST; then
 #generates library for Mac Catalyst target
 checkpoint "Building TKLiveSync for Mac Catalyst"
-xcodebuild archive -project NativeScriptRuntime.xcodeproj \
+xcodebuild archive -project platforms/apple/NativeScriptRuntime.xcodeproj \
                    -scheme TKLiveSync \
                    -configuration Release \
                    -destination "generic/platform=macOS,variant=Mac Catalyst" \
@@ -73,7 +73,7 @@ fi
 if $BUILD_MACOS; then
 #generates library for Mac OS target
 checkpoint "Building TKLiveSync for Mac OS"
-xcodebuild archive -project NativeScriptRuntime.xcodeproj \
+xcodebuild archive -project platforms/apple/NativeScriptRuntime.xcodeproj \
                    -scheme TKLiveSync \
                    -configuration Release \
                    -destination "generic/platform=macOS" \
@@ -87,7 +87,7 @@ if $BUILD_VISION; then
 # generates frameworks for visionOS without going through archive destination
 # resolution, which falls back to iOS/macOS on this project.
 checkpoint "Building TKLiveSync for visionOS Simulators"
-xcodebuild build -project NativeScriptRuntime.xcodeproj \
+xcodebuild build -project platforms/apple/NativeScriptRuntime.xcodeproj \
                  -target TKLiveSync \
                  -configuration Release \
                  -sdk xrsimulator \
@@ -97,7 +97,7 @@ xcodebuild build -project NativeScriptRuntime.xcodeproj \
                  CONFIGURATION_BUILD_DIR="$DIST/intermediates/TKLiveSync.xrsimulator"
 
 checkpoint "Building TKLiveSync for visionOS Device"
-xcodebuild build -project NativeScriptRuntime.xcodeproj \
+xcodebuild build -project platforms/apple/NativeScriptRuntime.xcodeproj \
                  -target TKLiveSync \
                  -configuration Release \
                  -sdk xros \

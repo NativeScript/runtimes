@@ -362,6 +362,12 @@ std::string MDTypeInfoSerde::encode(MDTypeInfo* type) {
     case mdTypeUShort:
       result = "S";
       break;
+    case mdTypeUnichar:
+      // This string is the metadata section's semantic deduplication key, not
+      // an Objective-C ABI encoding. Keep unichar distinct from unsigned short
+      // even though both use `S` at the ABI level.
+      result = "U";
+      break;
     case mdTypeSInt:
       result = "i";
       break;

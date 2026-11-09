@@ -10,7 +10,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/NativeScript/napi-ios",
+    "url": "git+https://github.com/NativeScript/runtimes.git",
     "directory": "packages/ios-quickjs"
   },
   "author": {
@@ -18,7 +18,7 @@
     "email": "oss@nativescript.org"
   },
   "scripts": {
-    "build": "cd ../.. && ./scripts/build_all_ios.sh --quickjs"
+    "build": "cd ../.. && IOS_VARIANT=ios-quickjs ./scripts/build_all_ios.sh --quickjs"
   },
   "files": [
     "framework"

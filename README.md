@@ -14,9 +14,8 @@ The core backbone that powers [NativeScript](https://nativescript.org/) apps and
 - `NativeScript/`: The core C++ runtime source code handling FFI (Foreign Function Interface) operations and JS engine bindings.
 - `metadata-generator/`: Clang-based utility that parses C/Obj-C to generate the metadata consumed by the FFI
 - `packages/`: The NPM packages published from this repo (e.g., `@nativescript/ios`, `@nativescript/macos`, `@nativescript/visionos`, and specific engine combinations).
-- `examples/`: Sample JS/TS test beds demonstrating platform APIs (AppKit, Metal, SpriteKit, etc.) driven purely over the runtime FFI.
+- `platforms/apple/`: Apple platform project files, templates, tests, examples, and TKLiveSync sources.
 - `scripts/`: Shell and Node utilities for building frameworks, packaging runtimes, and driving CI/CD.
-- `TKLiveSync/`: Provides fast LiveSync capability and Hot Module Replacement (HMR) implementation.
 
 ## Development & Building
 
@@ -30,6 +29,8 @@ The core backbone that powers [NativeScript](https://nativescript.org/) apps and
    - `npm run build-macos`: Builds the macOS runtime platforms.
    - `npm run build-vision`: Builds the visionOS runtime platforms.
    - `npm run build-node-api`: Compiles the Node-API (N-API) addon.
+   - `npm run build-android`: Builds the Android runtime for one JS engine (prompts, or `-- --engine=<ENGINE>`).
+   - `npm run setup-android`: Prepares an Android checkout (QuickJS patches + jsparser deps).
    - `npm run build-rn-turbomodule`: Compiles the React Native TurboModules compatibility layer.
 4. **Core Dependencies**:
    - `npm run build-metagen`: Builds the Clang metadata generator binary.

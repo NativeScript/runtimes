@@ -62,8 +62,12 @@ struct char_traits<unsigned short> {
 #include "js_native_api.h"
 #include "js_native_api_types.h"
 
-#ifndef NAPI_PREAMBLE
-#define NAPI_PREAMBLE napi_status status;
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
+#ifndef NS_NAPI_PREAMBLE
+#define NS_NAPI_PREAMBLE napi_status status;
 #endif
 
 #define NAPI_CALLBACK_BEGIN(n_args)                                      \
@@ -95,6 +99,34 @@ struct char_traits<unsigned short> {
     }                                                                        \
   }
 
+// Faster varargs prologue for hot callbacks. Reads arguments into a fixed stack
+// buffer with a SINGLE napi_get_cb_info call (no heap allocation, no redundant
+// argc-probe call), falling back to a heap vector only when the real arity
+// exceeds the inline capacity `stackn`. Exposes `napi_value *argv` + `size_t
+// argc`, so call sites use `argv`/`argv[i]` (a pointer) instead of a vector.
+#define NAPI_CALLBACK_BEGIN_VARGS_FAST(stackn)                                    \
+  napi_status status;                                                             \
+  size_t argc = (stackn);                                                         \
+  void* data;                                                                     \
+  napi_value jsThis;                                                              \
+  napi_value __argv_stack[(stackn)];                                              \
+  NAPI_GUARD(napi_get_cb_info(env, info, &argc, __argv_stack, &jsThis, &data)) {  \
+    NAPI_THROW_LAST_ERROR                                                         \
+    return NULL;                                                                  \
+  }                                                                               \
+  std::vector<napi_value> __argv_heap;                                            \
+  napi_value* argv = __argv_stack;                                                \
+  if (argc > (stackn)) {                                                          \
+    __argv_heap.resize(argc);                                                     \
+    NAPI_GUARD(                                                                   \
+        napi_get_cb_info(env, info, &argc, __argv_heap.data(), nullptr, nullptr)) \
+    {                                                                             \
+      NAPI_THROW_LAST_ERROR                                                       \
+      return NULL;                                                                \
+    }                                                                             \
+    argv = __argv_heap.data();                                                    \
+  }
+
 #define NAPI_ERROR_INFO                                                    \
   const napi_extended_error_info* error_info =                             \
       (napi_extended_error_info*)malloc(sizeof(napi_extended_error_info)); \
@@ -104,26 +136,29 @@ struct char_traits<unsigned short> {
   NAPI_ERROR_INFO             \
   napi_throw_error(env, NULL, error_info->error_message);
 
-#ifndef DEBUG
-
-#define NAPI_GUARD(expr)                                              \
-  status = expr;                                                      \
-  if (status != napi_ok) {                                            \
-    NAPI_ERROR_INFO                                                   \
-    std::stringstream msg;                                            \
-    msg << "Node-API returned error: " << status << "\n    " << #expr \
-        << "\n    ^\n    "                                            \
-        << "at " << __FILE__ << ":" << __LINE__ << "";                \
-  }                                                                   \
-  if (status != napi_ok)
-
+#ifdef __ANDROID__
+#define NAPI_LOG_ERROR(status_val, expr_str)                                        \
+  __android_log_print(ANDROID_LOG_ERROR, "TNS.Native",                              \
+                      "Node-API returned error: %d\n    %s\n    ^\n    at %s:%d",   \
+                      (int)(status_val), (expr_str), __FILE__, __LINE__)
 #else
-
-#define NAPI_GUARD(expr) \
-  status = expr;         \
-  if (status != napi_ok)
-
+#define NAPI_LOG_ERROR(status_val, expr_str) ((void)0)
 #endif
+
+// NAPI_GUARD(expr) { ...on-error block... }
+// Assigns the result of `expr` to the in-scope `status`, logs a diagnostic
+// (status, expression, file:line) on failure so an invalid runtime state is
+// traceable, and runs the trailing block when the call did not return napi_ok.
+// napi_pending_exception is JS-level control flow (a callback threw), not an
+// invalid runtime state, so it is intentionally not logged — the caller's
+// exception handling deals with it.
+#define NAPI_GUARD(expr)                                     \
+  status = expr;                                             \
+  if (status != napi_ok && status != napi_pending_exception) \
+  {                                                          \
+    NAPI_LOG_ERROR(status, #expr);                           \
+  }                                                          \
+  if (status != napi_ok)
 
 #define NAPI_FUNCTION(name) \
   napi_value JS_##name(napi_env env, napi_callback_info cbinfo)
@@ -180,9 +215,9 @@ class PersistentObject {
   napi_env GetEnv() const { return env_; }
 
  private:
-  bool isOwnedRef_ = false;
   napi_env env_;
   napi_ref ref_;
+  bool isOwnedRef_ = false;
 };
 
 inline napi_property_descriptor desc(const char* name, napi_callback method,
@@ -341,23 +376,47 @@ inline napi_status define_property(
   return napi_define_properties(env, object, 1, &desc);
 }
 
-inline void setPrototypeOf(napi_env env, napi_value object,
-                           napi_value prototype) {
+inline napi_status define_property_value(
+    napi_env env, napi_value object, const char* propertyName,
+    napi_value value = nullptr,
+    napi_property_attributes attributes = napi_default_jsproperty,
+    void* data = nullptr) {
+  return napi_util::define_property(env, object, propertyName, value, nullptr,
+                                    nullptr, data, attributes);
+}
+
+inline napi_status define_property_get_set(
+    napi_env env, napi_value object, const char* propertyName,
+    napi_callback getter, napi_callback setter,
+    napi_property_attributes attributes = napi_default_jsproperty,
+    void* data = nullptr) {
+  return napi_util::define_property(env, object, propertyName, nullptr, getter,
+                                    setter, data, attributes);
+}
+
+inline napi_status setPrototypeOf(napi_env env, napi_value object,
+                                  napi_value prototype) {
+  if (object == nullptr || prototype == nullptr) return napi_invalid_arg;
+
   napi_value global, global_object, set_proto;
 
   // Get the global object
-  napi_get_global(env, &global);
+  auto status = napi_get_global(env, &global);
+  if (status != napi_ok) return status;
 
   // Get the Object global object
-  napi_get_named_property(env, global, OBJECT, &global_object);
+  status = napi_get_named_property(env, global, OBJECT, &global_object);
+  if (status != napi_ok) return status;
 
   // Get the setPrototypeOf function from the Object global object
-  napi_get_named_property(env, global_object, SET_PROTOTYPE_OF, &set_proto);
+  status = napi_get_named_property(env, global_object, SET_PROTOTYPE_OF, &set_proto);
+  if (status != napi_ok) return status;
 
   // Prepare the arguments for the setPrototypeOf call
   napi_value argv[]{object, prototype};
   // Call setPrototypeOf(object, prototype)
-  napi_call_function(env, global, set_proto, 2, argv, nullptr);
+  napi_value result;
+  return napi_call_function(env, global, set_proto, 2, argv, &result);
 }
 
 inline bool is_object_explicit(napi_env env, napi_value value) {
@@ -449,13 +508,14 @@ inline bool is_date(napi_env env, napi_value value) {
 inline bool is_undefined(napi_env env, napi_value value) {
   if (value == nullptr) return true;
   napi_valuetype type;
-  napi_typeof(env, value, &type);
+  if (napi_typeof(env, value, &type) != napi_ok) return false;
   return type == napi_undefined;
 }
 
 inline bool is_null(napi_env env, napi_value value) {
+  if (value == nullptr) return true;
   napi_valuetype type;
-  napi_typeof(env, value, &type);
+  if (napi_typeof(env, value, &type) != napi_ok) return false;
   return type == napi_null;
 }
 

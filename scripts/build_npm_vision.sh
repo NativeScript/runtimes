@@ -13,7 +13,7 @@ cp "$PACKAGE_DIR/package.json" "$STAGING_DIR"
 cp "$PACKAGE_DIR/README.md" "$STAGING_DIR"
 cp "$PACKAGE_DIR/LICENSE" "$STAGING_DIR"
 
-cp -R "./templates/visionos/." "$STAGING_DIR/framework"
+cp -R "./platforms/apple/templates/visionos/." "$STAGING_DIR/framework"
 
 cp -R "dist/NativeScript.xcframework" "$STAGING_DIR/framework/internal"
 cp -R "dist/TKLiveSync.xcframework" "$STAGING_DIR/framework/internal"

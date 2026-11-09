@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Metadata.h"
+#include "MetadataFilter.h"
 #include "Util.h"
 #include "clang-c/Index.h"
 
@@ -97,6 +98,7 @@ enum VariableConstEvalKind {
 
 struct EnumConstDecl {
   std::string name;
+  std::string cName;
   int64_t value;
   AvailabilityInfo availability;
 };
@@ -131,6 +133,10 @@ class EnumDecl {
 
   std::string name;
   std::vector<EnumConstDecl> constants;
+  // Stripped from every member's cName to form its name, except members
+  // whose name is their cName.
+  std::string memberPrefix;
+  std::string memberSuffix;
 
   MDSectionOffset mdOffset = MD_SECTION_OFFSET_NULL;
 };
@@ -377,6 +383,7 @@ class MetadataFactory {
   void processProtocolRefs();
 
   std::unordered_set<std::string> includePaths;
+  MetadataFilter metadataFilter;
 
   std::unordered_map<std::string, VariableDecl> variables;
   std::unordered_map<std::string, EnumDecl> enums;

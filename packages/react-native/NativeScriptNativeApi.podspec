@@ -9,16 +9,19 @@ Pod::Spec.new do |s|
   s.name = "NativeScriptNativeApi"
   s.version = package["version"]
   s.summary = package["description"]
-  s.homepage = "https://github.com/NativeScript/napi-ios"
+  s.homepage = "https://github.com/NativeScript/runtimes"
   s.license = "Apache-2.0"
   s.author = package["author"]
-  s.platforms = { :ios => "13.0" }
-  s.source = { :git => "https://github.com/NativeScript/napi-ios.git", :tag => "react-native-v#{s.version}" }
+  s.platforms = { :ios => "15.1" }
+  s.source = { :git => "https://github.com/NativeScript/runtimes.git", :tag => "react-native-v#{s.version}" }
   s.requires_arc = false
 
   s.source_files = [
     "ios/**/*.{h,mm}",
-    "native-api-jsi/**/*.{h,mm}"
+    "native-api/ffi/objc/hermes/**/*.h",
+    "native-api/ffi/objc/shared/**/*.h",
+    "native-api/jsi/**/*.h",
+    "native-api/ffi/objc/hermes/NativeApiJsi.mm"
   ]
   s.exclude_files = "ios/Fabric/**/*" unless fabric_enabled
   s.public_header_files = "ios/**/*.h"
@@ -31,16 +34,21 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",
     "CLANG_CXX_LIBRARY" => "libc++",
-    "GCC_PREPROCESSOR_DEFINITIONS" => "$(inherited) TARGET_ENGINE_HERMES=1",
+    # NATIVESCRIPT_REACT_NATIVE tells the shared bridge sources that they are
+    # being compiled against a React Native-owned jsi::Runtime rather than the
+    # standalone runtime, so the parts that reach into napi/ (which this package
+    # does not ship) compile out. See NativeApiJsi.mm.
+    "GCC_PREPROCESSOR_DEFINITIONS" => "$(inherited) TARGET_ENGINE_HERMES=1 NS_GSD_BACKEND_HERMES=1 NATIVESCRIPT_REACT_NATIVE=1",
     "HEADER_SEARCH_PATHS" => [
       "\"$(PODS_TARGET_SRCROOT)/ios\"",
-      "\"$(PODS_TARGET_SRCROOT)/native-api-jsi\"",
-      "\"$(PODS_TARGET_SRCROOT)/native-api-jsi/metadata/include\"",
+      "\"$(PODS_TARGET_SRCROOT)/native-api\"",
+      "\"$(PODS_TARGET_SRCROOT)/native-api/metadata/include\"",
       "\"$(PODS_TARGET_SRCROOT)/ios/vendor/libffi/include\"",
       "\"$(PODS_ROOT)/Headers/Public/React-Codegen\"",
       "\"$(PODS_ROOT)/Headers/Private/React-Codegen\"",
       "\"$(PODS_ROOT)/Headers/Public/ReactCommon\"",
-      "\"$(PODS_ROOT)/Headers/Private/ReactCommon\""
+      "\"$(PODS_ROOT)/Headers/Private/ReactCommon\"",
+      "\"$(PODS_ROOT)/Headers/Public/RNWorklets\""
     ].join(" ")
   }
 
@@ -51,4 +59,5 @@ Pod::Spec.new do |s|
     s.dependency "React-jsi"
     s.dependency "ReactCommon/turbomodule/core"
   end
+  s.dependency "RNWorklets"
 end

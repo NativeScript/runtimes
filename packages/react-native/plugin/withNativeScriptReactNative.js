@@ -1,4 +1,4 @@
-const pkg = require('../package.json');
+const pkg = require("../package.json");
 
 const DEFAULTS = {
   ios: {
@@ -6,31 +6,48 @@ const DEFAULTS = {
     newArchitecture: true,
   },
   babelPlugin: true,
+  workletsBundleMode: true,
 };
 
-const BABEL_PLUGIN = '@nativescript/react-native/babel-plugin';
-const METADATA_CONFIG_FILE = 'nativescript.react-native.json';
+const BABEL_PLUGIN = "@nativescript/react-native/babel-plugin";
+const WORKLETS_BABEL_PLUGIN = "react-native-worklets/plugin";
+const EXPO_BABEL_PRESET = "babel-preset-expo";
+// babel-preset-expo adds its own worklets plugin, without strictGlobal.
+const EXPO_BABEL_PRESET_ENTRY = `[${JSON.stringify(EXPO_BABEL_PRESET)}, { worklets: false }]`;
+const METADATA_CONFIG_FILE = "nativescript.react-native.json";
+const METRO_CONFIG_MARKER = "@nativescript/react-native/metro-config";
 
 function readBoolean(value, fallback) {
-  return typeof value === 'boolean' ? value : fallback;
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : undefined;
 }
 
 function normalizeMetadataOptions(options = {}) {
   const metadata = options.metadata || {};
-  return {
-    includePods: Array.isArray(metadata.includePods)
-      ? metadata.includePods.filter((value) => typeof value === 'string')
-      : [],
-    includeSystemFrameworks: Array.isArray(metadata.includeSystemFrameworks)
-      ? metadata.includeSystemFrameworks.filter((value) => typeof value === 'string')
-      : [],
+  const normalized = {
+    includePods: stringList(metadata.includePods) || [],
+    includeSystemFrameworks: stringList(metadata.includeSystemFrameworks) || [],
   };
+  // Omitted unless given, so ensureMetadataConfig keeps an `android` block
+  // written by hand into nativescript.react-native.json.
+  const androidInclude = stringList(metadata.android && metadata.android.include);
+  if (androidInclude) {
+    normalized.android = {include: androidInclude};
+  }
+  return normalized;
 }
 
 function normalizeOptions(options = {}) {
   const ios = options.ios || {};
   return {
     babelPlugin: readBoolean(options.babelPlugin, DEFAULTS.babelPlugin),
+    workletsBundleMode: readBoolean(
+      options.workletsBundleMode,
+      DEFAULTS.workletsBundleMode,
+    ),
     metadata: normalizeMetadataOptions(options),
     ios: {
       hermes: readBoolean(
@@ -46,120 +63,252 @@ function normalizeOptions(options = {}) {
 }
 
 function ensureMetadataConfig(projectRoot, metadataOptions) {
-  const fs = require('fs');
-  const path = require('path');
+  const fs = require("fs");
+  const path = require("path");
   const configPath = path.join(projectRoot, METADATA_CONFIG_FILE);
   let existing = {};
   if (fs.existsSync(configPath)) {
     try {
-      existing = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      existing = JSON.parse(fs.readFileSync(configPath, "utf8"));
     } catch (error) {
       existing = {};
     }
   }
 
+  const existingReactNative = existing.reactNative || {};
+  const existingMetadata =
+    existingReactNative.metadata && typeof existingReactNative.metadata === "object"
+      ? existingReactNative.metadata
+      : {};
   const merged = {
     ...existing,
     reactNative: {
-      ...(existing.reactNative || {}),
-      metadata: metadataOptions,
+      ...existingReactNative,
+      metadata: {...existingMetadata, ...metadataOptions},
     },
   };
   const nextSource = `${JSON.stringify(merged, null, 2)}\n`;
-  if (!fs.existsSync(configPath) || fs.readFileSync(configPath, 'utf8') !== nextSource) {
+  if (
+    !fs.existsSync(configPath) ||
+    fs.readFileSync(configPath, "utf8") !== nextSource
+  ) {
     fs.writeFileSync(configPath, nextSource);
   }
   return merged;
 }
 
-function ensureBabelPlugin(projectRoot) {
-  const fs = require('fs');
-  const path = require('path');
-  const candidates = ['babel.config.js', 'babel.config.cjs'];
+// Without strictGlobal the worklets plugin captures every undeclared name into
+// the worklet's closure on the JS thread when the worklet is created, where
+// NativeScript's classes (UIView, UILabel, ...) do not exist yet.
+function workletsBabelEntry(bundleMode) {
+  const options = bundleMode
+    ? "{ bundleMode: true, strictGlobal: true }"
+    : "{ strictGlobal: true }";
+  return `[${JSON.stringify(WORKLETS_BABEL_PLUGIN)}, ${options}]`;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+}
+
+// Replaces `'name'` written as a bare array element with `entry`. Elements
+// already given options (`['name', {...}]`) are left alone.
+function replaceBareEntry(source, name, entry) {
+  const bare = new RegExp(
+    `([\\[,]\\s*)(['"])${escapeRegExp(name)}\\2(?=\\s*(?:,(?!\\s*\\{)|\\]))`,
+  );
+  return source.replace(bare, (match, prefix) => `${prefix}${entry}`);
+}
+
+function ensureBabelPlugin(projectRoot, options = {}) {
+  const fs = require("fs");
+  const path = require("path");
+  const bundleMode = readBoolean(
+    options.bundleMode,
+    DEFAULTS.workletsBundleMode,
+  );
+  const workletsEntry = workletsBabelEntry(bundleMode);
+  const candidates = ["babel.config.js", "babel.config.cjs"];
   let babelConfigPath = candidates
     .map((candidate) => path.join(projectRoot, candidate))
     .find((candidate) => fs.existsSync(candidate));
 
   if (!babelConfigPath) {
-    babelConfigPath = path.join(projectRoot, 'babel.config.js');
+    babelConfigPath = path.join(projectRoot, "babel.config.js");
     fs.writeFileSync(
       babelConfigPath,
       [
-        'module.exports = function(api) {',
-        '  api.cache(true);',
-        '  return {',
-        "    presets: ['babel-preset-expo'],",
-        `    plugins: ['${BABEL_PLUGIN}'],`,
-        '  };',
-        '};',
-        '',
-      ].join('\n'),
+        "module.exports = function(api) {",
+        "  api.cache(true);",
+        "  return {",
+        `    presets: [${EXPO_BABEL_PRESET_ENTRY}],`,
+        `    plugins: [${JSON.stringify(BABEL_PLUGIN)}, ${workletsEntry}],`,
+        "  };",
+        "};",
+        "",
+      ].join("\n"),
     );
     return;
   }
 
-  let source = fs.readFileSync(babelConfigPath, 'utf8');
-  if (source.includes(BABEL_PLUGIN)) {
-    return;
+  const original = fs.readFileSync(babelConfigPath, "utf8");
+  let source = original;
+  const missingPlugins = [BABEL_PLUGIN, WORKLETS_BABEL_PLUGIN].filter(
+    (plugin) => !source.includes(plugin),
+  );
+  if (missingPlugins.length > 0) {
+    const pluginEntry =
+      missingPlugins
+        .map((plugin) =>
+          plugin === WORKLETS_BABEL_PLUGIN
+            ? workletsEntry
+            : JSON.stringify(plugin),
+        )
+        .join(", ") + ", ";
+    if (/plugins\s*:\s*\[/.test(source)) {
+      source = source.replace(
+        /plugins\s*:\s*\[/,
+        (match) => `${match}${pluginEntry}`,
+      );
+    } else if (/return\s*\{/.test(source)) {
+      source = source.replace(
+        /return\s*\{/,
+        (match) => `${match}\n    plugins: [${pluginEntry}],`,
+      );
+    } else if (/module\.exports\s*=\s*\{/.test(source)) {
+      source = source.replace(
+        /module\.exports\s*=\s*\{/,
+        (match) => `${match}\n  plugins: [${pluginEntry}],`,
+      );
+    } else if (/export\s+default\s+\{/.test(source)) {
+      source = source.replace(
+        /export\s+default\s+\{/,
+        (match) => `${match}\n  plugins: [${pluginEntry}],`,
+      );
+    } else {
+      source += `\n// @nativescript/react-native: add ${missingPlugins.map((plugin) => `'${plugin}'`).join(" and ")} to your Babel plugins.\n`;
+    }
   }
 
-  const pluginEntry = `'${BABEL_PLUGIN}', `;
-  if (/plugins\s*:\s*\[/.test(source)) {
-    source = source.replace(/plugins\s*:\s*\[/, (match) => `${match}${pluginEntry}`);
-  } else if (/return\s*\{/.test(source)) {
-    source = source.replace(
-      /return\s*\{/,
-      (match) => `${match}\n    plugins: ['${BABEL_PLUGIN}'],`,
-    );
-  } else if (/module\.exports\s*=\s*\{/.test(source)) {
-    source = source.replace(
-      /module\.exports\s*=\s*\{/,
-      (match) => `${match}\n  plugins: ['${BABEL_PLUGIN}'],`,
-    );
-  } else if (/export\s+default\s+\{/.test(source)) {
-    source = source.replace(
-      /export\s+default\s+\{/,
-      (match) => `${match}\n  plugins: ['${BABEL_PLUGIN}'],`,
-    );
-  } else {
-    source += `\n// @nativescript/react-native: add '${BABEL_PLUGIN}' to your Babel plugins.\n`;
+  source = replaceBareEntry(source, WORKLETS_BABEL_PLUGIN, workletsEntry);
+  source = replaceBareEntry(source, EXPO_BABEL_PRESET, EXPO_BABEL_PRESET_ENTRY);
+
+  if (source.includes(WORKLETS_BABEL_PLUGIN)) {
+    const missing = [];
+    if (!/strictGlobal\s*:\s*true/.test(source)) {
+      missing.push("strictGlobal: true");
+    }
+    if (bundleMode && !/bundleMode\s*:\s*true/.test(source)) {
+      missing.push("bundleMode: true");
+    }
+    if (missing.length > 0) {
+      console.warn(
+        `@nativescript/react-native: pass { ${missing.join(", ")} } to '${WORKLETS_BABEL_PLUGIN}' ` +
+          `in ${path.basename(babelConfigPath)}, or worklets that name native classes fail as their module loads.`,
+      );
+    }
   }
 
-  fs.writeFileSync(babelConfigPath, source);
+  if (source !== original) {
+    fs.writeFileSync(babelConfigPath, source);
+  }
 }
 
-function withNativeScriptBabelPlugin(config) {
+function ensureMetroConfig(projectRoot) {
+  const fs = require("fs");
+  const path = require("path");
+  const candidates = ["metro.config.js", "metro.config.cjs"];
+  let metroConfigPath = candidates
+    .map((candidate) => path.join(projectRoot, candidate))
+    .find((candidate) => fs.existsSync(candidate));
+
+  if (!metroConfigPath) {
+    metroConfigPath = path.join(projectRoot, "metro.config.js");
+    fs.writeFileSync(
+      metroConfigPath,
+      [
+        "let getDefaultConfig;",
+        "try { ({getDefaultConfig} = require('expo/metro-config')); }",
+        "catch { ({getDefaultConfig} = require('@react-native/metro-config')); }",
+        `const {withNativeScriptMetroConfig} = require('${METRO_CONFIG_MARKER}');`,
+        "",
+        "module.exports = withNativeScriptMetroConfig(getDefaultConfig(__dirname));",
+        "",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  let source = fs.readFileSync(metroConfigPath, "utf8");
+  if (source.includes(METRO_CONFIG_MARKER)) {
+    return;
+  }
+  source = `${source.trimEnd()}\n\nmodule.exports = require('${METRO_CONFIG_MARKER}').withNativeScriptMetroConfig(module.exports);\n`;
+  fs.writeFileSync(metroConfigPath, source);
+}
+
+function withNativeScriptTransforms(config, bundleMode) {
   let withDangerousMod;
   try {
-    ({withDangerousMod} = require('expo/config-plugins'));
+    ({ withDangerousMod } = require("expo/config-plugins"));
   } catch (error) {
     return config;
   }
 
-  return withDangerousMod(config, [
-    'ios',
-    async (modConfig) => {
-      ensureBabelPlugin(modConfig.modRequest.projectRoot);
-      return modConfig;
-    },
-  ]);
+  const mod = async (modConfig) => {
+    ensureBabelPlugin(modConfig.modRequest.projectRoot, { bundleMode });
+    if (bundleMode) {
+      ensureMetroConfig(modConfig.modRequest.projectRoot);
+    }
+    return modConfig;
+  };
+  return withDangerousMod(withDangerousMod(config, ["ios", mod]), ["android", mod]);
 }
 
 function withNativeScriptMetadata(config, metadataOptions) {
   let withDangerousMod;
   try {
-    ({withDangerousMod} = require('expo/config-plugins'));
+    ({ withDangerousMod } = require("expo/config-plugins"));
   } catch (error) {
     return config;
   }
 
-  return withDangerousMod(config, [
-    'ios',
-    async (modConfig) => {
-      ensureMetadataConfig(modConfig.modRequest.projectRoot, metadataOptions);
-      return modConfig;
-    },
-  ]);
+  const mod = async (modConfig) => {
+    ensureMetadataConfig(modConfig.modRequest.projectRoot, metadataOptions);
+    return modConfig;
+  };
+  return withDangerousMod(withDangerousMod(config, ["ios", mod]), ["android", mod]);
+}
+
+/**
+ * Applies the NativeScript Gradle script to the app module under prebuild.
+ *
+ * Autolinking already brings in the runtime; what this adds are the metadata and
+ * typings tasks, which read the app's own resolved classpath and so have to live
+ * in the app project.
+ */
+function withNativeScriptAndroidGradle(config) {
+  let withAppBuildGradle;
+  try {
+    ({withAppBuildGradle} = require('expo/config-plugins'));
+  } catch (error) {
+    return config;
+  }
+
+  return withAppBuildGradle(config, (modConfig) => {
+    const {APPLY_LINE} = require('../cli/configure-android');
+    let contents = modConfig.modResults.contents;
+
+    if (!contents.includes('@nativescript/react-native/android/nativescript.gradle')) {
+      const reactPlugin = /apply plugin: ["']com\.facebook\.react["']\s*\n/;
+      contents = reactPlugin.test(contents)
+        ? contents.replace(reactPlugin, (match) => `${match}${APPLY_LINE}\n`)
+        : `${APPLY_LINE}\n${contents}`;
+      modConfig.modResults.contents = contents;
+    }
+
+    return modConfig;
+  });
 }
 
 function withNativeScriptReactNative(config, options) {
@@ -168,7 +317,7 @@ function withNativeScriptReactNative(config, options) {
   config.ios = config.ios || {};
 
   if (normalized.ios.hermes) {
-    config.ios.jsEngine = 'hermes';
+    config.ios.jsEngine = "hermes";
   }
 
   if (normalized.ios.newArchitecture) {
@@ -179,9 +328,10 @@ function withNativeScriptReactNative(config, options) {
   }
 
   if (normalized.babelPlugin) {
-    config = withNativeScriptBabelPlugin(config);
+    config = withNativeScriptTransforms(config, normalized.workletsBundleMode);
   }
   config = withNativeScriptMetadata(config, normalized.metadata);
+  config = withNativeScriptAndroidGradle(config);
 
   return config;
 }
@@ -190,6 +340,10 @@ module.exports = withNativeScriptReactNative;
 module.exports.default = withNativeScriptReactNative;
 module.exports.withNativeScriptReactNative = withNativeScriptReactNative;
 module.exports.ensureBabelPlugin = ensureBabelPlugin;
+module.exports.ensureMetroConfig = ensureMetroConfig;
+module.exports.BABEL_PLUGIN = BABEL_PLUGIN;
+module.exports.WORKLETS_BABEL_PLUGIN = WORKLETS_BABEL_PLUGIN;
 module.exports.ensureMetadataConfig = ensureMetadataConfig;
+module.exports.withNativeScriptAndroidGradle = withNativeScriptAndroidGradle;
 module.exports.normalizeMetadataOptions = normalizeMetadataOptions;
 module.exports.pkg = pkg;

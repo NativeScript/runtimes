@@ -1,0 +1,569 @@
+apply plugin: 'com.android.library'
+
+// can be: "V8", "JSC", "HERMES", "QUICKJS", "QUICKJS_NG", "PRIMJS".
+// QUICKJS is an alias for QUICKJS_NG; the bellard tree was dropped.
+// "SHERMES" is accepted as a compatibility alias for the Static Hermes build.
+
+def jsEngine = "V8"
+def hasEngine = project.hasProperty("engine")
+if (hasEngine) {
+    jsEngine = engine
+}
+def hasHostObjects = true //project.hasProperty("useHostObjects")
+
+// Which runtime to compile. These are two complete parallel implementations,
+// not a runtime plus a shim:
+//   napi - runtime/android/napi + ffi/jni/napi, a Node-API program throughout
+//   jsi  - runtime/android/jsi  + ffi/jni/jsi, written directly against
+//          nativescript::engine, with no Node-API anywhere
+// Both build on NativeScript/jsi/ (the engine:: backends).
+def bindingLayer = project.findProperty("bindingLayer") ?: "napi"
+if (!["napi", "jsi"].contains(bindingLayer)) {
+    throw new GradleException("bindingLayer must be 'napi' or 'jsi', got '${bindingLayer}'")
+}
+
+// Name generated bindings after what they contain rather than after the call
+// site that created them. Off here so the standalone runtime keeps its existing
+// names; on by default only where the bundler belongs to an embedder. The static
+// binding generator has to be told the same thing -- see -Pcontent-keyed-bindings
+// in app/build.gradle.
+def contentKeyedBindings = project.hasProperty("content-keyed-bindings")
+
+printf("Compiling NativeScript with %s (runtime: %s).\n", jsEngine, bindingLayer)
+
+// Version.h moved under the per-binding runtime tree when the jsi runtime was
+// added; each implementation carries its own.
+def runtimeVersionFile = new File(projectDir, "../../../../NativeScript/runtime/android/${bindingLayer}/version/Version.h")
+
+def optimized = project.hasProperty("optimized")
+if (optimized) {
+    println "Optimized build triggered."
+}
+
+def optimizedWithInspector = project.hasProperty("optimizedWithInspector")
+if (optimizedWithInspector) {
+    println "Optimized build with inspector triggered."
+}
+
+def onlyX86 = project.hasProperty("onlyX86")
+if (onlyX86) {
+    println "OnlyX86 build triggered."
+}
+
+// Every physical test device here is arm64, so the other three ABIs are built
+// and never installed. Opt-in, so CI still produces all four.
+def onlyArm64 = project.hasProperty("onlyArm64")
+if (onlyArm64) {
+    println "OnlyArm64 build triggered."
+}
+
+def useCCache = project.hasProperty("useCCache")
+if (useCCache) {
+    println "Use CCache build triggered."
+}
+
+// Bytecode stack-trace support. Defaults on (opt out with -PnsBytecodeDisabled).
+// Defines NS_BYTECODE_ENABLED so BuildStacktraceFrames accepts bytecode frames
+// (app-relative source names) and rebuilds their full runtime URL. Harmless when
+// the app ships plain JS — those frames always carry a "file://" URL already.
+def bytecodeStacktraces = !project.hasProperty("nsBytecodeDisabled")
+if (bytecodeStacktraces) {
+    println "Bytecode stack-trace frame support enabled."
+}
+
+// V8 14.9's internal headers (src/base/atomicops.h, src/base/memcopy.h) use
+// std::atomic_ref unconditionally. libc++ only ships it from LLVM 19, which
+// means NDK r29 -- r27 and r28 both fail to compile the inspector sources.
+// Upstream V8 never hits this because Chromium builds Android with its own
+// clang rather than the NDK's.
+def defaultNdkVersion = "29.0.14206865"
+
+def hasNdkVersion = project.hasProperty("ndkVersion")
+if (hasNdkVersion) {
+    println "Runtime using NDK version " + ndkVersion
+}
+
+def NDK_PATH = ""
+def hasNdkDirectory = project.hasProperty("ndkDirectory")
+if (!hasNdkDirectory) {
+    println "No ndkDirectory set, checking environment \$ANDROID_NDK..."
+
+    NDK_PATH = "$System.env.ANDROID_NDK"
+    if (NDK_PATH == null || NDK_PATH == "null") {
+        println "No ndkDirectory set, checking environment \$ANDROID_NDK_ROOT..."
+        NDK_PATH = "$System.env.ANDROID_NDK_ROOT"
+    }
+
+    if (NDK_PATH == null || NDK_PATH == "null") {
+        println "No ndkDirectory set, checking environment \$ANDROID_NDK_HOME..."
+        NDK_PATH = "$System.env.ANDROID_NDK_HOME"
+    }
+} else {
+    NDK_PATH = ndkDirectory
+}
+
+// if a ndkVersion is passed ensure we use it in NDK_PATH
+if (hasNdkVersion) {
+    NDK_PATH = "$System.env.ANDROID_HOME/ndk/${ndkVersion}"
+} else if (NDK_PATH == null || NDK_PATH == "null" || NDK_PATH == "") {
+   if (!hasNdkVersion) {
+        NDK_PATH = "$System.env.ANDROID_HOME/ndk/${defaultNdkVersion}"
+   } else {
+       NDK_PATH = "$System.env.ANDROID_HOME/ndk/${ndkVersion}"
+   }
+}
+
+// V8 14.9's internal headers use std::atomic_ref, which libc++ only ships from
+// LLVM 19 (NDK r29). r27/r28 fail deep inside src/base/atomicops.h with a wall
+// of template errors that says nothing about the real cause, and $ANDROID_NDK
+// in the environment silently outranks defaultNdkVersion -- so check here and
+// either pick a usable NDK or say plainly what is wrong.
+if (jsEngine.contains("V8")) {
+    def MIN_NDK_MAJOR_FOR_V8 = 29
+    def resolvedMajor = (NDK_PATH =~ /ndk\/(\d+)\./) ? ((NDK_PATH =~ /ndk\/(\d+)\./)[0][1] as int) : -1
+
+    if (resolvedMajor in 0..<MIN_NDK_MAJOR_FOR_V8) {
+        def ndkRoot = new File("$System.env.ANDROID_HOME/ndk")
+        def candidate = (ndkRoot.listFiles({ File f -> f.isDirectory() } as FileFilter) ?: [])
+                .findAll { (it.name =~ /^(\d+)\./) && ((it.name =~ /^(\d+)\./)[0][1] as int) >= MIN_NDK_MAJOR_FOR_V8 }
+                .min { it.name }
+
+        if (candidate != null) {
+            println "WARNING: NDK ${resolvedMajor} cannot build V8 14.9 (needs std::atomic_ref, " +
+                    "NDK r${MIN_NDK_MAJOR_FOR_V8}+). Using ${candidate.name} instead."
+            NDK_PATH = candidate.absolutePath
+        } else {
+            throw new GradleException(
+                "V8 requires NDK r${MIN_NDK_MAJOR_FOR_V8} or newer (std::atomic_ref in V8 14.9's " +
+                "headers); resolved NDK is r${resolvedMajor} at ${NDK_PATH}. Install r${MIN_NDK_MAJOR_FOR_V8}+ " +
+                "and pass -PndkVersion=<version>, or point \$ANDROID_NDK at it.")
+        }
+    }
+}
+
+println "Runtime using NDK_PATH: " + NDK_PATH
+
+base {
+    if (!optimized && !optimizedWithInspector) {
+        archivesName = "${base.archivesName.get()}-regular"
+    } else {
+        if (optimized) {
+            archivesName = "${base.archivesName.get()}-optimized"
+        } else if (optimizedWithInspector) {
+            archivesName = "${base.archivesName.get()}-optimized-with-inspector"
+        }
+    }
+}
+
+android {
+    namespace "com.tns.android_runtime"
+
+    compileSdk NS_DEFAULT_COMPILE_SDK_VERSION as int
+    buildToolsVersion = NS_DEFAULT_BUILD_TOOLS_VERSION as String
+
+    sourceSets {
+        main {
+            def defaultSrcPath = "src/main/java"
+            def bindingGeneratorSourcePath = new File(project(":runtime-binding-generator").projectDir, defaultSrcPath)
+
+            // embed runtime binding generator in runtime, while keeping it in a separate project
+            java.srcDirs = [bindingGeneratorSourcePath, defaultSrcPath]
+        }
+    }
+
+    ndkVersion = project.findProperty("ndkVersion") ?: defaultNdkVersion
+
+    defaultConfig {
+        minSdkVersion NS_DEFAULT_MIN_SDK_VERSION as int
+        targetSdkVersion NS_DEFAULT_COMPILE_SDK_VERSION as int
+
+        externalNativeBuild {
+            cmake {
+
+                if (optimized) {
+                    arguments.add("-DOPTIMIZED_BUILD=true")
+                }
+
+               if (optimizedWithInspector) {
+                   arguments.add("-DOPTIMIZED_WITH_INSPECTOR_BUILD=true")
+               }
+
+               if (useCCache) {
+                   arguments.add("-DUSE_CCACHE=true")
+               }
+
+               if (hasHostObjects) {
+                   arguments.add("-DUSE_HOST_OBJECTS=true")
+               }
+
+                arguments.add("-DNS_BINDING=${bindingLayer}")
+
+                if (contentKeyedBindings) {
+                    arguments.add("-DNS_CONTENT_KEYED_BINDINGS=1")
+                }
+
+                if (bytecodeStacktraces) {
+                    arguments.add("-DNS_BYTECODE=1")
+                }
+
+               if (jsEngine == "QUICKJS" || jsEngine == "QUICKJS_NG") {
+                    arguments.add("-DQUICKJS=1")
+                    // There is only one quickjs engine now: the NativeScript-patched
+                    // quickjs-ng vendored at vendor/quickjs/source_ng, which is the
+                    // same tree the Apple build uses. The bellard tree was dropped
+                    // (it never carried the NativeScript patches), so QUICKJS is
+                    // kept purely as an alias for QUICKJS_NG.
+                    arguments.add("-DQUICKJS_NG=1")
+                    // SHERMES is kept as an alias for the static-hermes (hermesvm)
+                    // engine, which is now the canonical HERMES engine.
+                } else if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+                    arguments.add("-DHERMES=1")
+                } else if (jsEngine == "PRIMJS") {
+                    arguments.add("-DPRIMJS=1")
+                }else if (jsEngine == "JSC") {
+                    arguments.add("-DJSC=1")
+                } else if (jsEngine.contains("V8")) {
+                    arguments.add("-DV8=1")
+                }
+
+//              arguments "-DANDROID_TOOLCHAIN=clang", "-DANDROID_STL=c++_static", "-DANDROID_NDK_ROOT=${NDK_PATH}"
+
+                if (jsEngine == "V8-13") {
+                    cppFlags "-std=c++20"
+                } else {
+                    cppFlags "-std=c++17"
+                }
+                arguments "-DANDROID_STL=c++_shared",
+                        "-DANDROID_NDK_ROOT=${NDK_PATH}",
+                        "-DCMAKE_ANDROID_NDK=${NDK_PATH}",
+                        "-DCMAKE_TOOLCHAIN_FILE=${NDK_PATH}/build/cmake/android.toolchain.cmake",
+                        "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+            }
+        }
+
+        ndk {
+            minSdkVersion NS_DEFAULT_MIN_SDK_VERSION as int
+            if (onlyX86) {
+                // The updated JSC only ships 64-bit libraries, so fall back to
+                // x86_64 when a single-ABI (emulator) build is requested.
+                abiFilters jsEngine == "JSC" ? 'x86_64' : 'x86'
+            } else if (onlyArm64) {
+                abiFilters 'arm64-v8a'
+            } else if (jsEngine == "JSC") {
+                // The newer JSC engine only provides arm64-v8a and x86_64
+                // prebuilts, so restrict the runtime to those two ABIs.
+                abiFilters 'x86_64', 'arm64-v8a'
+            } else {
+                abiFilters 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
+            }
+        }
+
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            // version "3.18.1"
+            path "CMakeLists.txt"
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    if (jsEngine.contains("V8")) {
+        packagingOptions {
+            exclude "**/libjsc.so"
+            exclude "**/libhermes.so"
+            exclude "**/libhermesvm.so"
+            exclude "**/libjsi.so"
+        }
+    } else if (jsEngine == "HERMES") {
+        packagingOptions {
+            exclude "**/libjsc.so"
+            exclude "**/libhermes.so"
+            pickFirst "**/libc++_shared.so"
+        }
+    } else if (jsEngine == "JSC") {
+        packagingOptions {
+            exclude "**/libv8android.so"
+            exclude "**/libhermes.so"
+            exclude "**/libhermesvm.so"
+            exclude "**/libjsi.so"
+        }
+    } else if (jsEngine == "QUICKJS" || jsEngine == "PRIMJS" || jsEngine == "QUICKJS_NG") {
+        packagingOptions {
+            exclude "**/libhermes.so"
+            exclude "**/libhermesvm.so"
+            exclude "**/libjsc.so"
+            exclude "**/libjsi.so"
+        }
+    }
+}
+
+//allprojects {
+//    gradle.projectsEvaluated {
+//        tasks.withType(JavaCompile).tap {
+//            configureEach {
+//                options.compilerArgs << "-Xlint:all" << "-Werror"
+//            }
+//        }
+//    }
+//}
+
+dependencies {
+    // println "\t ~ [DEBUG][runtime] build.gradle - ns_default_junit_version = ${ns_default_junit_version}..."
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    testImplementation "junit:junit:${ns_default_junit_version}"
+    testImplementation "org.mockito:mockito-core:${ns_default_mockito_core_version}"
+    if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+        implementation 'com.facebook.fbjni:fbjni:0.7.0'
+    }
+}
+
+
+tasks.configureEach { task ->
+    def taskName = task.getName()
+    //   println "\t ~ [DEBUG][runtime] build.gradle whenTaskAdded taskName = ${taskName}"
+    if (taskName.contains("preReleaseBuild")) {
+        setRuntimeCommit.dependsOn(setPackageVersion)
+        task.dependsOn(setRuntimeCommit)
+    }
+
+    if (taskName.contains("bundleReleaseAar")) {
+        task.dependsOn("testDebugUnitTest")
+    }
+
+    if (taskName.contains("Strip")) {
+        task.finalizedBy(revertVersionFile)
+    }
+    if ((taskName == "bundleDebug") || (taskName == "bundleRelease")) {
+        task.finalizedBy createPackageConfigFileTask(taskName)
+    }
+
+    if (task =~ /configureCMake.*/) {
+        task.finalizedBy(":app:buildMetadata")
+        if (jsEngine.startsWith("V8")) {
+            task.dependsOn('downloadV8Libs')
+        }
+        // Before configure, not before build: CMake records the prebuilt .so as
+        // the imported target's runtime file, and that is what AGP packages into
+        // the APK. A config generated while the libs are missing carries no
+        // runtime file, so a later build succeeds and the app dies at launch
+        // with "dlopen failed: library libhermesvm.so not found".
+        if (jsEngine == "HERMES" || jsEngine == "SHERMES") {
+            task.dependsOn('downloadHermesLibs')
+        }
+    }
+
+    if (task =~ /buildCMake.*/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("syncReleaseLibJars") || taskName.contains("syncDebugLibJars")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("mergeReleaseJniLibFolders") || taskName.contains("mergeDebugJniLibFolders")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("mergeReleaseShaders") || taskName.contains("mergeDebugShaders")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("packageReleaseAssets") || taskName.contains("packageDebugAssets")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("copyReleaseJniLibsProjectOnly") || taskName.contains("copyDebugJniLibsProjectOnly")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("copyReleaseJniLibsProjectAndLocalJars") || taskName.contains("copyDebugJniLibsProjectAndLocalJars")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("generateReleaseLintVitalModel") || taskName.contains("generateDebugLintVitalModel")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("lintVitalAnalyzeRelease") || taskName.contains("lintVitalAnalyzeDebug")) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /lintAnalyze.+AndroidTest/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /compile.+UnitTestJavaWithJavac/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /generate.+LintModel/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /process.+Manifest/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /merge.+Resources/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /verify.+Resources/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (task =~ /test.+UnitTest/) {
+        task.finalizedBy(":app:buildMetadata")
+    }
+
+    if (taskName.contains("bundleLibCompileToJar")) {
+        task.finalizedBy(":app:cleanupAllJars")
+    }
+}
+
+// The prebuilt V8 static libs are ~380 MB, so they are fetched on demand rather
+// than committed (see .gitignore). This mirrors what build_nativescript.sh does
+// for the Apple xcframework, and pulls from the same pinned release so both
+// platforms link the same V8 build.
+//
+def v8EngineLibDir = new File(projectDir, "src/main/libs/v8")
+
+tasks.register('downloadV8Libs', Exec) {
+    description = 'Fetch the prebuilt V8 static libs when they are not present.'
+    workingDir = new File(projectDir, "../../../..")
+    commandLine 'bash', 'scripts/download_v8.sh'
+    onlyIf {
+        // Missing entirely, or present but with no ABI subdirectory in it.
+        !v8EngineLibDir.isDirectory() ||
+            (v8EngineLibDir.listFiles({ File f -> f.isDirectory() } as FileFilter) ?: []).length == 0
+    }
+}
+
+// Hermes ships as prebuilt .so files rather than sources, from the same pinned
+// release the Apple xcframework comes from, and is gitignored like the V8 libs.
+//
+// The check is for the .so itself, not just the directory: a partial or
+// interrupted download leaves the tree in place, and "directory exists" would
+// then skip the fetch and fail in ninja with "missing and no known rule to make
+// it", which reads like a broken checkout rather than a missing download.
+def hermesEngineLibDir = new File(projectDir, "src/main/libs/hermes")
+
+tasks.register('downloadHermesLibs', Exec) {
+    description = 'Fetch the prebuilt Hermes libs when they are not present.'
+    workingDir = new File(projectDir, "../../../..")
+    commandLine 'bash', 'scripts/download_hermes.sh'
+    onlyIf {
+        def abis = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]
+        !["debug", "release"].every { variant ->
+            abis.every { abi ->
+                new File(hermesEngineLibDir, "${variant}/${abi}/libhermesvm.so").isFile()
+            }
+        }
+    }
+    doLast {
+        // Any CMake config generated before this fetch recorded no runtimeFiles
+        // for the prebuilts, and AGP would keep reusing it -- building green and
+        // shipping an APK that dlopen-fails at launch. Having had to download at
+        // all means every existing config predates the libraries.
+        delete new File(projectDir, ".cxx")
+    }
+}
+
+task 'setPackageVersion' {
+    onlyIf {
+        project.hasProperty('packageVersion')
+    }
+
+    doFirst {
+        println "Setting runtime version: '${packageVersion}'"
+
+        def versionFile = runtimeVersionFile
+        String contents = versionFile.getText("UTF-8")
+        contents = contents.replaceAll(/0.0.0.0/, packageVersion)
+        versionFile.write(contents, "UTF-8")
+    }
+}
+
+task 'setRuntimeCommit' {
+    onlyIf {
+        project.hasProperty('gitCommitVersion')
+    }
+
+    doFirst {
+        println "Setting runtime commit: '${gitCommitVersion}'"
+
+        def versionFile = runtimeVersionFile
+        String contents = versionFile.getText("UTF-8")
+        contents = contents.replaceAll(/RUNTIME_COMMIT_SHA_PLACEHOLDER/, gitCommitVersion)
+        versionFile.write(contents, "UTF-8")
+    }
+}
+
+task revertVersionFile(type: Exec) {
+    onlyIf {
+        project.hasProperty('packageVersion') || project.hasProperty('gitCommitVersion')
+    }
+
+    doFirst {
+        def isWinOs = System.properties['os.name'].toLowerCase().contains('windows')
+        def versionFilePath = runtimeVersionFile.getAbsolutePath()
+        println "Reverting Version.h file: ${versionFilePath}"
+
+        if (isWinOs) {
+            commandLine "cmd", "/c", "git", "checkout", "--", versionFilePath
+        } else {
+            commandLine "git", "checkout", "--", versionFilePath
+        }
+    }
+}
+repositories {
+    mavenCentral()
+}
+
+def createPackageConfigFileTask(taskName) {
+    def mode = (taskName == "bundleDebug") ? "debug" : "release"
+
+    return tasks.create(name: "packageConfigFileTaskFor${mode}",) {
+        def sdkDir = android.getSdkDirectory().getAbsolutePath()
+        doFirst {
+            def pathToAAR = "${buildDir}/outputs/aar/${project.archivesBaseName}-${mode}.aar"
+
+            if (new File(pathToAAR).exists()) {
+                def isWinOs = System.properties['os.name'].toLowerCase().contains('windows')
+
+                def aaptCommand = new File(sdkDir, "/build-tools/$project.ext._buildToolsVersion/aapt").getAbsolutePath()
+                if (isWinOs) {
+                    aaptCommand += ".exe"
+                }
+
+                def removeCmdParams = new ArrayList<String>([aaptCommand, "remove", pathToAAR, "config.json"])
+                exec {
+                    ignoreExitValue true
+                    workingDir "$projectDir/src/main"
+                    commandLine removeCmdParams.toArray()
+                }
+                def addCmdParams = new ArrayList<String>([aaptCommand, "add", pathToAAR, "config.json"])
+                exec {
+                    workingDir "$projectDir/src/main"
+                    commandLine addCmdParams.toArray()
+                }
+            }
+        }
+    }
+}
