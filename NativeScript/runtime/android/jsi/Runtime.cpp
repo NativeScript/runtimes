@@ -12,11 +12,10 @@
 // through libzip's zipconf.h, which this file included but never used.
 #include <cinttypes>
 #include "NativeScriptException.h"
-#include <sys/system_properties.h>
 #include "File.h"
 #include <android/log.h>
 #include "Version.h"
-#include "SIGHandler.h"
+#include "CrashBreadcrumbs.h"
 #include "ArgConverter.h"
 #include "NativeScriptAssert.h"
 #include "CallbackHandlers.h"
@@ -105,25 +104,7 @@ void Runtime::Init(JavaVM *vm) {
         NativeScriptException::Init();
     }
 
-    // handle SIGABRT/SIGSEGV only on API level > 20 as the handling is not so efficient in older versions
-    if (m_androidVersion > 20) {
-        struct sigaction action = {};
-        sigemptyset(&action.sa_mask);
-        action.sa_flags = 0;
-        action.sa_handler = SIGHandler;
-        sigaction(SIGABRT, &action, NULL);
-#ifndef __JSC__
-        // JavaScriptCore installs and relies on its OWN SIGSEGV handler for normal,
-        // non-fatal operation (concurrent GC / JIT). Overwriting it with a handler
-        // that unconditionally throws a C++ exception hijacks those legitimate
-        // faults and manufactures a crash — reliably reproduced under multithreaded
-        // JNI access (testConcurrentAccess). No active test relies on converting a
-        // SIGSEGV to a JS exception (the only such spec is disabled via xit), so on
-        // JSC we leave SIGSEGV to the engine. SIGABRT (which JSC does not use) is
-        // still converted. On every other engine both are converted as before.
-        sigaction(SIGSEGV, &action, NULL);
-#endif
-    }
+    CrashBreadcrumbs::Install();
 
     // Log uncaught native exceptions before aborting.
     std::set_terminate(LogAndAbortUncaught);
@@ -279,6 +260,9 @@ void Runtime::Attach(::facebook::jsi::Runtime &hostRuntime, const std::string &f
 // JNI interop callbacks.
 void Runtime::InitCommon(const std::string &filesRoot, const std::string &callingDir,
                          int maxLogcatObjectSize, bool forceLog, bool guest) {
+    CrashBreadcrumbs::OpenStore(filesRoot);
+    CrashBreadcrumbs::RegisterRuntime(m_id);
+
     // The napi runtime opens a process-lifetime handle scope here (global_scope)
     // so that napi_values created outside any explicit scope have somewhere to
     // live. There is no such thing to hold open: an owned engine::Value roots
@@ -503,19 +487,6 @@ void Runtime::InitCommon(const std::string &filesRoot, const std::string &callin
     DEBUG_WRITE("%s", "NativeScript Runtime Loaded!");
 }
 
-int Runtime::GetAndroidVersion() {
-    char sdkVersion[PROP_VALUE_MAX];
-    __system_property_get("ro.build.version.sdk", sdkVersion);
-
-    std::stringstream strValue;
-    strValue << sdkVersion;
-
-    unsigned int intValue;
-    strValue >> intValue;
-
-    return intValue;
-}
-
 ObjectManager *Runtime::GetObjectManager(engine::Runtime &rt) {
     return GetRuntime(rt)->GetObjectManager();
 }
@@ -567,6 +538,7 @@ std::string Runtime::ReadFileText(const std::string &filePath) {
 }
 
 void Runtime::DestroyRuntime() {
+    CrashBreadcrumbs::UnregisterRuntime(m_id);
     // Flush still-queued finalizer cleanup before is_destroying is set: with it
     // set, the cleanup leaks the engine handles it would release, and a quit
     // looper never drains it. Finalizers firing during teardown below run
@@ -926,7 +898,6 @@ jmethodID Runtime::GET_USED_MEMORY_METHOD_ID = nullptr;
 tns::ConcurrentMap<int, Runtime *> Runtime::id_to_runtime_cache;
 tns::ConcurrentMap<const void *, Runtime *> Runtime::rt_to_runtime_cache;
 bool Runtime::s_mainThreadInitialized = false;
-int Runtime::m_androidVersion = Runtime::GetAndroidVersion();
 ALooper *Runtime::m_mainLooper = nullptr;
 tns::ConcurrentMap<std::thread::id, Runtime *> Runtime::thread_id_to_rt_cache;
 

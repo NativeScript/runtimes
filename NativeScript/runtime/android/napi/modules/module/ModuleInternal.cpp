@@ -7,6 +7,7 @@
 #include "NativeScriptException.h"
 #include "Util.h"
 #include "CallbackHandlers.h"
+#include "CrashBreadcrumbs.h"
 #include "Runtime.h"
 #include <sstream>
 #include <mutex>
@@ -386,6 +387,7 @@ std::string ModuleInternal::EnsureFileProtocol(const std::string& path) {
 }
 
 napi_value ModuleInternal::LoadModule(napi_env env, const std::string& modulePath, const std::string& moduleCacheKey) {
+    CrashBreadcrumbs::ModuleScope moduleBreadcrumb(modulePath.c_str());
     napi_status status;
     napi_value result;
 
