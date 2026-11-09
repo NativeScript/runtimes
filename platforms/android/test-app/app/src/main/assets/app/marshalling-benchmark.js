@@ -103,6 +103,8 @@ function buildSuite() {
             var cb = new org.nativescript.BenchmarkCallback({ onString: function (value) {} });
             for (var i = 0; i < 1e4; i++) Benchmarks.invokeStringCallback(cb);
         } },
+        { name: "ArrayBuffer.from direct ByteBuffer", iterations: 1e5, action: function () { var b = Benchmarks.returnDirectBuffer(); for (var i = 0; i < 1e5; i++) ArrayBuffer.from(b); } },
+        { name: "ArrayBuffer.from heap ByteBuffer",   iterations: 1e5, action: function () { var b = Benchmarks.returnHeapBuffer();   for (var i = 0; i < 1e5; i++) ArrayBuffer.from(b); } },
         { name: "Invoke callback that throws", iterations: 5e4, action: function () {
             var cb = new org.nativescript.BenchmarkCallback({ onCallback: function () { throw new Error("benchmark"); } });
             Benchmarks.invokeThrowingCallback(cb, 5e4);
