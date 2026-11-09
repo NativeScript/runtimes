@@ -7,6 +7,8 @@
 #include "MetadataMethodInfo.h"
 #include "MetadataFieldInfo.h"
 
+class MetadataNode;
+
 namespace tns {
     enum class NodeType {
         Package,
@@ -49,6 +51,9 @@ namespace tns {
                 memberId = other.memberId;
                 clazz = other.clazz;
                 parsedSig = other.parsedSig;
+                returnClass = other.returnClass;
+                returnNode = other.returnNode;
+                returnClassResolved = other.returnClassResolved;
                 mi = other.mi;
                 fi = other.fi;
                 sfi = other.sfi;
@@ -91,6 +96,9 @@ namespace tns {
         void *memberId;
         jclass clazz;
         std::vector<std::string> parsedSig;
+        jclass returnClass = nullptr;
+        ::MetadataNode *returnNode = nullptr;
+        bool returnClassResolved = false;
 
         MethodInfo mi;
         FieldInfo *fi;

@@ -119,6 +119,27 @@ void CallbackHandlers::Init(napi_env env) {
     MethodCache::Init();
 }
 
+static MetadataNode *ResolveDeclaredReturnNode(JEnv &jEnv, MetadataEntry *entry, jobject result) {
+    if (entry == nullptr) return nullptr;
+    if (!entry->returnClassResolved) {
+        entry->returnClassResolved = true;
+        const auto &returnType = entry->getReturnType();
+        if (returnType.size() > 2 && returnType[0] == 'L') {
+            const std::string declaredName = returnType.substr(1, returnType.size() - 2);
+            jclass declaredClass = jEnv.FindClass(declaredName);
+            if (declaredClass != nullptr) {
+                entry->returnClass = declaredClass;
+                entry->returnNode = MetadataNode::GetOrCreate(declaredName);
+            } else {
+                jEnv.ExceptionClear();
+            }
+        }
+    }
+    if (entry->returnClass == nullptr) return nullptr;
+    JniLocalRef runtimeClass(jEnv.GetObjectClass(result));
+    return jEnv.isSameObject(runtimeClass, entry->returnClass) ? entry->returnNode : nullptr;
+}
+
 napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, const string &className,
                                  const string &methodName, MetadataEntry *entry,
                                  bool isFromInterface, bool isStatic, napi_callback_info info, size_t argc, napi_value* argv,
@@ -500,8 +521,10 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                     returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                     if (napi_util::is_null_or_undefined(env, returnValue)) {
-                        returnValue = objectManager->CreateJSWrapper(javaObjectID, *returnType,
-                                                                     result);
+                        MetadataNode *returnNode = ResolveDeclaredReturnNode(jEnv, entry, result);
+                        returnValue = returnNode != nullptr
+                                      ? objectManager->CreateJSWrapper(javaObjectID, returnNode, entry->returnClass)
+                                      : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
                     }
                 }
 
