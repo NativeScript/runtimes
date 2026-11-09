@@ -199,15 +199,7 @@ napi_value ObjectManager::GetOrCreateProxy(jint javaObjectID, napi_value instanc
 
 #endif
 
-    auto javaObjectIdFound = m_weakObjectIds.find(javaObjectID);
-    if (javaObjectIdFound != m_weakObjectIds.end()) {
-        m_weakObjectIds.erase(javaObjectID);
-        JEnv jenv;
-        jenv.CallVoidMethod(m_javaRuntimeObject,
-                            MAKE_INSTANCE_STRONG_METHOD_ID,
-                            javaObjectID);
-        DEBUG_WRITE("Making instance strong: %d", javaObjectID);
-    }
+    EnsureInstanceStrong(javaObjectID);
 
     m_idToProxy.emplace(javaObjectID, napi_util::make_ref(m_env, proxy, 0));
 
@@ -799,6 +791,15 @@ napi_value ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
 
     napi_value instance = napi_util::get_ref_value(m_env, it->second);
     if (napi_util::is_null_or_undefined(m_env, instance)) return nullptr;
+
+    auto proxyIt = m_idToProxy.find(javaObjectID);
+    if (proxyIt != m_idToProxy.end() && proxyIt->second != nullptr) {
+        napi_value proxy = napi_util::get_ref_value(m_env, proxyIt->second);
+        if (!napi_util::is_null_or_undefined(m_env, proxy)) return proxy;
+    }
+
+    MetadataNode *node = GetInstanceNode(instance);
+    if (node != nullptr && !node->isArray()) return instance;
     return GetOrCreateProxy(javaObjectID, instance);
 }
 
@@ -839,19 +840,31 @@ napi_value ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node,
     napi_value proxy = nullptr;
     napi_value jsWrapper = node->CreateJSWrapper(m_env, this);
     if (jsWrapper != nullptr) {
-        Link(jsWrapper, javaObjectID, clazz, node);
+        Link(jsWrapper, javaObjectID, clazz, node, /*strongRef*/ false);
+        EnsureInstanceStrong(javaObjectID);
         if (node->isArray()) {
             NAPI_GUARD(napi_set_named_property(m_env, jsWrapper, "__is__javaArray",
                                     napi_util::get_true(m_env))) {}
+            proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
+        } else {
+            proxy = jsWrapper;
         }
-        proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
     }
 
     return proxy;
 }
 
+void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
+    auto it = m_weakObjectIds.find(javaObjectID);
+    if (it == m_weakObjectIds.end()) return;
+    m_weakObjectIds.erase(it);
+    JEnv jenv;
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
+    DEBUG_WRITE("Making instance strong: %d", javaObjectID);
+}
+
 void ObjectManager::Link(napi_value object, uint32_t javaObjectID, jclass clazz,
-                         MetadataNode *node) {
+                         MetadataNode *node, bool strongRef) {
     if (!IsRuntimeJsObject(object)) {
         std::string errMsg("Trying to link invalid 'this' to a Java object");
         throw NativeScriptException(errMsg);
@@ -862,8 +875,14 @@ void ObjectManager::Link(napi_value object, uint32_t javaObjectID, jclass clazz,
     napi_status status;
     auto jsInstanceInfo = new JSInstanceInfo(javaObjectID, clazz);
     jsInstanceInfo->node = node;
+    jsInstanceInfo->weakWrapper = !strongRef;
 
-    napi_ref objectHandle = napi_util::make_ref(m_env, object, 1);
+    napi_ref objectHandle = napi_util::make_ref(m_env, object, strongRef ? 1 : 0);
+
+    if (!strongRef) {
+        int64_t externalMemory = 0;
+        js_adjust_external_memory(m_env, kWrapperExternalCost, &externalMemory);
+    }
 
     napi_value jsInfo;
     NAPI_GUARD(napi_create_external(m_env, jsInstanceInfo, JSObjectFinalizerCallback, jsInstanceInfo, &jsInfo)) {}
@@ -873,7 +892,13 @@ void ObjectManager::Link(napi_value object, uint32_t javaObjectID, jclass clazz,
     NAPI_GUARD(napi_wrap(m_env, object, jsInstanceInfo, [](napi_env env, void *data, void *hint) {}, jsInstanceInfo,
               nullptr)) {}
 
-    m_idToObject.emplace(javaObjectID, objectHandle);
+    auto existing = m_idToObject.find(javaObjectID);
+    if (existing != m_idToObject.end()) {
+        NAPI_GUARD(napi_delete_reference(m_env, existing->second)) {}
+        existing->second = objectHandle;
+    } else {
+        m_idToObject.emplace(javaObjectID, objectHandle);
+    }
 }
 
 bool ObjectManager::CloneLink(napi_value src, napi_value dest) {
@@ -922,6 +947,38 @@ ObjectManager::JSObjectFinalizerCallback(napi_env env, void *finalizeData, void 
     #endif
 
     DEBUG_WRITE("JS Object finalizer called for object id: %d", data->JavaObjectID);
+    Runtime::PostFinalizer(env, JSObjectPostFinalizerCallback, data, nullptr);
+}
+
+void ObjectManager::JSObjectPostFinalizerCallback(napi_env env, void *finalizeData, void *) {
+    napi_status status;
+    auto data = reinterpret_cast<JSInstanceInfo *>(finalizeData);
+    if (data == nullptr) return;
+
+    auto rt = Runtime::GetRuntimeUnchecked(env);
+    if (data->weakWrapper && rt && !rt->is_destroying) {
+        int64_t externalMemory = 0;
+        js_adjust_external_memory(env, -kWrapperExternalCost, &externalMemory);
+
+        auto objManager = rt->GetObjectManager();
+        auto it = objManager->m_idToObject.find(data->JavaObjectID);
+        bool replaced = false;
+        if (it != objManager->m_idToObject.end()) {
+            napi_value current = napi_util::get_ref_value(env, it->second);
+            replaced = !napi_util::is_null_or_undefined(env, current);
+            if (!replaced) {
+                NAPI_GUARD(napi_delete_reference(env, it->second)) {}
+                objManager->m_idToObject.erase(it);
+            }
+        }
+        if (!replaced && objManager->m_weakObjectIds.find(data->JavaObjectID) ==
+                         objManager->m_weakObjectIds.end()) {
+            objManager->m_weakObjectIds.emplace(data->JavaObjectID);
+            JEnv jEnv;
+            jEnv.CallVoidMethod(objManager->m_javaRuntimeObject,
+                                objManager->MAKE_INSTANCE_WEAK_METHOD_ID, data->JavaObjectID);
+        }
+    }
     delete data;
 }
 

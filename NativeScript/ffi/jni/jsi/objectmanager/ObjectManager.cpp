@@ -6,6 +6,7 @@
 #include "NativeScriptException.h"
 #include "Runtime.h"
 #include "CallbackHandlers.h"
+#include "EngineHost.h"
 #include <algorithm>
 #include <sstream>
 
@@ -60,6 +61,9 @@ ObjectManager::ObjectManager(jobject javaRuntimeObject) :
 
 void ObjectManager::Init(JsRuntime &rt) {
     m_rt = &rt;
+    m_ownerToken = std::make_shared<OwnerToken>();
+    m_ownerToken->manager = this;
+    m_ownerToken->runtime = &rt;
 
     JsFunction jsObjectCtor = JsFunction::createFromHostConstructor(
             rt, JsPropNameID::forAscii(rt, "JSObject"), 0,
@@ -84,6 +88,10 @@ void ObjectManager::OnDisposeRuntime() {
     m_idToProxy.clear();
     m_idToObject.clear();
     m_jsObjectCtor = JsFunction();
+    if (m_ownerToken != nullptr) {
+        m_ownerToken->manager = nullptr;
+        m_ownerToken->runtime = nullptr;
+    }
 
     // Its destructor leaves the weak global refs alive, and the process-wide
     // weak reference table is finite.
@@ -141,15 +149,7 @@ JsValue ObjectManager::GetOrCreateProxy(jint javaObjectID, const JsValue &instan
     }
     JsValue proxy = CreateHostObjectProxy(instance, info, /*isPrimary=*/true);
 
-    auto javaObjectIdFound = m_weakObjectIds.find(javaObjectID);
-    if (javaObjectIdFound != m_weakObjectIds.end()) {
-        m_weakObjectIds.erase(javaObjectID);
-        JEnv jenv;
-        jenv.CallVoidMethod(m_javaRuntimeObject,
-                            MAKE_INSTANCE_STRONG_METHOD_ID,
-                            javaObjectID);
-        DEBUG_WRITE("Making instance strong: %d", javaObjectID);
-    }
+    EnsureInstanceStrong(javaObjectID);
 
     m_idToProxy.emplace(javaObjectID, engine::WeakObject(*m_rt, proxy));
 
@@ -608,9 +608,24 @@ JsValue ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
         return js_util::undefined();
     }
 
-    JsValue instance = it->second;
+    JsValue instance = LockWrapper(it->second);
     if (js_util::is_null_or_undefined(instance)) return js_util::undefined();
+
+    auto proxyIt = m_idToProxy.find(javaObjectID);
+    if (proxyIt != m_idToProxy.end() && !proxyIt->second.empty()) {
+        JsValue proxy = proxyIt->second.lock(*m_rt);
+        if (!js_util::is_null_or_undefined(proxy)) return proxy;
+    }
+
+    MetadataNode *node = GetInstanceNode(instance);
+    if (node != nullptr && !node->isArray()) return instance;
     return GetOrCreateProxy(javaObjectID, instance);
+}
+
+JsValue ObjectManager::LockWrapper(const WrapperHandle &handle) {
+    if (handle.isStrong) return JsValue(*m_rt, handle.strong);
+    if (handle.weak.empty()) return js_util::undefined();
+    return handle.weak.lock(*m_rt);
 }
 
 
@@ -648,18 +663,30 @@ JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node, jc
     JsValue proxy = js_util::undefined();
     JsValue jsWrapper = node->CreateJSWrapper(*m_rt, this);
     if (jsWrapper.isObject()) {
-        Link(jsWrapper, javaObjectID, clazz, node);
+        Link(jsWrapper, javaObjectID, clazz, node, /*strongRef*/ false);
+        EnsureInstanceStrong(javaObjectID);
         if (node->isArray()) {
             jsWrapper.asObject(*m_rt).setProperty(*m_rt, "__is__javaArray", true);
+            proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
+        } else {
+            proxy = jsWrapper;
         }
-        proxy = GetOrCreateProxy(javaObjectID, jsWrapper);
     }
 
     return proxy;
 }
 
+void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
+    auto it = m_weakObjectIds.find(javaObjectID);
+    if (it == m_weakObjectIds.end()) return;
+    m_weakObjectIds.erase(it);
+    JEnv jenv;
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
+    DEBUG_WRITE("Making instance strong: %d", javaObjectID);
+}
+
 void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass clazz,
-                         MetadataNode *node) {
+                         MetadataNode *node, bool strongRef) {
     if (!IsRuntimeJsObject(object)) {
         std::string errMsg("Trying to link invalid 'this' to a Java object");
         throw NativeScriptException(errMsg);
@@ -669,12 +696,57 @@ void ObjectManager::Link(const JsValue &object, uint32_t javaObjectID, jclass cl
 
     auto jsInstanceInfo = std::make_shared<JSInstanceInfo>(javaObjectID, clazz);
     jsInstanceInfo->node = node;
+    if (!strongRef) {
+        jsInstanceInfo->owner = m_ownerToken;
+        auto rtOwner = Runtime::GetRuntimeUnchecked(*m_rt);
+        if (rtOwner != nullptr) rtOwner->GetEngineHost()->AdjustExternalMemory(kWrapperExternalCost);
+    }
 
     // One slot, one owner: the native state both carries the record and keeps it
     // alive, replacing the napi tree's external-plus-wrap pair.
     object.asObjectBorrowed(*m_rt).setNativeState<JSInstanceInfo>(*m_rt, jsInstanceInfo);
 
-    m_idToObject.emplace(javaObjectID, JsValue(*m_rt, object));
+    WrapperHandle handle;
+    if (strongRef) {
+        handle.strong = JsValue(*m_rt, object);
+        handle.isStrong = true;
+    } else {
+        handle.weak = engine::WeakObject(*m_rt, object);
+    }
+    m_idToObject[javaObjectID] = std::move(handle);
+}
+
+ObjectManager::JSInstanceInfo::~JSInstanceInfo() {
+    if (owner == nullptr || owner->manager == nullptr || owner->runtime == nullptr) return;
+    auto *pending = new int(static_cast<int>(JavaObjectID));
+    Runtime::PostFinalizer(*owner->runtime, WrapperPostFinalizer, pending, owner->manager);
+}
+
+void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) {
+    auto *pending = reinterpret_cast<int *>(data);
+    if (pending == nullptr) return;
+    int javaObjectID = *pending;
+    delete pending;
+
+    auto rtOwner = Runtime::GetRuntimeUnchecked(rt);
+    if (rtOwner == nullptr || rtOwner->is_destroying) return;
+    auto objManager = reinterpret_cast<ObjectManager *>(hint);
+    if (objManager == nullptr || objManager != rtOwner->GetObjectManager()) return;
+
+    rtOwner->GetEngineHost()->AdjustExternalMemory(-kWrapperExternalCost);
+
+    auto it = objManager->m_idToObject.find(javaObjectID);
+    if (it != objManager->m_idToObject.end() &&
+        !js_util::is_null_or_undefined(objManager->LockWrapper(it->second))) {
+        return;
+    }
+    if (objManager->m_weakObjectIds.find(javaObjectID) == objManager->m_weakObjectIds.end()) {
+        objManager->m_weakObjectIds.emplace(javaObjectID);
+        JEnv jEnv;
+        jEnv.CallVoidMethod(objManager->m_javaRuntimeObject, objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
+                            javaObjectID);
+    }
+    if (it != objManager->m_idToObject.end()) objManager->m_idToObject.erase(it);
 }
 
 bool ObjectManager::CloneLink(const JsValue &src, const JsValue &dest) {

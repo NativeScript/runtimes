@@ -53,7 +53,9 @@ namespace tns {
         JsValue GetOrCreateProxyWeak(jint javaObjectID, const JsValue &instance);
 
         void Link(const JsValue &object, uint32_t javaObjectID, jclass clazz,
-                  MetadataNode *node = nullptr);
+                  MetadataNode *node = nullptr, bool strongRef = true);
+
+        static constexpr int64_t kWrapperExternalCost = 1024;
 
         // Returns the class metadata stored on the per-instance JSInstanceInfo
         // (host proxy's, or the raw instance's native state). Used by
@@ -99,13 +101,26 @@ namespace tns {
         // It derives from engine::HostObject because that is what the native
         // state slot stores; it overrides none of the traps and is never exposed
         // to JS as an object of its own.
+        // Lets a weakly held wrapper's native state reach its manager. The engine
+        // destroys native state on its own schedule, possibly after the manager is
+        // gone, so OnDisposeRuntime clears the token.
+        struct OwnerToken {
+            ObjectManager *manager = nullptr;
+            JsRuntime *runtime = nullptr;
+        };
+
         struct JSInstanceInfo : public engine::HostObject {
         public:
             JSInstanceInfo(uint32_t javaObjectID, jclass claz)
                     : JavaObjectID(javaObjectID), ObjectClazz(claz) {
             }
 
+            // For a weakly held wrapper this runs when the engine collects it, and
+            // queues the release of the Java side.
+            ~JSInstanceInfo() override;
+
             uint32_t JavaObjectID;
+            std::shared_ptr<OwnerToken> owner;
             jclass ObjectClazz;
             // Cached super-call flag (-1 = unresolved, 0 = false, 1 = true).
             int8_t isSuper = -1;
@@ -199,6 +214,10 @@ namespace tns {
 
         JsValue CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz);
 
+        void EnsureInstanceStrong(int javaObjectID);
+
+        static void WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint);
+
         jweak GetJavaObjectByID(uint32_t javaObjectID);
 
         jobject GetJavaObjectByIDImpl(uint32_t javaObjectID);
@@ -216,7 +235,17 @@ namespace tns {
         // The napi tree stored a weak napi_ref for proxies and a strong one for
         // instances; those map onto engine::WeakObject and an owned Value.
         robin_hood::unordered_map<int, engine::WeakObject> m_idToProxy;
-        robin_hood::unordered_map<int, JsValue> m_idToObject;
+        // Strong for JS-constructed instances, weak for wrappers of Java-returned objects.
+        struct WrapperHandle {
+            JsValue strong;
+            engine::WeakObject weak;
+            bool isStrong = false;
+        };
+
+        JsValue LockWrapper(const WrapperHandle &handle);
+
+        robin_hood::unordered_map<int, WrapperHandle> m_idToObject;
+        std::shared_ptr<OwnerToken> m_ownerToken;
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;
 
