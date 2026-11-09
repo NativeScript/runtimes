@@ -583,3 +583,38 @@ napi_status js_get_runtime_version(napi_env env, napi_value* version) {
 
   return napi_ok;
 }
+
+napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, uint32_t capacity,
+                                 uint32_t* length) {
+  v8::Local<v8::Value> value = v8impl::V8LocalValueFromJsValue(array);
+  if (!value->IsArray()) return napi_array_expected;
+  v8::Local<v8::Array> jsArray = value.As<v8::Array>();
+  uint32_t count = jsArray->Length();
+  if (count > capacity) count = capacity;
+
+  struct State {
+    double* out;
+    uint32_t count;
+    uint32_t written;
+    bool numbersOnly;
+  } state{out, count, 0, true};
+
+  v8::Maybe<void> result = jsArray->Iterate(
+      env->context(),
+      [](uint32_t index, v8::Local<v8::Value> element, void* data) {
+        auto* s = static_cast<State*>(data);
+        if (index >= s->count) return v8::Array::CallbackResult::kBreak;
+        if (!element->IsNumber()) {
+          s->numbersOnly = false;
+          return v8::Array::CallbackResult::kBreak;
+        }
+        s->out[index] = element.As<v8::Number>()->Value();
+        s->written++;
+        return v8::Array::CallbackResult::kContinue;
+      },
+      &state);
+  if (result.IsNothing()) return napi_generic_failure;
+  if (!state.numbersOnly || state.written != count) return napi_number_expected;
+  *length = count;
+  return napi_ok;
+}

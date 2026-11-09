@@ -1,4 +1,5 @@
 #include "JsArgConverter.h"
+#include "jsr_common.h"
 #include "ObjectManager.h"
 #include "JniSignatureParser.h"
 #include "JsArgToArrayConverter.h"
@@ -616,7 +617,15 @@ bool JsArgConverter::ConvertJavaScriptArray(napi_env env, napi_value jsArr, int 
         case 'I': {
             arr = jenv.NewIntArray(arrLength);
             std::vector<jint> ints(arrLength);
-            for (uint32_t i = 0; i < arrLength; i++) {
+            std::vector<double> numbers(arrLength);
+            uint32_t copied = 0;
+            bool bulk = js_get_array_doubles(env, jsArr, numbers.data(), arrLength, &copied) == napi_ok &&
+                        copied == arrLength;
+            for (uint32_t i = 0; bulk && i < arrLength; i++) {
+                bulk = numbers[i] >= INT32_MIN && numbers[i] <= INT32_MAX;
+                ints[i] = (jint) numbers[i];
+            }
+            for (uint32_t i = 0; !bulk && i < arrLength; i++) {
                 napi_value element;
                 NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
                 int32_t intValue;
@@ -655,7 +664,10 @@ bool JsArgConverter::ConvertJavaScriptArray(napi_env env, napi_value jsArr, int 
         case 'D': {
             arr = jenv.NewDoubleArray(arrLength);
             std::vector<jdouble> doubles(arrLength);
-            for (uint32_t i = 0; i < arrLength; i++) {
+            uint32_t copied = 0;
+            bool bulk = js_get_array_doubles(env, jsArr, doubles.data(), arrLength, &copied) == napi_ok &&
+                        copied == arrLength;
+            for (uint32_t i = 0; !bulk && i < arrLength; i++) {
                 napi_value element;
                 NAPI_GUARD(napi_get_element(env, jsArr, i, &element)) {}
                 double doubleValue;
