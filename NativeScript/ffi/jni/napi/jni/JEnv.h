@@ -8,9 +8,9 @@
 namespace tns {
     class JEnv {
     public:
-        JEnv();
+        JEnv() : m_env(s_threadEnv != nullptr ? s_threadEnv : GetEnvSlow()) {}
 
-        JEnv(JNIEnv *jniEnv);
+        JEnv(JNIEnv *jniEnv) : m_env(jniEnv != nullptr ? jniEnv : JEnv().m_env) {}
 
         // Wrap an already-obtained JNIEnv* WITHOUT re-querying the JavaVM
         // (no GetEnv). Use only when the pointer is known to belong to the
@@ -18,7 +18,7 @@ namespace tns {
         enum class Adopt { Trusted };
         JEnv(JNIEnv *jniEnv, Adopt) : m_env(jniEnv) {}
 
-        ~JEnv();
+        ~JEnv() = default;
 
         operator JNIEnv *() const;
 
@@ -447,10 +447,42 @@ namespace tns {
 
         static void Init(JavaVM *jvm);
 
+        static void PinThreadEnv(JNIEnv *env);
+
+        static void UnpinThreadEnv();
+
+        class EntryScope {
+        public:
+            explicit EntryScope(JNIEnv *env) : m_active(!s_threadEnvPinned), m_previous(s_threadEnv) {
+                if (m_active) {
+                    s_threadEnv = env;
+                }
+            }
+
+            ~EntryScope() {
+                if (m_active && !s_threadEnvPinned) {
+                    s_threadEnv = m_previous;
+                }
+            }
+
+            EntryScope(const EntryScope &) = delete;
+
+            EntryScope &operator=(const EntryScope &) = delete;
+
+        private:
+            bool m_active;
+            JNIEnv *m_previous;
+        };
+
     private:
+        static JNIEnv *GetEnvSlow();
+
         void CheckForJavaException();
 
         JNIEnv *m_env;
+
+        static thread_local JNIEnv *s_threadEnv;
+        static thread_local bool s_threadEnvPinned;
 
         static JavaVM *s_jvm;
 
