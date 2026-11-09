@@ -1,4 +1,5 @@
 #include "JsArgToArrayConverter.h"
+#include "Coercion.h"
 #include <sstream>
 #include "ObjectManager.h"
 #include "ArgConverter.h"
@@ -218,7 +219,7 @@ bool JsArgToArrayConverter::ConvertArg(napi_env env, napi_value arg, int index) 
                         longValue = atoll(strValue.c_str());
                     } else {
                         int64_t longArg;
-                        NAPI_GUARD(napi_get_value_int64(env, castValue, &longArg)) {
+                        NAPI_GUARD(coerce::GetInt64(env, castValue, &longArg)) {
                             return false;
                         }
                         longValue = (jlong) longArg;
@@ -234,7 +235,7 @@ bool JsArgToArrayConverter::ConvertArg(napi_env env, napi_value arg, int index) 
                 floatValue = 0;
                 if (castValue != nullptr) {
                     double floatArg;
-                    NAPI_GUARD(napi_get_value_double(env, castValue, &floatArg)) {
+                    NAPI_GUARD(coerce::GetDouble(env, castValue, &floatArg)) {
                         return false;
                     }
                     floatValue = (jfloat) floatArg;
@@ -249,7 +250,7 @@ bool JsArgToArrayConverter::ConvertArg(napi_env env, napi_value arg, int index) 
                 doubleValue = 0;
                 if (castValue != nullptr) {
                     double doubleArg;
-                    NAPI_GUARD(napi_get_value_double(env, castValue, &doubleArg)) {
+                    NAPI_GUARD(coerce::GetDouble(env, castValue, &doubleArg)) {
                         return false;
                     }
                     doubleValue = (jdouble) doubleArg;
