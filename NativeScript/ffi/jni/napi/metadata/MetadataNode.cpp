@@ -149,9 +149,10 @@ napi_value MetadataNode::CreateJSWrapper(napi_env env, ObjectManager *objectMana
     if (m_isArray) {
         obj = CreateArrayWrapper(env);
     } else {
-        obj = objectManager->GetEmptyObject();
+        NAPI_GUARD(napi_create_object(env, &obj)) {
+            return nullptr;
+        }
         napi_value ctorFunc = GetConstructorFunction(env);
-        NAPI_GUARD(napi_set_named_property(env, obj, CONSTRUCTOR, ctorFunc)) {}
         napi_util::setPrototypeOf(env, obj, napi_util::get_prototype(env, ctorFunc));
         SetInstanceMetadata(env, obj, this);
     }
