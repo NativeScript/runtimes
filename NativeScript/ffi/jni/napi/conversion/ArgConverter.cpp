@@ -241,14 +241,12 @@ void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, const JavaCallArgs &arg
                 break;
             }
             case Type::JsObject: {
-                auto javaObjectID = static_cast<jint>(bits);
+                auto javaObjectID = ObjectManager::IdOf(bits);
                 jsArg = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (napi_util::is_null_or_undefined(env, jsArg)) {
-                    JniLocalRef argJavaClassPath(jni->GetObjectArrayElement(args.refs, i));
-                    string argClassName = jstringToString(ObjectToString(argJavaClassPath));
-                    argClassName = Util::ConvertFromCanonicalToJniName(argClassName);
-                    jsArg = objectManager->CreateJSWrapper(javaObjectID, argClassName);
+                    JniLocalRef arg(jni->GetObjectArrayElement(args.refs, i));
+                    jsArg = objectManager->CreateJSWrapper(javaObjectID, ObjectManager::ClassIndexOf(bits), arg);
                 }
                 break;
             }

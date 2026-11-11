@@ -39,6 +39,11 @@ ObjectManager::ObjectManager(jobject javaRuntimeObject) :
                                                              "(Ljava/lang/Object;)I");
     assert(GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID != nullptr);
 
+    GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID = env.GetMethodID(runtimeClass,
+                                                                       "getOrCreateJavaObjectIDAndClass",
+                                                                       "(Ljava/lang/Object;)J");
+    assert(GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID != nullptr);
+
     MAKE_INSTANCES_WEAK_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstancesWeak",
                                                     "([II)V");
     assert(MAKE_INSTANCES_WEAK_METHOD_ID != nullptr);
@@ -92,6 +97,13 @@ void ObjectManager::OnDisposeEnv() {
     // Its destructor leaves the weak global refs alive, and the process-wide
     // weak reference table is finite.
     m_cache.clear();
+
+    for (auto &info: m_classInfos) {
+        if (info.clazz != nullptr) {
+            jEnv.DeleteGlobalRef(info.clazz);
+        }
+    }
+    m_classInfos.clear();
 }
 
 napi_value ObjectManager::GetOrCreateProxyWeak(jint javaObjectID, napi_value instance) {
@@ -770,6 +782,35 @@ int ObjectManager::GetOrCreateObjectId(jobject object) {
     return javaObjectID;
 }
 
+jlong ObjectManager::GetOrCreateObjectIdAndClass(jobject object) {
+    JEnv env;
+    return env.CallLongMethod(m_javaRuntimeObject, GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID,
+                              object);
+}
+
+napi_value ObjectManager::GetOrCreateJSWrapper(jobject object) {
+    jlong packed = GetOrCreateObjectIdAndClass(object);
+    napi_value wrapper = GetJsObjectByJavaObject(IdOf(packed));
+    if (!napi_util::is_null_or_undefined(m_env, wrapper)) {
+        return wrapper;
+    }
+    return CreateJSWrapper(IdOf(packed), ClassIndexOf(packed), object);
+}
+
+ObjectManager::ClassInfo ObjectManager::ResolveClassInfo(jint classIndex, jobject instance) {
+    if (static_cast<size_t>(classIndex) >= m_classInfos.size()) {
+        m_classInfos.resize(classIndex + 1);
+    }
+    ClassInfo &info = m_classInfos[classIndex];
+    if (info.node == nullptr) {
+        JEnv env;
+        JniLocalRef clazz(env.GetObjectClass(instance));
+        info.node = MetadataNode::GetOrCreate(GetClassName((jclass) clazz));
+        info.clazz = (jclass) env.NewGlobalRef(clazz);
+    }
+    return info;
+}
+
 napi_value ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
     auto it = m_idToObject.find(javaObjectID);
     if (it == m_idToObject.end()) {
@@ -802,6 +843,14 @@ ObjectManager::CreateJSWrapper(jint javaObjectID, const std::string &typeName, j
     JniLocalRef clazz(jenv.GetObjectClass(instance));
 
     return CreateJSWrapperHelper(javaObjectID, typeName, clazz);
+}
+
+napi_value ObjectManager::CreateJSWrapper(jint javaObjectID, jint classIndex, jobject instance) {
+    if (classIndex <= 0) {
+        return CreateJSWrapper(javaObjectID, std::string(), instance);
+    }
+    ClassInfo info = ResolveClassInfo(classIndex, instance);
+    return CreateJSWrapper(javaObjectID, info.node, info.clazz);
 }
 
 napi_value

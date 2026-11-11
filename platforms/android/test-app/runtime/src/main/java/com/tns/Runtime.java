@@ -158,14 +158,6 @@ public class Runtime {
 
     private Map<Class<?>, JavaScriptImplementation> loadedJavaScriptExtends = new HashMap<Class<?>, JavaScriptImplementation>();
 
-    // Classes already registered via classStorageService.storeClass, so repeated
-    // object registrations of the same class (e.g. thousands of java.util.Date
-    // instances) skip the redundant getClass().getName() string + cache/classloader
-    // puts. Class uses identity equals/hashCode, so a plain concurrent set is
-    // correct and thread-safe.
-    private final java.util.Set<Class<?>> storedClasses =
-            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Class<?>, Boolean>());
-
     private final java.lang.Runtime dalvikRuntime = java.lang.Runtime.getRuntime();
 
     private int currentObjectId = -1;
@@ -230,6 +222,30 @@ public class Runtime {
     public static boolean nativeLibraryLoaded;
 
     private static final ClassStorageService classStorageService = new ClassStorageServiceImpl(ClassCacheImpl.INSTANCE, ClassLoadersCollectionImpl.INSTANCE);
+
+    private static final ConcurrentHashMap<Class<?>, Integer> classIndices = new ConcurrentHashMap<>();
+    private static int nextClassIndex = 1;
+
+    static int classIndexOf(Class<?> clazz) {
+        Integer index = classIndices.get(clazz);
+        return index != null ? index : registerClass(clazz);
+    }
+
+    private static int registerClass(Class<?> clazz) {
+        synchronized (classIndices) {
+            Integer index = classIndices.get(clazz);
+            if (index == null) {
+                classStorageService.storeClass(clazz.getName(), clazz);
+                index = nextClassIndex++;
+                classIndices.put(clazz, index);
+            }
+            return index;
+        }
+    }
+
+    static long packIdAndClass(int objectId, Object obj) {
+        return ((long) classIndexOf(obj.getClass()) << 32) | (objectId & 0xFFFFFFFFL);
+    }
 
     public Runtime(ClassResolver classResolver, GcListener gcListener, StaticConfiguration config, DynamicConfiguration dynamicConfig, int runtimeId, int workerId, ObjectTable objectTable) {
         this.classResolver = classResolver;
@@ -983,13 +999,7 @@ public class Runtime {
 
         objectTable.putStrong(objectId, instance);
 
-        Class<?> clazz = instance.getClass();
-        // Only resolve the name + store the class the first time we see it; the
-        // storage is keyed by class name and the classloader set is idempotent, so
-        // repeated registrations of the same class are pure overhead.
-        if (storedClasses.add(clazz)) {
-            classStorageService.storeClass(clazz.getName(), clazz);
-        }
+        classIndexOf(instance.getClass());
 
         if (logger != null && logger.isEnabled()) {
             logger.write("MakeInstanceStrong (" + objectId + ", " + instance.getClass().toString() + ")");
@@ -1036,6 +1046,11 @@ public class Runtime {
     private Integer getJavaObjectID(Object obj) {
         int id = objectTable.findId(obj);
         return id == ObjectTable.NO_ID ? null : id;
+    }
+
+    @RuntimeCallable
+    private long getOrCreateJavaObjectIDAndClass(Object obj) {
+        return packIdAndClass(getOrCreateJavaObjectID(obj), obj);
     }
 
     @RuntimeCallable
@@ -1155,10 +1170,10 @@ public class Runtime {
         Object[] refs;
     }
 
-    // Packages args as one long[]: count raw values (the bits of a primitive, an object's id),
-    // then one type id per byte, eight to a slot. A reference is kept only for strings (the
-    // string) and objects (the canonical class name). A javaObject with no javaObjectID,
-    // meaning javascript has no object for it yet, is assigned one.
+    // Packages args as one long[]: count raw values (the bits of a primitive, an object's id
+    // and class index), then one type id per byte, eight to a slot. A reference is kept only
+    // for strings and objects. A javaObject with no javaObjectID, meaning javascript has no
+    // object for it yet, is assigned one.
     private PackagedArgs packageArgs(Object... args) {
         PackagedArgs packaged = new PackagedArgs();
         if (args == null || args.length == 0) {
@@ -1194,8 +1209,8 @@ public class Runtime {
                 if (packaged.refs == null) {
                     packaged.refs = new Object[len];
                 }
-                packaged.refs[i] = value.getClass().getName();
-                values[i] = getOrCreateJavaObjectID(value);
+                packaged.refs[i] = value;
+                values[i] = packIdAndClass(getOrCreateJavaObjectID(value), value);
             }
         }
 

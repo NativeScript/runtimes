@@ -520,14 +520,15 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
                 if (isString) {
                     returnValue = ArgConverter::jstringToJsString(env, (jstring) result);
                 } else {
-                    jint javaObjectID = objectManager->GetOrCreateObjectId(result);
+                    jlong packed = objectManager->GetOrCreateObjectIdAndClass(result);
+                    jint javaObjectID = ObjectManager::IdOf(packed);
                     returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                     if (napi_util::is_null_or_undefined(env, returnValue)) {
                         MetadataNode *returnNode = ResolveDeclaredReturnNode(jEnv, entry, result);
                         returnValue = returnNode != nullptr
                                       ? objectManager->CreateJSWrapper(javaObjectID, returnNode, entry->returnClass)
-                                      : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
+                                      : objectManager->CreateJSWrapper(javaObjectID, ObjectManager::ClassIndexOf(packed), result);
                     }
                 }
 
@@ -1290,12 +1291,7 @@ napi_value CallbackHandlers::FindClass(napi_env env, const char *name) {
         auto runtime = Runtime::GetRuntime(env);
         auto objectManager = runtime->GetObjectManager();
 
-        jint javaObjectID = objectManager->GetOrCreateObjectId(javaClass);
-        clazz = objectManager->GetJsObjectByJavaObject(javaObjectID);
-
-        if (clazz == nullptr) {
-            clazz = objectManager->CreateJSWrapper(javaObjectID, "Ljava/lang/Class;", javaClass);
-        }
+        clazz = objectManager->GetOrCreateJSWrapper(javaClass);
     }
     return clazz;
 }

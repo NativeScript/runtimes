@@ -516,14 +516,15 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             if (isString) {
                 returnValue = ArgConverter::jstringToJsString(rt, (jstring) result);
             } else {
-                jint javaObjectID = objectManager->GetOrCreateObjectId(result);
+                jlong packed = objectManager->GetOrCreateObjectIdAndClass(result);
+                jint javaObjectID = ObjectManager::IdOf(packed);
                 returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (js_util::is_null_or_undefined(returnValue)) {
                     MetadataNode *returnNode = ResolveDeclaredReturnNode(jEnv, entry, result);
                     returnValue = returnNode != nullptr
                                   ? objectManager->CreateJSWrapper(javaObjectID, returnNode, entry->returnClass)
-                                  : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
+                                  : objectManager->CreateJSWrapper(javaObjectID, ObjectManager::ClassIndexOf(packed), result);
                 }
             }
 
@@ -1230,14 +1231,7 @@ JsValue CallbackHandlers::FindClass(JsRuntime &rt, const char *name) {
         auto runtime = Runtime::GetRuntime(rt);
         auto objectManager = runtime->GetObjectManager();
 
-        jint javaObjectID = objectManager->GetOrCreateObjectId(javaClass);
-        JsValue clazz = objectManager->GetJsObjectByJavaObject(javaObjectID);
-
-        if (js_util::is_null_or_undefined(clazz)) {
-            clazz = objectManager->CreateJSWrapper(javaObjectID, "Ljava/lang/Class;", javaClass);
-        }
-
-        return clazz;
+        return objectManager->GetOrCreateJSWrapper(javaClass);
     }
     return js_util::undefined();
 }

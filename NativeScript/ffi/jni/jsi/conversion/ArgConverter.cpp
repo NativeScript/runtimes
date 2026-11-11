@@ -193,14 +193,12 @@ void ArgConverter::ConvertJavaArgsToJsArgs(JsRuntime &rt, const JavaCallArgs &ar
                 break;
             }
             case Type::JsObject: {
-                auto javaObjectID = static_cast<jint>(bits);
+                auto javaObjectID = ObjectManager::IdOf(bits);
                 jsArg = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (js_util::is_null_or_undefined(jsArg)) {
-                    JniLocalRef argJavaClassPath(jni->GetObjectArrayElement(args.refs, i));
-                    string argClassName = jstringToString(ObjectToString(argJavaClassPath));
-                    argClassName = Util::ConvertFromCanonicalToJniName(argClassName);
-                    jsArg = objectManager->CreateJSWrapper(javaObjectID, argClassName);
+                    JniLocalRef arg(jni->GetObjectArrayElement(args.refs, i));
+                    jsArg = objectManager->CreateJSWrapper(javaObjectID, ObjectManager::ClassIndexOf(bits), arg);
                 }
                 break;
             }
