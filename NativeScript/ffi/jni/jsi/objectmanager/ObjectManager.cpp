@@ -39,13 +39,14 @@ ObjectManager::ObjectManager(jobject javaRuntimeObject) :
                                                              "(Ljava/lang/Object;)I");
     assert(GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID != nullptr);
 
-    MAKE_INSTANCE_WEAK_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceWeak",
-                                                   "(I)V");
-    assert(MAKE_INSTANCE_WEAK_METHOD_ID != nullptr);
+    GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID = env.GetMethodID(runtimeClass,
+                                                                       "getOrCreateJavaObjectIDAndClass",
+                                                                       "(Ljava/lang/Object;)J");
+    assert(GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID != nullptr);
 
-    MAKE_INSTANCE_WEAK_BATCH_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceWeak",
-                                                         "(Ljava/nio/ByteBuffer;IZ)V");
-    assert(MAKE_INSTANCE_WEAK_BATCH_METHOD_ID != nullptr);
+    MAKE_INSTANCES_WEAK_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstancesWeak",
+                                                    "([II)V");
+    assert(MAKE_INSTANCES_WEAK_METHOD_ID != nullptr);
 
     MAKE_INSTANCE_STRONG_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceStrong",
                                                      "(I)V");
@@ -96,6 +97,13 @@ void ObjectManager::OnDisposeRuntime() {
     // Its destructor leaves the weak global refs alive, and the process-wide
     // weak reference table is finite.
     m_cache.clear();
+
+    for (auto &info: m_classInfos) {
+        if (info.clazz != nullptr) {
+            jEnv.DeleteGlobalRef(info.clazz);
+        }
+    }
+    m_classInfos.clear();
 
     // The host-object proxies are owned by the *engine*, and each holds an owned
     // handle to the instance it wraps. Nothing above reaches them: they are only
@@ -490,16 +498,7 @@ void ObjectManager::HostObjectProxyPostFinalizer(JsRuntime &rt, void *data, void
     // instance weak on collection.
     if (pending->isPrimary && pending->instanceInfo) {
         if (!destroying) {
-            auto objManager = rtOwner->GetObjectManager();
-            auto javaObjectID = pending->instanceInfo->JavaObjectID;
-            if (objManager->m_weakObjectIds.find(javaObjectID) ==
-                objManager->m_weakObjectIds.end()) {
-                objManager->m_weakObjectIds.emplace(javaObjectID);
-                JEnv jEnv;
-                jEnv.CallVoidMethod(objManager->m_javaRuntimeObject,
-                                    objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
-                                    javaObjectID);
-            }
+            rtOwner->GetObjectManager()->MarkInstanceWeak(pending->instanceInfo->JavaObjectID);
         }
         delete pending->instanceInfo;
     }
@@ -602,6 +601,35 @@ int ObjectManager::GetOrCreateObjectId(jobject object) {
     return javaObjectID;
 }
 
+jlong ObjectManager::GetOrCreateObjectIdAndClass(jobject object) {
+    JEnv env;
+    return env.CallLongMethod(m_javaRuntimeObject, GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID,
+                              object);
+}
+
+JsValue ObjectManager::GetOrCreateJSWrapper(jobject object) {
+    jlong packed = GetOrCreateObjectIdAndClass(object);
+    JsValue wrapper = GetJsObjectByJavaObject(IdOf(packed));
+    if (!js_util::is_null_or_undefined(wrapper)) {
+        return wrapper;
+    }
+    return CreateJSWrapper(IdOf(packed), ClassIndexOf(packed), object);
+}
+
+ObjectManager::ClassInfo ObjectManager::ResolveClassInfo(jint classIndex, jobject instance) {
+    if (static_cast<size_t>(classIndex) >= m_classInfos.size()) {
+        m_classInfos.resize(classIndex + 1);
+    }
+    ClassInfo &info = m_classInfos[classIndex];
+    if (info.node == nullptr) {
+        JEnv env;
+        JniLocalRef clazz(env.GetObjectClass(instance));
+        info.node = MetadataNode::GetOrCreate(GetClassName((jclass) clazz));
+        info.clazz = (jclass) env.NewGlobalRef(clazz);
+    }
+    return info;
+}
+
 JsValue ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
     auto it = m_idToObject.find(javaObjectID);
     if (it == m_idToObject.end()) {
@@ -641,6 +669,14 @@ JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, const std::string &typ
     return CreateJSWrapperHelper(javaObjectID, typeName, clazz);
 }
 
+JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, jint classIndex, jobject instance) {
+    if (classIndex <= 0) {
+        return CreateJSWrapper(javaObjectID, std::string(), instance);
+    }
+    ClassInfo info = ResolveClassInfo(classIndex, instance);
+    return CreateJSWrapper(javaObjectID, info.node, info.clazz);
+}
+
 JsValue ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName,
                                              jclass clazz) {
     auto className = (clazz != nullptr) ? GetClassName(clazz) : typeName;
@@ -676,10 +712,38 @@ JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node, jc
     return proxy;
 }
 
+void ObjectManager::MarkInstanceWeak(int javaObjectID) {
+    if (!m_weakObjectIds.emplace(javaObjectID).second) return;
+    m_pendingWeakIds.insert(javaObjectID);
+    if (m_flushPosted) return;
+    m_flushPosted = true;
+    Runtime::PostFinalizer(*m_rt, FlushWeakIdsCallback, nullptr, nullptr);
+}
+
+void ObjectManager::FlushWeakIdsCallback(JsRuntime &rt, void *, void *) {
+    auto rtOwner = Runtime::GetRuntimeUnchecked(rt);
+    if (rtOwner == nullptr || rtOwner->is_destroying) return;
+    rtOwner->GetObjectManager()->FlushWeakIds();
+}
+
+void ObjectManager::FlushWeakIds() {
+    m_flushPosted = false;
+    if (m_pendingWeakIds.empty()) return;
+
+    JEnv jenv;
+    jsize count = static_cast<jsize>(m_pendingWeakIds.size());
+    JniLocalRef ids(jenv.NewIntArray(count));
+    std::vector<jint> buffer(m_pendingWeakIds.begin(), m_pendingWeakIds.end());
+    m_pendingWeakIds.clear();
+    jenv.SetIntArrayRegion(ids, 0, count, buffer.data());
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCES_WEAK_METHOD_ID, (jintArray) ids, count);
+}
+
 void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
     auto it = m_weakObjectIds.find(javaObjectID);
     if (it == m_weakObjectIds.end()) return;
     m_weakObjectIds.erase(it);
+    if (m_pendingWeakIds.erase(javaObjectID) != 0) return;
     JEnv jenv;
     jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
     DEBUG_WRITE("Making instance strong: %d", javaObjectID);
@@ -740,12 +804,7 @@ void ObjectManager::WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint) 
         !js_util::is_null_or_undefined(objManager->LockWrapper(it->second))) {
         return;
     }
-    if (objManager->m_weakObjectIds.find(javaObjectID) == objManager->m_weakObjectIds.end()) {
-        objManager->m_weakObjectIds.emplace(javaObjectID);
-        JEnv jEnv;
-        jEnv.CallVoidMethod(objManager->m_javaRuntimeObject, objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
-                            javaObjectID);
-    }
+    objManager->MarkInstanceWeak(javaObjectID);
     if (it != objManager->m_idToObject.end()) objManager->m_idToObject.erase(it);
 }
 
@@ -829,13 +888,8 @@ void ObjectManager::ReleaseObjectNow(JsRuntime &rt, int javaObjectId) {
     if (!rtOwner || rtOwner->is_destroying) return;
     ObjectManager *objMgr = rtOwner->GetObjectManager();
 
-    auto itFound = objMgr->m_weakObjectIds.find(javaObjectId);
-    if (itFound == objMgr->m_weakObjectIds.end()) {
-        JEnv jEnv;
-        jEnv.CallVoidMethod(objMgr->m_javaRuntimeObject, objMgr->MAKE_INSTANCE_WEAK_METHOD_ID,
-                            javaObjectId);
-        objMgr->m_weakObjectIds.emplace(javaObjectId);
-    }
+    objMgr->MarkInstanceWeak(javaObjectId);
+    objMgr->FlushWeakIds();
 
     objMgr->m_idToProxy.erase(javaObjectId);
     objMgr->m_idToObject.erase(javaObjectId);

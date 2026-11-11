@@ -2,6 +2,7 @@
 #define RUNTIME_H
 
 #include "jni.h"
+#include "JavaCallArgs.h"
 #include <string>
 #include <memory>
 #include "JniLocalRef.h"
@@ -137,8 +138,8 @@ namespace tns {
                                jstring className);
 
         jobject CallJSMethodNative(JNIEnv *_env, jobject obj, jint javaObjectID, jclass claz,
-                                   jstring methodName, jint retType, jboolean isConstructor,
-                                   jobjectArray packagedArgs);
+                                   jstring methodName, jint methodNameId, jint retType,
+                                   jboolean isConstructor, const JavaCallArgs &args);
 
         void
         PassExceptionToJsNative(JNIEnv *env, jobject obj, jthrowable exception, jstring message,
@@ -148,6 +149,8 @@ namespace tns {
                                                           napi_value filename, int lineno);
 
         void AdjustAmountOfExternalAllocatedMemory();
+
+        void AdjustAmountOfExternalAllocatedMemory(int64_t usedMemory);
 
         JSMethodCache *js_method_cache;
 
@@ -231,18 +234,26 @@ namespace tns {
     class JSMethodCache {
     public:
 
+        struct MethodName {
+            int id = -1;
+            std::string name;
+            napi_ref value = nullptr;
+        };
+
         explicit JSMethodCache(Runtime *_rt) : rt(_rt) {}
+
+        const MethodName &getMethodName(jstring javaName, int id);
 
         ~JSMethodCache() {
             cleanupCache();
         }
 
-        void cacheMethod(int javaObjectId, const std::string &methodName, napi_value jsMethod) {
-            methodCache[javaObjectId][methodName] = napi_util::make_ref(rt->GetNapiEnv(), jsMethod,
-                                                                        0);
+        void cacheMethod(int javaObjectId, int methodNameId, napi_value jsMethod) {
+            methodCache[javaObjectId][methodNameId] = napi_util::make_ref(rt->GetNapiEnv(), jsMethod,
+                                                                          0);
         }
 
-        napi_value getCachedMethod(int javaObjectId, const std::string &methodName) {
+        napi_value getCachedMethod(int javaObjectId, int methodNameId) {
             napi_env env = rt->GetNapiEnv();
 
             auto it = methodCache.find(javaObjectId);
@@ -250,7 +261,7 @@ namespace tns {
                 return nullptr;
             }
 
-            auto methodIt = it->second.find(methodName);
+            auto methodIt = it->second.find(methodNameId);
             if (methodIt != it->second.end()) {
                 if (!methodIt->second) return nullptr;
                 napi_value m = napi_util::get_ref_value(env, methodIt->second);
@@ -286,12 +297,21 @@ namespace tns {
                 }
             }
             methodCache.clear();
+
+            for (const auto &methodName: methodNames) {
+                if (methodName != nullptr && methodName->value != nullptr) {
+                    napi_delete_reference(rt->GetNapiEnv(), methodName->value);
+                }
+            }
+            methodNames.clear();
         }
 
 
     private:
         Runtime *rt;
-        robin_hood::unordered_map<int, robin_hood::unordered_map<std::string, napi_ref>> methodCache;
+        robin_hood::unordered_map<int, robin_hood::unordered_map<int, napi_ref>> methodCache;
+
+        std::vector<std::unique_ptr<MethodName>> methodNames;
 
     };
 

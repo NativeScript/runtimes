@@ -60,6 +60,15 @@ JsValue Guarded(JsRuntime &rt, Fn &&fn) {
     }
 }
 
+constexpr size_t kManyMembers = 64;
+
+void MoveToDictionaryMode(JsRuntime &rt, JsObject &object) {
+    object.setProperty(rt, "__ns_dictionary_a", true);
+    object.setProperty(rt, "__ns_dictionary_b", true);
+    js_util::delete_property(rt, JsValue(rt, object), js_util::to_js_string(rt, "__ns_dictionary_a"));
+    js_util::delete_property(rt, JsValue(rt, object), js_util::to_js_string(rt, "__ns_dictionary_b"));
+}
+
 // Defines `name` on `object` as an accessor backed by the given host functions.
 void DefineAccessor(JsRuntime &rt, const JsObject &object, const char *name,
                     engine::HostFunctionType getter, engine::HostFunctionType setter) {
@@ -1221,6 +1230,12 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
 
     robin_hood::unordered_map<std::string, MethodCallbackData *> collectedExtensionMethods;
 
+    robin_hood::unordered_flat_map<std::string_view, MethodCallbackData *> baseMethodsByName;
+    baseMethodsByName.reserve(baseInstanceMethodsCallbackData.size());
+    for (auto baseMethod: baseInstanceMethodsCallbackData) {
+        baseMethodsByName.emplace(baseMethod->candidates.front().name, baseMethod);
+    }
+
     auto prototype = constructor.getPropertyAsObject(rt, "prototype");
 
     // The napi tree also took a strong reference to the prototype here, for the
@@ -1291,13 +1306,9 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
             instanceMethodData.push_back(callbackData);
             instanceMethodsCallbackData.push_back(callbackData);
 
-            auto itFound = std::find_if(baseInstanceMethodsCallbackData.begin(),
-                                        baseInstanceMethodsCallbackData.end(),
-                                        [&methodName](MethodCallbackData *x) {
-                                            return x->candidates.front().name == methodName;
-                                        });
-            if (itFound != baseInstanceMethodsCallbackData.end()) {
-                callbackData->parent = *itFound;
+            auto itFound = baseMethodsByName.find(std::string_view(methodName));
+            if (itFound != baseMethodsByName.end()) {
+                callbackData->parent = itFound->second;
             }
 
             lastMethodName = methodName;
@@ -1398,7 +1409,7 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         if (methodName != lastMethodName) {
             callbackData = new MethodCallbackData(this);
             cache->methodCallbackData.push_back(callbackData);
-            auto method = JsFunction::createFromHostFunction(
+            auto method = JsFunction::createFromHostConstructor(
                     rt, engine::PropNameID::forAscii(rt, methodName), 0,
                     [callbackData](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
                                    size_t argc) -> JsValue {
@@ -1434,20 +1445,40 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
     // get candidates from static fields metadata
     auto staticFieldCout = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
+    bool manyFields = staticFieldCout > kManyMembers;
+    if (manyFields) {
+        MoveToDictionaryMode(rt, constructor);
+    }
     for (auto i = 0; i < staticFieldCout; i++) {
         auto entry = MetadataReader::ReadStaticFieldEntry(&curPtr);
         auto &fieldName = entry.getName();
         auto fieldInfo = new FieldCallbackData(entry);
         fieldInfo->objectManager = objectManager;
-        DefineAccessor(rt, constructor, fieldName.c_str(),
-                       [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
-                                   size_t) -> JsValue {
-                           return FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
-                       },
-                       [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
-                                   size_t argc) -> JsValue {
-                           return FieldAccessorSetterCallback(rt, thisVal, args, argc, fieldInfo);
-                       });
+        if (manyFields && fieldInfo->metadata.getIsFinal()) {
+            DefineAccessor(rt, constructor, fieldName.c_str(),
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
+                                       size_t) -> JsValue {
+                               JsValue value = FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
+                               if (thisVal.isObject()) {
+                                   js_util::define_property_value(
+                                           rt, thisVal.asObjectBorrowed(rt),
+                                           fieldInfo->metadata.getName().c_str(), value,
+                                           true, false, false);
+                               }
+                               return value;
+                           },
+                           nullptr);
+        } else {
+            DefineAccessor(rt, constructor, fieldName.c_str(),
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
+                                       size_t) -> JsValue {
+                               return FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
+                           },
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
+                                       size_t argc) -> JsValue {
+                               return FieldAccessorSetterCallback(rt, thisVal, args, argc, fieldInfo);
+                           });
+        }
         cache->fieldCallbackData.push_back(fieldInfo);
     }
 

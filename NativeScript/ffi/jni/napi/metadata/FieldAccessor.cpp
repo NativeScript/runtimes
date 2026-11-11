@@ -182,15 +182,7 @@ FieldAccessor::GetJavaField(napi_env env, napi_value target, FieldCallbackData *
             if (isString) {
                 fieldResult = ArgConverter::jstringToJsString(env, (jstring) result);
             } else {
-                int javaObjectID = objectManager->GetOrCreateObjectId(result);
-                auto objectResult = objectManager->GetJsObjectByJavaObject(javaObjectID);
-
-                if (napi_util::is_null_or_undefined(env, objectResult)) {
-                    objectResult = objectManager->CreateJSWrapper(javaObjectID, fieldTypeName,
-                                                                  result);
-                }
-
-                fieldResult = objectResult;
+                fieldResult = objectManager->GetOrCreateJSWrapper(result);
             }
             jEnv.DeleteLocalRef(result);
         } else {

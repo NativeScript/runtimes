@@ -175,6 +175,8 @@ private:
 
     static napi_value FieldAccessorGetterCallback(napi_env env, napi_callback_info info);
 
+    static napi_value FinalStaticFieldGetterCallback(napi_env env, napi_callback_info info);
+
     static napi_value FieldAccessorSetterCallback(napi_env env, napi_callback_info info);
 
     static napi_value ArraySetterCallback(napi_env env, napi_callback_info info);

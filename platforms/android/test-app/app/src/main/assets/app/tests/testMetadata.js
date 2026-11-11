@@ -36,3 +36,74 @@ describe("Tests metadata", function () {
 		expect(keywordClass.getValue5()).toBe(expected);
 	});
 });
+
+describe("Java members", function () {
+	it("keep static methods constructible, so new on a static factory returns its object", function () {
+		var id = new java.util.UUID.randomUUID();
+
+		expect(id instanceof java.util.UUID).toBe(true);
+	});
+
+	it("leave class constructors constructible", function () {
+		var MyObject = java.lang.Object.extend({ toString: function () { return "mine"; } });
+
+		expect(new java.util.ArrayList().size()).toBe(0);
+		expect(new MyObject().toString()).toBe("mine");
+		expect(java.util.UUID.randomUUID() instanceof java.util.UUID).toBe(true);
+	});
+
+	it("read the final static fields of a class with many of them", function () {
+		var first = android.R.attr.textColor;
+
+		expect(typeof first).toBe("number");
+		expect(android.R.attr.textColor).toBe(first);
+	});
+});
+
+describe("Java object wrappers", function () {
+	it("leave an extended instance Java creates during a JS construction its own JS object", function () {
+		var Inner = java.lang.Object.extend({ toString: function () { return "inner"; } });
+		var Outer = com.tns.tests.NestedConstruction.extend({ toString: function () { return "outer"; } });
+		var outer = new Outer(new Inner().getClass(), null);
+
+		expect(String(outer.toString())).toBe("outer");
+		expect(String(outer.getCreated().toString())).toBe("inner");
+	});
+
+	it("keep a JS construction's instance when a callback constructs another during it", function () {
+		var Inner = java.lang.Object.extend({ toString: function () { return "inner"; } });
+		var Outer = com.tns.tests.NestedConstruction.extend({ toString: function () { return "outer:" + this.tag; } });
+		var made = null;
+		var outer = new Outer(null, new java.lang.Runnable({
+			run: function () {
+				made = new Inner();
+			}
+		}));
+		outer.tag = "mine";
+
+		expect(String(outer.toString())).toBe("outer:mine");
+		expect(String(made.toString())).toBe("inner");
+	});
+
+	it("hand back the same wrapper for the same Java object", function () {
+		var builder = new java.lang.StringBuilder();
+
+		expect(builder.append("x")).toBe(builder);
+	});
+
+	it("stay linked while thousands of later wrappers are collected", function () {
+		var list = new java.util.ArrayList();
+		var first = java.util.UUID.randomUUID();
+		list.add(first);
+		for (var round = 0; round < 3; round++) {
+			for (var i = 0; i < 3000; i++) {
+				java.util.UUID.randomUUID();
+			}
+			gc();
+			java.lang.System.gc();
+		}
+
+		expect(list.get(0)).toBe(first);
+		expect(String(list.get(0).toString())).toBe(String(first.toString()));
+	});
+});

@@ -38,6 +38,20 @@ namespace tns {
 
         int GetOrCreateObjectId(jobject object);
 
+        jlong GetOrCreateObjectIdAndClass(jobject object);
+
+        static jint IdOf(jlong packed) {
+            return static_cast<jint>(packed);
+        }
+
+        static jint ClassIndexOf(jlong packed) {
+            return static_cast<jint>((packed >> 32) & 0x7fffffff);
+        }
+
+        napi_value GetOrCreateJSWrapper(jobject object);
+
+        napi_value CreateJSWrapper(jint javaObjectID, jint classIndex, jobject instance);
+
         napi_value GetJsObjectByJavaObject(int javaObjectID);
 
         napi_value
@@ -174,7 +188,20 @@ namespace tns {
 
         static void JSObjectPostFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
 
+        struct ClassInfo {
+            MetadataNode *node = nullptr;
+            jclass clazz = nullptr;
+        };
+
+        ClassInfo ResolveClassInfo(jint classIndex, jobject instance);
+
         void EnsureInstanceStrong(int javaObjectID);
+
+        void MarkInstanceWeak(int javaObjectID);
+
+        void FlushWeakIds();
+
+        static void FlushWeakIdsCallback(napi_env env, void *data, void *hint);
 
         static void
         JSObjectProxyFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
@@ -197,6 +224,10 @@ namespace tns {
         robin_hood::unordered_map<int, napi_ref> m_idToObject;
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;
+        robin_hood::unordered_set<int> m_pendingWeakIds;
+
+        std::vector<ClassInfo> m_classInfos;
+        bool m_flushPosted = false;
 
         LRUCache<int, jweak> m_cache;
 
@@ -214,9 +245,9 @@ namespace tns {
 
         jmethodID GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID;
 
-        jmethodID MAKE_INSTANCE_WEAK_BATCH_METHOD_ID;
+        jmethodID GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID;
 
-        jmethodID MAKE_INSTANCE_WEAK_METHOD_ID;
+        jmethodID MAKE_INSTANCES_WEAK_METHOD_ID;
 
         jmethodID MAKE_INSTANCE_STRONG_METHOD_ID;
 
