@@ -112,9 +112,9 @@ void CallbackHandlers::Init(JsRuntime &rt) {
     CURRENT_OBJECTID_FIELD_ID = jEnv.GetFieldID(RUNTIME_CLASS, "currentObjectId", "I");
     assert(CURRENT_OBJECTID_FIELD_ID != nullptr);
 
-    MAKE_INSTANCE_STRONG_ID = jEnv.GetMethodID(RUNTIME_CLASS, "makeInstanceStrong",
-                                               "(Ljava/lang/Object;I)V");
-    assert(MAKE_INSTANCE_STRONG_ID != nullptr);
+    REGISTER_CONSTRUCTED_INSTANCE_ID = jEnv.GetMethodID(RUNTIME_CLASS, "registerConstructedInstance",
+                                                        "(Ljava/lang/Object;I)J");
+    assert(REGISTER_CONSTRUCTED_INSTANCE_ID != nullptr);
 
     GET_TYPE_METADATA = jEnv.GetStaticMethodID(RUNTIME_CLASS, "getTypeMetadata",
                                                "(Ljava/lang/String;I)[Ljava/lang/String;");
@@ -601,10 +601,10 @@ bool CallbackHandlers::RegisterInstance(JsRuntime &rt, const JsValue &jsObject,
         }
     }
 
-    jEnv.CallVoidMethod(runtime->GetJavaRuntime(), MAKE_INSTANCE_STRONG_ID, instance, javaObjectID);
+    jlong usedMemory = jEnv.CallLongMethod(runtime->GetJavaRuntime(), REGISTER_CONSTRUCTED_INSTANCE_ID, instance, javaObjectID);
 
     // Reuse the runtime we already resolved instead of re-querying via rt.
-    runtime->AdjustAmountOfExternalAllocatedMemory();
+    runtime->AdjustAmountOfExternalAllocatedMemory(usedMemory);
     runtime->TryCallGC();
 
     JniLocalRef localInstance(instance);
@@ -1807,7 +1807,7 @@ jclass CallbackHandlers::RUNTIME_CLASS = nullptr;
 jclass CallbackHandlers::JAVA_LANG_STRING = nullptr;
 jfieldID CallbackHandlers::CURRENT_OBJECTID_FIELD_ID = nullptr;
 jmethodID CallbackHandlers::RESOLVE_CLASS_METHOD_ID = nullptr;
-jmethodID CallbackHandlers::MAKE_INSTANCE_STRONG_ID = nullptr;
+jmethodID CallbackHandlers::REGISTER_CONSTRUCTED_INSTANCE_ID = nullptr;
 jmethodID CallbackHandlers::GET_TYPE_METADATA = nullptr;
 jmethodID CallbackHandlers::ENABLE_VERBOSE_LOGGING_METHOD_ID = nullptr;
 jmethodID CallbackHandlers::DISABLE_VERBOSE_LOGGING_METHOD_ID = nullptr;

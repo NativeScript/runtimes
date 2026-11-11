@@ -968,6 +968,12 @@ public class Runtime {
     }
 
     @RuntimeCallable
+    private long registerConstructedInstance(Object instance, int objectId) {
+        makeInstanceStrong(instance, objectId);
+        return getUsedMemory();
+    }
+
+    @RuntimeCallable
     private void makeInstanceStrong(Object instance, int objectId) {
         if (instance == null) {
             throw new IllegalArgumentException("instance cannot be null");

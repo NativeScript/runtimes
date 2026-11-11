@@ -531,7 +531,10 @@ bool Runtime::NotifyGC(JNIEnv *jEnv, jobject obj, jintArray object_ids) {
 
 void Runtime::AdjustAmountOfExternalAllocatedMemory() {
     JEnv jEnv;
-    int64_t usedMemory = jEnv.CallLongMethod(m_runtime, GET_USED_MEMORY_METHOD_ID);
+    AdjustAmountOfExternalAllocatedMemory(jEnv.CallLongMethod(m_runtime, GET_USED_MEMORY_METHOD_ID));
+}
+
+void Runtime::AdjustAmountOfExternalAllocatedMemory(int64_t usedMemory) {
     int64_t changeInBytes = usedMemory - m_lastUsedMemory;
     int64_t externalMemory = 0;
 

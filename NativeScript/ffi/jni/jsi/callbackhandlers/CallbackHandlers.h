@@ -251,7 +251,7 @@ namespace tns {
 
         static jfieldID CURRENT_OBJECTID_FIELD_ID;
 
-        static jmethodID MAKE_INSTANCE_STRONG_ID;
+        static jmethodID REGISTER_CONSTRUCTED_INSTANCE_ID;
 
         static jmethodID GET_TYPE_METADATA;
 

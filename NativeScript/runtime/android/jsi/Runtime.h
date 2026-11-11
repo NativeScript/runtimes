@@ -183,6 +183,8 @@ namespace tns {
 
         void AdjustAmountOfExternalAllocatedMemory();
 
+        void AdjustAmountOfExternalAllocatedMemory(int64_t usedMemory);
+
         JSMethodCache *js_method_cache;
 
         bool is_destroying = false;
