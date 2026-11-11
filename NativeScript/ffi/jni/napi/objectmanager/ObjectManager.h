@@ -176,6 +176,12 @@ namespace tns {
 
         void EnsureInstanceStrong(int javaObjectID);
 
+        void MarkInstanceWeak(int javaObjectID);
+
+        void FlushWeakIds();
+
+        static void FlushWeakIdsCallback(napi_env env, void *data, void *hint);
+
         static void
         JSObjectProxyFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
 
@@ -197,6 +203,8 @@ namespace tns {
         robin_hood::unordered_map<int, napi_ref> m_idToObject;
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;
+        robin_hood::unordered_set<int> m_pendingWeakIds;
+        bool m_flushPosted = false;
 
         LRUCache<int, jweak> m_cache;
 
@@ -214,9 +222,7 @@ namespace tns {
 
         jmethodID GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID;
 
-        jmethodID MAKE_INSTANCE_WEAK_BATCH_METHOD_ID;
-
-        jmethodID MAKE_INSTANCE_WEAK_METHOD_ID;
+        jmethodID MAKE_INSTANCES_WEAK_METHOD_ID;
 
         jmethodID MAKE_INSTANCE_STRONG_METHOD_ID;
 

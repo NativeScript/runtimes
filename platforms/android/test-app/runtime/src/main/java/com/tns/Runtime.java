@@ -20,7 +20,6 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -1003,28 +1002,11 @@ public class Runtime {
     }
 
     @RuntimeCallable
-    private void makeInstanceWeak(int javaObjectID) {
-        this.makeInstanceWeak(javaObjectID, true);
-    }
-
-    private void makeInstanceWeak(int javaObjectID, boolean keepAsWeak) {
+    private void makeInstancesWeak(int[] objectIds, int count) {
         if (logger.isEnabled()) {
-            logger.write("makeInstanceWeak instance " + javaObjectID + " keepAsWeak=" + keepAsWeak);
+            logger.write("makeInstancesWeak count=" + count);
         }
-        if (keepAsWeak) {
-            objectTable.weakenAndCheckAlive(javaObjectID);
-        } else {
-            objectTable.remove(javaObjectID);
-        }
-    }
-
-    @RuntimeCallable
-    private void makeInstanceWeak(ByteBuffer buff, int length, boolean keepAsWeak) {
-        buff.position(0);
-        for (int i = 0; i < length; i++) {
-            int javaObjectId = buff.getInt();
-            makeInstanceWeak(javaObjectId, keepAsWeak);
-        }
+        objectTable.weakenAndCheckAlive(objectIds, count);
     }
 
     @RuntimeCallable
