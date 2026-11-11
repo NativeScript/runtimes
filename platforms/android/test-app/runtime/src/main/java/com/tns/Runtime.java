@@ -15,7 +15,6 @@ import com.tns.system.classloaders.impl.ClassLoadersCollectionImpl;
 
 import java.io.File;
 import java.io.IOException;
-import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -149,13 +148,14 @@ public class Runtime {
             "Primitive types need to be manually wrapped in their respective Object wrappers.\n" +
             "If you are creating an instance of an inner class, make sure to always provide reference to the outer `this` as the first argument.";
 
-    private Map<Integer, Object> strongInstances = new HashMap<>();
+    private final ObjectTable objectTable;
 
-    private Map<Integer, WeakReference<Object>> weakInstances = new HashMap<>();
-
-    private Map<Object, Integer> strongJavaObjectToID = new NativeScriptHashMap<Object, Integer>();
-
-    private Map<Object, Integer> weakJavaObjectToID = new NativeScriptWeakHashMap<Object, Integer>();
+    private final ObjectTable.IdSource objectIds = new ObjectTable.IdSource() {
+        @Override
+        public int newId() {
+            return generateNewObjectId(getRuntimeId());
+        }
+    };
 
     private Map<Class<?>, JavaScriptImplementation> loadedJavaScriptExtends = new HashMap<Class<?>, JavaScriptImplementation>();
 
@@ -169,7 +169,6 @@ public class Runtime {
 
     private final java.lang.Runtime dalvikRuntime = java.lang.Runtime.getRuntime();
 
-    private final Object keyNotFoundObject = new Object();
     private int currentObjectId = -1;
 
     private ExtractPolicy extractPolicy;
@@ -232,20 +231,18 @@ public class Runtime {
 
     private static final ClassStorageService classStorageService = new ClassStorageServiceImpl(ClassCacheImpl.INSTANCE, ClassLoadersCollectionImpl.INSTANCE);
 
-    public Runtime(ClassResolver classResolver, GcListener gcListener, StaticConfiguration config, DynamicConfiguration dynamicConfig, int runtimeId, int workerId, HashMap<Integer, Object> strongInstances, HashMap<Integer, WeakReference<Object>> weakInstances, NativeScriptHashMap<Object, Integer> strongJavaObjectToId, NativeScriptWeakHashMap<Object, Integer> weakJavaObjectToId) {
+    public Runtime(ClassResolver classResolver, GcListener gcListener, StaticConfiguration config, DynamicConfiguration dynamicConfig, int runtimeId, int workerId, ObjectTable objectTable) {
         this.classResolver = classResolver;
         this.gcListener = gcListener;
         this.config = config;
         this.dynamicConfig = dynamicConfig;
         this.runtimeId = runtimeId;
         this.workerId = workerId;
-        this.strongInstances = strongInstances;
-        this.weakInstances = weakInstances;
-        this.strongJavaObjectToID = strongJavaObjectToId;
-        this.weakJavaObjectToID = weakJavaObjectToId;
+        this.objectTable = objectTable;
     }
 
     public Runtime(StaticConfiguration config, DynamicConfiguration dynamicConfiguration) {
+        this.objectTable = new ObjectTable(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N);
         synchronized (Runtime.currentRuntime) {
             ManualInstrumentation.Frame frame = ManualInstrumentation.start("new Runtime");
             try {
@@ -265,13 +262,9 @@ public class Runtime {
 
                 // if multithreadedJS, make all instance maps concurrent or synchronized:
                 if (config.appConfig.getEnableMultithreadedJavascript()) {
-                    this.strongInstances = new ConcurrentHashMap<>();
-                    this.weakInstances = new ConcurrentHashMap<>();
                     // loadedJavaScriptExtends can store null values (unsupported by ConcurrentHashMap),
                     // so use a synchronized map instead.
                     this.loadedJavaScriptExtends = Collections.synchronizedMap(new HashMap<>());
-                    this.strongJavaObjectToID = Collections.synchronizedMap(new NativeScriptHashMap<>());
-                    this.weakJavaObjectToID = Collections.synchronizedMap(new NativeScriptWeakHashMap<>());
                 }
 
                 classResolver = new ClassResolver(classStorageService);
@@ -422,17 +415,7 @@ public class Runtime {
     }
 
     public void releaseNativeCounterpart(int nativeObjectId) {
-        Object strongRef = strongInstances.get(nativeObjectId);
-        if (strongRef != null) {
-            strongInstances.remove(nativeObjectId);
-            strongJavaObjectToID.remove(strongRef);
-        }
-
-        WeakReference<Object> weakRef = weakInstances.get(nativeObjectId);
-        if (weakRef != null) {
-            weakInstances.remove(nativeObjectId);
-            weakJavaObjectToID.remove(weakRef);
-        }
+        objectTable.remove(nativeObjectId);
     }
 
     /*
@@ -784,7 +767,7 @@ public class Runtime {
 
     public void notifyGc(int[] objectIds) {
         for (int id: objectIds) {
-                weakInstances.remove(id);
+                objectTable.remove(id);
         }
         notifyGc(runtimeId, objectIds);
     }
@@ -991,8 +974,7 @@ public class Runtime {
             throw new IllegalArgumentException("instance cannot be null");
         }
 
-        strongInstances.put(objectId, instance);
-        strongJavaObjectToID.put(instance, objectId);
+        objectTable.putStrong(objectId, instance);
 
         Class<?> clazz = instance.getClass();
         // Only resolve the name + store the class the first time we see it; the
@@ -1015,10 +997,6 @@ public class Runtime {
             Object instance = getJavaObjectByID(objectId);
             if (instance == null) return;
             makeInstanceStrong(instance, objectId);
-
-            weakJavaObjectToID.remove(instance);
-            weakInstances.remove(objectId);
-
         } catch (Exception e) {
 
         }
@@ -1033,18 +1011,11 @@ public class Runtime {
         if (logger.isEnabled()) {
             logger.write("makeInstanceWeak instance " + javaObjectID + " keepAsWeak=" + keepAsWeak);
         }
-        Object instance = strongInstances.get(javaObjectID);
-
-        // object is marked as weak already,
-        if (instance == null) return;
-
         if (keepAsWeak) {
-            weakJavaObjectToID.put(instance, Integer.valueOf(javaObjectID));
-            weakInstances.put(javaObjectID, new WeakReference<Object>(instance));
+            objectTable.weakenAndCheckAlive(javaObjectID);
+        } else {
+            objectTable.remove(javaObjectID);
         }
-
-        strongInstances.remove(javaObjectID);
-        strongJavaObjectToID.remove(instance);
     }
 
     @RuntimeCallable
@@ -1057,99 +1028,24 @@ public class Runtime {
     }
 
     @RuntimeCallable
-    private boolean makeInstanceWeakAndCheckIfAlive(int javaObjectID) {
-        if (logger.isEnabled()) {
-            logger.write("makeInstanceWeakAndCheckIfAlive instance " + javaObjectID);
-        }
-        Object instance = strongInstances.get(javaObjectID);
-        if (instance == null) {
-            WeakReference<Object> ref = weakInstances.get(javaObjectID);
-            if (ref == null) {
-                return false;
-            } else {
-                instance = ref.get();
-                if (instance == null) {
-                    // The Java was moved from strong to weak, and then the Java instance was collected.
-                    weakInstances.remove(javaObjectID);
-                    weakJavaObjectToID.remove(ref);
-                    return false;
-                } else {
-                    return true;
-                }
-            }
-        } else {
-            strongInstances.remove(javaObjectID);
-            strongJavaObjectToID.remove(instance);
-
-            weakJavaObjectToID.put(instance, javaObjectID);
-            weakInstances.put(javaObjectID, new WeakReference<Object>(instance));
-
-            return true;
-        }
-    }
-
-    @RuntimeCallable
-    private void checkWeakObjectAreAlive(ByteBuffer input, ByteBuffer output, int length) {
-        input.position(0);
-        output.position(0);
-        for (int i = 0; i < length; i++) {
-            int javaObjectId = input.getInt();
-
-            WeakReference<Object> weakRef = weakInstances.get(javaObjectId);
-
-            int isReleased;
-
-            if (weakRef != null) {
-                Object instance = weakRef.get();
-
-                if (instance == null) {
-                    isReleased = 1;
-                    weakInstances.remove(javaObjectId);
-                } else {
-                    isReleased = 0;
-                }
-            } else {
-                isReleased = (strongInstances.get(javaObjectId) == null) ? 1 : 0;
-            }
-
-            output.putInt(isReleased);
-        }
-    }
-
-    @RuntimeCallable
     private Object getJavaObjectByID(int javaObjectID) throws Exception {
         if (logger.isEnabled()) {
             logger.write("Platform.getJavaObjectByID:" + javaObjectID);
         }
 
-        Object instance = strongInstances.get(javaObjectID);
-
+        Object instance = objectTable.get(javaObjectID);
         if (instance == null) {
-            instance = keyNotFoundObject;
-        }
-
-        if (instance == keyNotFoundObject) {
-            WeakReference<Object> wr = weakInstances.get(javaObjectID);
-            if (wr == null) {
-                throw new NativeScriptException("No weak reference found. Attempt to use cleared object reference id=" + javaObjectID);
-            }
-
-            instance = wr.get();
-            if (instance == null) {
-                throw new NativeScriptException("Attempt to use cleared object reference id=" + javaObjectID);
-            }
+            throw new NativeScriptException(objectTable.contains(javaObjectID)
+                    ? "Attempt to use cleared object reference id=" + javaObjectID
+                    : "No weak reference found. Attempt to use cleared object reference id=" + javaObjectID);
         }
 
         return instance;
     }
 
     private Integer getJavaObjectID(Object obj) {
-        Integer id = strongJavaObjectToID.get(obj);
-        if (id == null) {
-            id = weakJavaObjectToID.get(obj);
-        }
-
-        return id;
+        int id = objectTable.findId(obj);
+        return id == ObjectTable.NO_ID ? null : id;
     }
 
     @RuntimeCallable
