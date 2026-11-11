@@ -149,10 +149,10 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
     JEnv jEnv;
     jclass clazz;
     jmethodID mid;
-    string *sig = nullptr;
-    string *returnType = nullptr;
+    const string *sig = nullptr;
+    const string *returnType = nullptr;
     auto retType = MethodReturnType::Unknown;
-    MethodCache::CacheMethodInfo mi;
+    const MethodCache::CacheMethodInfo *mi = nullptr;
     bool isSuper = false;
     napi_status status;
 
@@ -274,8 +274,8 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
 
         clazz = jEnv.FindClass(className);
         if (clazz != nullptr) {
-            mi = MethodCache::ResolveMethodSignature(env, className, methodName, argc, argv, isStatic);
-            if (mi.mid == nullptr) {
+            mi = &MethodCache::ResolveMethodSignature(env, className, methodName, argc, argv, isStatic);
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE("Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d",
                             className.c_str(), methodName.c_str(), isStatic, isSuper);
                 return nullptr;
@@ -285,9 +285,9 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
             const string callerClassName = callerNode->GetName();
             DEBUG_WRITE("Resolving method on caller class: %s.%s on className %s",
                         callerClassName.c_str(), methodName.c_str(), className.c_str());
-            mi = MethodCache::ResolveMethodSignature(env, callerClassName, methodName, argc, argv,
+            mi = &MethodCache::ResolveMethodSignature(env, callerClassName, methodName, argc, argv,
                                                      isStatic);
-            if (mi.mid == nullptr) {
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE(
                         "Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d, callerClass=%s",
                         className.c_str(), methodName.c_str(), isStatic, isSuper,
@@ -296,11 +296,11 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
             }
         }
 
-        clazz = mi.clazz;
-        mid = mi.mid;
-        sig = &mi.signature;
-        returnType = &mi.returnType;
-        retType = mi.retType;
+        clazz = mi->clazz;
+        mid = mi->mid;
+        sig = &mi->signature;
+        returnType = &mi->returnType;
+        retType = mi->retType;
     }
 
 
@@ -573,7 +573,7 @@ bool CallbackHandlers::RegisterInstance(napi_env env, napi_value jsObject,
     objectManager->Link(jsObject, javaObjectID, nullptr, node);
 
     // resolve constructor
-    auto mi = MethodCache::ResolveConstructorSignature(env, argWrapper, fullClassName,
+    const auto &mi = MethodCache::ResolveConstructorSignature(env, argWrapper, fullClassName,
                                                        generatedJavaClass, isInterface);
 
     // while the "instance" is being created, if an exception is thrown during the construction

@@ -164,10 +164,10 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     JEnv jEnv;
     jclass clazz;
     jmethodID mid;
-    string *sig = nullptr;
-    string *returnType = nullptr;
+    const string *sig = nullptr;
+    const string *returnType = nullptr;
     auto retType = MethodReturnType::Unknown;
-    MethodCache::CacheMethodInfo mi;
+    const MethodCache::CacheMethodInfo *mi = nullptr;
     bool isSuper = false;
 
     if (metadataSignatureIsUnambiguous && entry != nullptr &&
@@ -287,8 +287,8 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
 
         clazz = jEnv.FindClass(className);
         if (clazz != nullptr) {
-            mi = MethodCache::ResolveMethodSignature(rt, className, methodName, argc, argv, isStatic);
-            if (mi.mid == nullptr) {
+            mi = &MethodCache::ResolveMethodSignature(rt, className, methodName, argc, argv, isStatic);
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE("Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d",
                             className.c_str(), methodName.c_str(), isStatic, isSuper);
                 return js_util::undefined();
@@ -298,9 +298,9 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             const string callerClassName = callerNode->GetName();
             DEBUG_WRITE("Resolving method on caller class: %s.%s on className %s",
                         callerClassName.c_str(), methodName.c_str(), className.c_str());
-            mi = MethodCache::ResolveMethodSignature(rt, callerClassName, methodName, argc, argv,
+            mi = &MethodCache::ResolveMethodSignature(rt, callerClassName, methodName, argc, argv,
                                                      isStatic);
-            if (mi.mid == nullptr) {
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE(
                         "Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d, callerClass=%s",
                         className.c_str(), methodName.c_str(), isStatic, isSuper,
@@ -309,11 +309,11 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             }
         }
 
-        clazz = mi.clazz;
-        mid = mi.mid;
-        sig = &mi.signature;
-        returnType = &mi.returnType;
-        retType = mi.retType;
+        clazz = mi->clazz;
+        mid = mi->mid;
+        sig = &mi->signature;
+        returnType = &mi->returnType;
+        retType = mi->retType;
     }
 
     if (!isStatic) {
@@ -562,7 +562,7 @@ bool CallbackHandlers::RegisterInstance(JsRuntime &rt, const JsValue &jsObject,
     objectManager->Link(jsObject, javaObjectID, nullptr, node);
 
     // resolve constructor
-    auto mi = MethodCache::ResolveConstructorSignature(rt, argWrapper, fullClassName,
+    const auto &mi = MethodCache::ResolveConstructorSignature(rt, argWrapper, fullClassName,
                                                        generatedJavaClass, isInterface);
 
     // while the "instance" is being created, if an exception is thrown during the construction

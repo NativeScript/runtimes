@@ -28,7 +28,9 @@ void MethodCache::Init()
 }
 
 
-robin_hood::unordered_map<string, MethodCache::CacheMethodInfo> MethodCache::s_method_ctor_signature_cache;
+robin_hood::unordered_node_map<string, MethodCache::CacheMethodInfo> MethodCache::s_method_ctor_signature_cache;
+thread_local string MethodCache::s_signatureKey;
+const MethodCache::CacheMethodInfo MethodCache::s_unresolved;
 jclass MethodCache::RUNTIME_CLASS = nullptr;
 jmethodID MethodCache::RESOLVE_METHOD_OVERLOAD_METHOD_ID = nullptr;
 jmethodID MethodCache::RESOLVE_CONSTRUCTOR_SIGNATURE_ID = nullptr;
