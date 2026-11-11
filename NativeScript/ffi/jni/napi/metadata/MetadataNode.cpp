@@ -1513,6 +1513,12 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
 
     robin_hood::unordered_map<std::string, MethodCallbackData *> collectedExtensionMethods;
 
+    robin_hood::unordered_flat_map<std::string_view, MethodCallbackData *> baseMethodsByName;
+    baseMethodsByName.reserve(baseInstanceMethodsCallbackData.size());
+    for (auto baseMethod: baseInstanceMethodsCallbackData) {
+        baseMethodsByName.emplace(baseMethod->candidates.front().name, baseMethod);
+    }
+
     napi_value prototype = napi_util::get_prototype(env, constructor);
 
     // Strong reference to the prototype shared by every instance field/property
@@ -1579,13 +1585,9 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
             instanceMethodData.push_back(callbackData);
             instanceMethodsCallbackData.push_back(callbackData);
 
-            auto itFound = std::find_if(baseInstanceMethodsCallbackData.begin(),
-                                        baseInstanceMethodsCallbackData.end(),
-                                        [&methodName](MethodCallbackData *x) {
-                                            return x->candidates.front().name == methodName;
-                                        });
-            if (itFound != baseInstanceMethodsCallbackData.end()) {
-                callbackData->parent = *itFound;
+            auto itFound = baseMethodsByName.find(std::string_view(methodName));
+            if (itFound != baseMethodsByName.end()) {
+                callbackData->parent = itFound->second;
             }
 
             lastMethodName = methodName;
