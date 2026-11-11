@@ -1630,8 +1630,8 @@ describe("Tests ", function () {
 		__log("TEST: TestCanParseSignatureWithTypesThatContainsCapitalLettersForPrimitiveTypes");
 
 		var formats = java.lang.reflect.Array.newInstance(java.text.NumberFormat.class, 2);
-		formats[0] = java.text.NumberFormat.getInstance();
-		formats[1] = java.text.NumberFormat.getIntegerInstance();
+		formats[0] = java.text.NumberFormat.getInstance(java.util.Locale.US);
+		formats[1] = java.text.NumberFormat.getIntegerInstance(java.util.Locale.US);
 		var mf = new java.text.MessageFormat("{0}, {1}")
 		mf.setFormats(formats);
 		var arr = mf.parse("123, 4567");

@@ -1136,23 +1136,52 @@ var es5_visitors = (function () {
           ? matchingNodes[0].declarations[0].init.left
           : null;
       }
+
+      function getReturnSuperCallLineNode(nodes, superIdentifier) {
+        function isSuperCall(node) {
+          return (
+            types.isCallExpression(node) &&
+            types.isMemberExpression(node.callee) &&
+            node.callee.object.name === superIdentifier
+          );
+        }
+
+        for (var i = 0; i < nodes.length; i++) {
+          var argument = nodes[i].argument;
+          if (!types.isLogicalExpression(argument)) {
+            continue;
+          }
+          var left = argument.left;
+          if (isSuperCall(left)) {
+            return left;
+          }
+          if (types.isLogicalExpression(left) && isSuperCall(left.right)) {
+            return left.right;
+          }
+        }
+        return null;
+      }
       ////
 
       if (superVariableIdentifier) {
         var possibleVariableDeclarations = [];
         var possibleExpressionStatements = [];
+        var possibleReturnStatements = [];
 
         constructorFunctionScope.body.body.forEach((node) => {
           if (types.isVariableDeclaration(node)) {
             possibleVariableDeclarations.push(node);
           } else if (types.isExpressionStatement(node)) {
             possibleExpressionStatements.push(node);
+          } else if (types.isReturnStatement(node)) {
+            possibleReturnStatements.push(node);
           }
         });
 
         if (
           possibleVariableDeclarations.length > 0 ||
-          possibleExpressionStatements.length > 0
+          possibleExpressionStatements.length > 0 ||
+          possibleReturnStatements.length > 0
         ) {
           var superCallRHS =
             getThisDeclarationSuperCallLineNode(
@@ -1161,6 +1190,10 @@ var es5_visitors = (function () {
             ) ||
             getThisAssignmentSuperCallLineNode(
               possibleExpressionStatements,
+              superVariableIdentifier
+            ) ||
+            getReturnSuperCallLineNode(
+              possibleReturnStatements,
               superVariableIdentifier
             );
 
