@@ -219,6 +219,26 @@ public class Runtime {
     private static AtomicInteger nextRuntimeId = new AtomicInteger(0);
     private final static ThreadLocal<Runtime> currentRuntime = new ThreadLocal<Runtime>();
     private final static Map<Integer, Runtime> runtimeCache = new ConcurrentHashMap<>();
+    private static volatile Runtime[] runtimesById = new Runtime[8];
+    private static final int MAX_INDEXED_RUNTIME_ID = 1024;
+
+    private static synchronized void indexRuntime(int runtimeId, Runtime runtime) {
+        if (runtimeId < 0 || runtimeId >= MAX_INDEXED_RUNTIME_ID) {
+            return;
+        }
+        Runtime[] index = runtimesById;
+        index = Arrays.copyOf(index, Math.max(index.length, Integer.highestOneBit(runtimeId) * 2));
+        index[runtimeId] = runtime;
+        runtimesById = index;
+    }
+
+    private static Runtime runtimeForId(int runtimeId) {
+        Runtime[] index = runtimesById;
+        if (runtimeId >= 0 && runtimeId < index.length) {
+            return index[runtimeId];
+        }
+        return runtimeCache.get(runtimeId);
+    }
     public static boolean nativeLibraryLoaded;
 
     private static final ClassStorageService classStorageService = new ClassStorageServiceImpl(ClassCacheImpl.INSTANCE, ClassLoadersCollectionImpl.INSTANCE);
@@ -286,6 +306,7 @@ public class Runtime {
                 classResolver = new ClassResolver(classStorageService);
 
                 runtimeCache.put(this.runtimeId, this);
+                indexRuntime(this.runtimeId, this);
 
                 gcListener = GcListener.getInstance(config.appConfig.getMemoryCheckInterval(), config.appConfig.getFreeMemoryRatio());
                 currentRuntime.set(this);
@@ -306,7 +327,7 @@ public class Runtime {
             // Attempt to retrieve the runtime id from the currently
             // entered V8 isolate
             int runtimeId = getCurrentRuntimeId();
-            runtime = runtimeCache.get(runtimeId);
+            runtime = runtimeForId(runtimeId);
         }
 
         return runtime;
@@ -486,6 +507,7 @@ public class Runtime {
             // the instance, so a failed bootstrap must not leave a stale one
             // reachable through the caches.
             runtimeCache.remove(runtime.getRuntimeId());
+            indexRuntime(runtime.getRuntimeId(), null);
             currentRuntime.remove();
             GcListener.unsubscribe(runtime);
             throw t;
@@ -579,6 +601,7 @@ public class Runtime {
     @RuntimeCallable
     public static void detachRuntime(int runtimeId) {
         Runtime runtime = runtimeCache.remove(runtimeId);
+        indexRuntime(runtimeId, null);
         if (runtime != null) {
             GcListener.unsubscribe(runtime);
 
@@ -603,6 +626,7 @@ public class Runtime {
             // failed bootstrap doesn't leave a stale, half-initialized runtime
             // reachable through the caches
             runtimeCache.remove(runtime.getRuntimeId());
+            indexRuntime(runtime.getRuntimeId(), null);
             currentRuntime.remove();
             GcListener.unsubscribe(runtime);
             throw t;
@@ -838,14 +862,26 @@ public class Runtime {
                 runtime.currentObjectId = -1;
                 runtime.makeInstanceStrong(instance, objectId);
             } else {
-                runtime.createJSInstance(instance);
+                objectId = runtime.createJSInstance(instance);
             }
+
+            recordOwningRuntime(instance, runtime.getRuntimeId(), objectId);
         } finally {
             frame.close();
         }
     }
 
-    private void createJSInstance(Object instance) {
+    private static void recordOwningRuntime(Object instance, int runtimeId, int objectId) {
+        if (instance instanceof NativeScriptRuntimeBound) {
+            NativeScriptRuntimeBound bound = (NativeScriptRuntimeBound) instance;
+            if (bound.getRuntimeTag__ns() == 0) {
+                bound.setObjectId__ns(objectId);
+                bound.setRuntimeTag__ns(runtimeId + 1);
+            }
+        }
+    }
+
+    private int createJSInstance(Object instance) {
         int javaObjectID = generateNewObjectId(getRuntimeId());
 
         makeInstanceStrong(instance, javaObjectID);
@@ -870,6 +906,8 @@ public class Runtime {
         if (logger.isEnabled()) {
             logger.write("JSInstance for " + instance.getClass().toString() + " created with overrides");
         }
+
+        return javaObjectID;
     }
 
     @RuntimeCallable
@@ -1123,12 +1161,31 @@ public class Runtime {
     }
 
     public static Object callJSMethod(int runtimeId, Object javaObject, String methodName, Class<?> retType, boolean isConstructor, long delay, Object... args) throws NativeScriptException {
-        Runtime runtime = Runtime.runtimeCache.get(runtimeId);
+        Runtime runtime = null;
+        Integer javaObjectID = null;
+
+        if (javaObject instanceof NativeScriptRuntimeBound) {
+            NativeScriptRuntimeBound bound = (NativeScriptRuntimeBound) javaObject;
+            int tag = bound.getRuntimeTag__ns();
+            if (tag != 0) {
+                runtime = runtimeForId(tag - 1);
+                int hint = bound.getObjectId__ns();
+                if (runtime != null && hint != ObjectTable.NO_ID && runtime.objectTable.get(hint) == javaObject) {
+                    javaObjectID = hint;
+                }
+            }
+        }
+
+        if (runtime == null) {
+            runtime = runtimeForId(runtimeId);
+        }
 
         // Resolve the object's id on the found runtime once and reuse it (the common
         // path previously looked it up here for the ownership check AND again in
         // callJSMethodImpl). Re-resolve only when we switch to a different runtime.
-        Integer javaObjectID = (runtime != null) ? runtime.getJavaObjectID(javaObject) : null;
+        if (javaObjectID == null && runtime != null) {
+            javaObjectID = runtime.getJavaObjectID(javaObject);
+        }
 
         // If we didn't find a runtime by id, or the one we found doesn't own this
         // object, locate the runtime that actually created it. This happens when a

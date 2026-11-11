@@ -53,7 +53,29 @@ public class GeneratorTest {
         Class<?> helloClass = InMemoryJavaCompiler.compile(binding.getClassname(), sourceCode.toString(), options);
 
         Assert.assertNotNull(helloClass);
-        Assert.assertEquals(3, helloClass.getDeclaredMethods().length);
+        Assert.assertEquals(7, helloClass.getDeclaredMethods().length);
+    }
+
+    @Test
+    public void testBindingCarriesARuntimeTagAndObjectId() throws Exception {
+        List<String> lines = Utils.getDataRowsFromResource("datarow-named-extend.txt");
+        DataRow dataRow = new DataRow(lines.get(0));
+
+        Generator generator = new Generator(null, new ArrayList<DataRow>());
+        Binding binding = generator.generateBinding(dataRow);
+
+        Iterable<String> options = new ArrayList<String>(Arrays.asList("-cp", dependenciesDir));
+        Class<?> boundClass = InMemoryJavaCompiler.compile(binding.getClassname(), binding.getContent(), options);
+
+        Assert.assertTrue(com.tns.NativeScriptRuntimeBound.class.isAssignableFrom(boundClass));
+        Assert.assertTrue(java.lang.reflect.Modifier.isVolatile(boundClass.getDeclaredField("runtimeTag__ns").getModifiers()));
+
+        com.tns.NativeScriptRuntimeBound instance = (com.tns.NativeScriptRuntimeBound) boundClass.getDeclaredConstructor().newInstance();
+        Assert.assertEquals(0, instance.getRuntimeTag__ns());
+        instance.setRuntimeTag__ns(3);
+        instance.setObjectId__ns(42);
+        Assert.assertEquals(3, instance.getRuntimeTag__ns());
+        Assert.assertEquals(42, instance.getObjectId__ns());
     }
 
     @Test
@@ -79,7 +101,7 @@ public class GeneratorTest {
         Class<?> helloClass = InMemoryJavaCompiler.compile("com.tns.gen.com.example.MyInterface", sourceCode.toString(), options);
 
         Assert.assertNotNull(helloClass);
-        Assert.assertEquals(3, helloClass.getDeclaredMethods().length);  // 3 methods (includes 'hashCode__super' and 'equals__super')
+        Assert.assertEquals(7, helloClass.getDeclaredMethods().length);  // 7 methods (includes 'hashCode__super', 'equals__super' and the runtime tag and object id accessors)
     }
 
     @Test
@@ -127,7 +149,7 @@ public class GeneratorTest {
         Class<?> ComplexClass = InMemoryJavaCompiler.compile(binding.getClassname(), sourceCode.toString(), options);
 
         Assert.assertNotNull(ComplexClass);
-        Assert.assertEquals(4, ComplexClass.getDeclaredMethods().length); // 1 + constructor + (equals + hashcode)
+        Assert.assertEquals(8, ComplexClass.getDeclaredMethods().length); // 1 + constructor + (equals + hashcode) + (runtime tag and object id accessors)
     }
 
     @Test
