@@ -8,7 +8,7 @@
 namespace tns {
     class JEnv {
     public:
-        JEnv() : m_env(s_threadEnv != nullptr ? s_threadEnv : GetEnvSlow()) {}
+        JEnv() : m_env(CachedOrSlowEnv()) {}
 
         JEnv(JNIEnv *jniEnv) : m_env(jniEnv != nullptr ? jniEnv : JEnv().m_env) {}
 
@@ -451,17 +451,24 @@ namespace tns {
 
         static void UnpinThreadEnv();
 
+    private:
+        struct ThreadEnv {
+            JNIEnv *env = nullptr;
+            bool pinned = false;
+        };
+
+    public:
         class EntryScope {
         public:
-            explicit EntryScope(JNIEnv *env) : m_active(!s_threadEnvPinned), m_previous(s_threadEnv) {
+            explicit EntryScope(JNIEnv *env) : m_thread(s_thread), m_active(!m_thread.pinned), m_previous(m_thread.env) {
                 if (m_active) {
-                    s_threadEnv = env;
+                    m_thread.env = env;
                 }
             }
 
             ~EntryScope() {
-                if (m_active && !s_threadEnvPinned) {
-                    s_threadEnv = m_previous;
+                if (m_active && !m_thread.pinned) {
+                    m_thread.env = m_previous;
                 }
             }
 
@@ -470,6 +477,7 @@ namespace tns {
             EntryScope &operator=(const EntryScope &) = delete;
 
         private:
+            ThreadEnv &m_thread;
             bool m_active;
             JNIEnv *m_previous;
         };
@@ -477,12 +485,16 @@ namespace tns {
     private:
         static JNIEnv *GetEnvSlow();
 
+        static JNIEnv *CachedOrSlowEnv() {
+            JNIEnv *env = s_thread.env;
+            return env != nullptr ? env : GetEnvSlow();
+        }
+
         void CheckForJavaException();
 
         JNIEnv *m_env;
 
-        static thread_local JNIEnv *s_threadEnv;
-        static thread_local bool s_threadEnvPinned;
+        static thread_local ThreadEnv s_thread;
 
         static JavaVM *s_jvm;
 
