@@ -68,7 +68,7 @@ namespace tns {
 
         static JsValue
         CallJSMethod(JsRuntime &rt, JNIEnv *jEnv, const JsValue &jsObject, jclass claz,
-                     const std::string &methodName, int javaObjectId, const JavaCallArgs &args);
+                     const JSMethodCache::MethodName &methodName, int javaObjectId, const JavaCallArgs &args);
 
         static JsValue
         GetJavaField(JsRuntime &rt, const JsValue &caller,

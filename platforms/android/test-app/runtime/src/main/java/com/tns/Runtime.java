@@ -58,7 +58,7 @@ public class Runtime {
 
     private native Object runScript(int runtimeId, String filePath) throws NativeScriptException;
 
-    private native Object callJSMethodNative(int runtimeId, int javaObjectID, Class<?> claz, String methodName, int retType, boolean isConstructor, int argCount, long[] argValues, Object[] argRefs) throws NativeScriptException;
+    private native Object callJSMethodNative(int runtimeId, int javaObjectID, Class<?> claz, String methodName, int methodNameId, int retType, boolean isConstructor, int argCount, long[] argValues, Object[] argRefs) throws NativeScriptException;
 
     private native void createJSInstanceNative(int runtimeId, Object javaObject, int javaObjectID, String canonicalName);
 
@@ -1279,7 +1279,7 @@ public class Runtime {
         if (enableMultithreadedJavascript || isWorkThread) {
             PackagedArgs packagedArgs = packageArgs(tmpArgs);
             try {
-                ret = callJSMethodNative(getRuntimeId(), javaObjectID, claz, methodName, returnType, isConstructor, packagedArgs.count, packagedArgs.values, packagedArgs.refs);
+                ret = callJSMethodNative(getRuntimeId(), javaObjectID, claz, methodName, MethodNameIds.idOf(methodName), returnType, isConstructor, packagedArgs.count, packagedArgs.values, packagedArgs.refs);
             } catch (NativeScriptException e) {
                 if (discardUncaughtJsExceptions) {
                     String errorMessage = "Error on \"" + Thread.currentThread().getName() + "\" thread for callJSMethodNative\n";
@@ -1300,7 +1300,7 @@ public class Runtime {
                     synchronized (this) {
                         try {
                             final PackagedArgs packagedArgs = packageArgs(tmpArgs);
-                            arr[0] = callJSMethodNative(getRuntimeId(), javaObjectID, claz, methodName, returnType, isCtor, packagedArgs.count, packagedArgs.values, packagedArgs.refs);
+                            arr[0] = callJSMethodNative(getRuntimeId(), javaObjectID, claz, methodName, MethodNameIds.idOf(methodName), returnType, isCtor, packagedArgs.count, packagedArgs.values, packagedArgs.refs);
                         } catch (NativeScriptException e) {
                             if (discardUncaughtJsExceptions) {
                                 String errorMessage = "Error on \"" + Thread.currentThread().getName() + "\" thread for callJSMethodNative\n";

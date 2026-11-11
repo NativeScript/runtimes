@@ -166,8 +166,8 @@ namespace tns {
                                jstring className);
 
         jobject CallJSMethodNative(JNIEnv *_env, jobject obj, jint javaObjectID, jclass claz,
-                                   jstring methodName, jint retType, jboolean isConstructor,
-                                   const JavaCallArgs &args);
+                                   jstring methodName, jint methodNameId, jint retType,
+                                   jboolean isConstructor, const JavaCallArgs &args);
 
         void
         PassExceptionToJsNative(JNIEnv *env, jobject obj, jthrowable exception, jstring message,
@@ -259,7 +259,15 @@ namespace tns {
     class JSMethodCache {
     public:
 
+        struct MethodName {
+            int id = -1;
+            std::string name;
+            engine::Value value;
+        };
+
         explicit JSMethodCache(Runtime *_rt) : rt(_rt) {}
+
+        const MethodName &getMethodName(jstring javaName, int id);
 
         ~JSMethodCache() {
             cleanupCache();
@@ -268,19 +276,18 @@ namespace tns {
         // An owned engine::Value is what a napi_ref was here: a handle that
         // survives handle scopes. There is no refcount to manage, so the cache
         // stores the value directly and drops it by erasing the entry.
-        void cacheMethod(int javaObjectId, const std::string &methodName,
-                         const engine::Value &jsMethod) {
-            methodCache[javaObjectId][methodName] =
+        void cacheMethod(int javaObjectId, int methodNameId, const engine::Value &jsMethod) {
+            methodCache[javaObjectId][methodNameId] =
                     engine::Value(rt->GetJSRuntime(), jsMethod);
         }
 
-        engine::Value getCachedMethod(int javaObjectId, const std::string &methodName) {
+        engine::Value getCachedMethod(int javaObjectId, int methodNameId) {
             auto it = methodCache.find(javaObjectId);
             if (it == methodCache.end()) {
                 return engine::Value::undefined();
             }
 
-            auto methodIt = it->second.find(methodName);
+            auto methodIt = it->second.find(methodNameId);
             if (methodIt != it->second.end()) {
                 if (methodIt->second.isUndefined() || methodIt->second.isNull()) {
                     it->second.erase(methodIt->first);
@@ -301,12 +308,15 @@ namespace tns {
 
         void cleanupCache() {
             methodCache.clear();
+            methodNames.clear();
         }
 
 
     private:
         Runtime *rt;
-        robin_hood::unordered_map<int, robin_hood::unordered_map<std::string, engine::Value>> methodCache;
+        robin_hood::unordered_map<int, robin_hood::unordered_map<int, engine::Value>> methodCache;
+
+        std::vector<std::unique_ptr<MethodName>> methodNames;
 
     };
 

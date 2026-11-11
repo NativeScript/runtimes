@@ -713,9 +713,23 @@ int Runtime::GetReader() {
     return m_mainLooper_fd[0];
 }
 
+const JSMethodCache::MethodName &JSMethodCache::getMethodName(jstring javaName, int id) {
+    if (static_cast<size_t>(id) >= methodNames.size()) {
+        methodNames.resize(id + 1);
+    }
+    auto &entry = methodNames[id];
+    if (entry == nullptr) {
+        entry = std::make_unique<MethodName>();
+        entry->id = id;
+        entry->name = ArgConverter::jstringToString(javaName);
+        entry->value = engine::Value(rt->GetJSRuntime(), ArgConverter::convertToJsString(rt->GetJSRuntime(), entry->name));
+    }
+    return *entry;
+}
+
 jobject
 Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclass claz,
-                            jstring methodName,
+                            jstring methodName, jint methodNameId,
                             jint retType, jboolean isConstructor, const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
     engine::Runtime &rt = engineHost->GetRuntime();
@@ -737,11 +751,11 @@ Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclas
         m_objectManager->SetJavaClass(jsObject, instanceClass);
     }
 
-    string method_name = ArgConverter::jstringToString(methodName);
+    auto &method = js_method_cache->getMethodName(methodName, methodNameId);
 
-    DEBUG_WRITE("CallJSMethodNative called jsObject %s", method_name.c_str());
+    DEBUG_WRITE("CallJSMethodNative called jsObject %s", method.name.c_str());
 
-    auto jsResult = CallbackHandlers::CallJSMethod(rt, jEnv, jsObject, claz, method_name,
+    auto jsResult = CallbackHandlers::CallJSMethod(rt, jEnv, jsObject, claz, method,
                                                    javaObjectID, args);
 
     if (jsResult.isUndefined() || jsResult.isNull()) return nullptr;

@@ -1211,7 +1211,7 @@ vector<string> CallbackHandlers::GetTypeMetadata(const string &name, int index) 
 }
 
 napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
-                                          napi_value jsObject, jclass claz,const string &methodName,int javaObjectId,
+                                          napi_value jsObject, jclass claz, const JSMethodCache::MethodName &methodName, int javaObjectId,
                                           const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
     napi_status status;
@@ -1220,23 +1220,23 @@ napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
 
 #ifndef __HERMES__
     auto runtime = Runtime::GetRuntime(env);
-    method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName);
+    method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName.id);
     if (!method) {
 #endif
-        NAPI_GUARD(napi_get_named_property(env, jsObject, methodName.c_str(), &method)) {}
+        NAPI_GUARD(napi_get_property(env, jsObject, napi_util::get_ref_value(env, methodName.value), &method)) {}
 #ifndef __HERMES__
         if (napi_util::is_of_type(env, method, napi_function)) {
-            runtime->js_method_cache->cacheMethod(javaObjectId, methodName, method);
+            runtime->js_method_cache->cacheMethod(javaObjectId, methodName.id, method);
         }
     }
 #endif
 
     if (method == nullptr || !napi_util::is_of_type(env, method, napi_function)) {
         stringstream ss;
-        ss << "Cannot find method '" << methodName << "' implementation";
+        ss << "Cannot find method '" << methodName.name << "' implementation";
         throw NativeScriptException(ss.str());
     } else {
-        DEBUG_WRITE("Calling JS Method %s", methodName.c_str());
+        DEBUG_WRITE("Calling JS Method %s", methodName.name.c_str());
 
         bool exceptionPending;
         NAPI_GUARD(napi_is_exception_pending(env, &exceptionPending)) {}
@@ -1273,7 +1273,7 @@ napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
             if (exceptionPending) {
                 napi_value error;
                 NAPI_GUARD(napi_get_and_clear_last_exception(env, &error)) {}
-                throw NativeScriptException(env, error, "Error calling js method: " + methodName);
+                throw NativeScriptException(env, error, "Error calling js method: " + methodName.name);
             }
         }
     }

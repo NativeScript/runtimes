@@ -1171,26 +1171,26 @@ vector<string> CallbackHandlers::GetTypeMetadata(const string &name, int index) 
 
 JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
                                        const JsValue &jsObject, jclass claz,
-                                       const string &methodName, int javaObjectId,
+                                       const JSMethodCache::MethodName &methodName, int javaObjectId,
                                        const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
 
     auto runtime = Runtime::GetRuntime(rt);
-    JsValue method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName);
+    JsValue method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName.id);
     if (method.isUndefined()) {
-        method = jsObject.asObjectBorrowed(rt).getProperty(rt, methodName);
+        method = jsObject.asObjectBorrowed(rt).getProperty(rt, methodName.value);
         if (method.isObject() && method.asObjectBorrowed(rt).isFunction(rt)) {
-            runtime->js_method_cache->cacheMethod(javaObjectId, methodName, method);
+            runtime->js_method_cache->cacheMethod(javaObjectId, methodName.id, method);
         }
     }
 
     if (!method.isObject() || !method.asObjectBorrowed(rt).isFunction(rt)) {
         stringstream ss;
-        ss << "Cannot find method '" << methodName << "' implementation";
+        ss << "Cannot find method '" << methodName.name << "' implementation";
         throw NativeScriptException(ss.str());
     }
 
-    DEBUG_WRITE("Calling JS Method %s", methodName.c_str());
+    DEBUG_WRITE("Calling JS Method %s", methodName.name.c_str());
 
     auto fn = method.asObjectBorrowed(rt).asFunction(rt);
     auto receiver = jsObject.asObjectBorrowed(rt);
@@ -1217,9 +1217,9 @@ JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
         return fn.callWithThis(rt, receiver);
     } catch (JsError &e) {
         if (e.value() != nullptr) {
-            throw NativeScriptException(rt, *e.value(), "Error calling js method: " + methodName);
+            throw NativeScriptException(rt, *e.value(), "Error calling js method: " + methodName.name);
         }
-        throw NativeScriptException("Error calling js method: " + methodName + ": " + e.what());
+        throw NativeScriptException("Error calling js method: " + methodName.name + ": " + e.what());
     }
 }
 
