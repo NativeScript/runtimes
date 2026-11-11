@@ -60,6 +60,15 @@ JsValue Guarded(JsRuntime &rt, Fn &&fn) {
     }
 }
 
+constexpr size_t kManyMembers = 64;
+
+void MoveToDictionaryMode(JsRuntime &rt, JsObject &object) {
+    object.setProperty(rt, "__ns_dictionary_a", true);
+    object.setProperty(rt, "__ns_dictionary_b", true);
+    js_util::delete_property(rt, JsValue(rt, object), js_util::to_js_string(rt, "__ns_dictionary_a"));
+    js_util::delete_property(rt, JsValue(rt, object), js_util::to_js_string(rt, "__ns_dictionary_b"));
+}
+
 // Defines `name` on `object` as an accessor backed by the given host functions.
 void DefineAccessor(JsRuntime &rt, const JsObject &object, const char *name,
                     engine::HostFunctionType getter, engine::HostFunctionType setter) {
@@ -1436,20 +1445,40 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
     // get candidates from static fields metadata
     auto staticFieldCout = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
+    bool manyFields = staticFieldCout > kManyMembers;
+    if (manyFields) {
+        MoveToDictionaryMode(rt, constructor);
+    }
     for (auto i = 0; i < staticFieldCout; i++) {
         auto entry = MetadataReader::ReadStaticFieldEntry(&curPtr);
         auto &fieldName = entry.getName();
         auto fieldInfo = new FieldCallbackData(entry);
         fieldInfo->objectManager = objectManager;
-        DefineAccessor(rt, constructor, fieldName.c_str(),
-                       [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
-                                   size_t) -> JsValue {
-                           return FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
-                       },
-                       [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
-                                   size_t argc) -> JsValue {
-                           return FieldAccessorSetterCallback(rt, thisVal, args, argc, fieldInfo);
-                       });
+        if (manyFields && fieldInfo->metadata.getIsFinal()) {
+            DefineAccessor(rt, constructor, fieldName.c_str(),
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
+                                       size_t) -> JsValue {
+                               JsValue value = FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
+                               if (thisVal.isObject()) {
+                                   js_util::define_property_value(
+                                           rt, thisVal.asObjectBorrowed(rt),
+                                           fieldInfo->metadata.getName().c_str(), value,
+                                           true, false, false);
+                               }
+                               return value;
+                           },
+                           nullptr);
+        } else {
+            DefineAccessor(rt, constructor, fieldName.c_str(),
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *,
+                                       size_t) -> JsValue {
+                               return FieldAccessorGetterCallback(rt, thisVal, fieldInfo);
+                           },
+                           [fieldInfo](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
+                                       size_t argc) -> JsValue {
+                               return FieldAccessorSetterCallback(rt, thisVal, args, argc, fieldInfo);
+                           });
+        }
         cache->fieldCallbackData.push_back(fieldInfo);
     }
 

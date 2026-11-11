@@ -24,6 +24,21 @@
 using namespace std;
 
 namespace {
+constexpr size_t kManyMembers = 64;
+
+void MoveToDictionaryMode(napi_env env, napi_value object) {
+    napi_value first;
+    napi_value second;
+    napi_create_string_utf8(env, "__ns_dictionary_a", NAPI_AUTO_LENGTH, &first);
+    napi_create_string_utf8(env, "__ns_dictionary_b", NAPI_AUTO_LENGTH, &second);
+    napi_value marker = napi_util::get_true(env);
+    bool deleted;
+    napi_set_property(env, object, first, marker);
+    napi_set_property(env, object, second, marker);
+    napi_delete_property(env, object, first, &deleted);
+    napi_delete_property(env, object, second, &deleted);
+}
+
 napi_value EnsureConstructorThis(napi_env env, napi_value jsThis, napi_value prototype) {
     if (!napi_util::is_null_or_undefined(env, jsThis)) {
         return jsThis;
@@ -1700,14 +1715,22 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
     // get candidates from static fields metadata
     auto staticFieldCout = *reinterpret_cast<uint16_t *>(curPtr);
     curPtr += sizeof(uint16_t);
+    bool manyFields = staticFieldCout > kManyMembers;
+    if (manyFields) {
+        MoveToDictionaryMode(env, constructor);
+    }
     for (auto i = 0; i < staticFieldCout; i++) {
         auto entry = MetadataReader::ReadStaticFieldEntry(&curPtr);
         auto &fieldName = entry.getName();
         auto fieldInfo = new FieldCallbackData(entry);
-        napi_value method;
-        napi_util::define_property(env, constructor, fieldName.c_str(), nullptr,
-                                   FieldAccessorGetterCallback, FieldAccessorSetterCallback,
-                                   fieldInfo);
+        if (manyFields && fieldInfo->metadata.getIsFinal()) {
+            napi_util::define_property(env, constructor, fieldName.c_str(), nullptr,
+                                       FinalStaticFieldGetterCallback, nullptr, fieldInfo);
+        } else {
+            napi_util::define_property(env, constructor, fieldName.c_str(), nullptr,
+                                       FieldAccessorGetterCallback, FieldAccessorSetterCallback,
+                                       fieldInfo);
+        }
         MetadataNode::GetMetadataNodeCache(env)->fieldCallbackData.push_back(fieldInfo);
         fieldInfo->objectManager = objectManager;
     }
@@ -2157,6 +2180,27 @@ napi_value MetadataNode::FieldAccessorGetterCallback(napi_env env, napi_callback
 
     return UNDEFINED;
 }
+napi_value MetadataNode::FinalStaticFieldGetterCallback(napi_env env, napi_callback_info info) {
+    napi_value value = FieldAccessorGetterCallback(env, info);
+
+    bool exceptionPending = false;
+    napi_is_exception_pending(env, &exceptionPending);
+    if (exceptionPending || value == nullptr) {
+        return value;
+    }
+
+    napi_value jsThis = nullptr;
+    void *data = nullptr;
+    napi_get_cb_info(env, info, nullptr, nullptr, &jsThis, &data);
+    if (jsThis != nullptr && data != nullptr) {
+        auto fieldData = reinterpret_cast<FieldCallbackData *>(data);
+        napi_util::define_property_value(env, jsThis, fieldData->metadata.getName().c_str(), value,
+                                         napi_enumerable);
+    }
+
+    return value;
+}
+
 napi_ref propRef = nullptr;
 napi_value MetadataNode::FieldAccessorSetterCallback(napi_env env, napi_callback_info info) {
     NAPI_CALLBACK_BEGIN(1);
