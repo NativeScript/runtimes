@@ -1409,7 +1409,7 @@ std::vector<MetadataNode::MethodCallbackData *> MetadataNode::SetClassMembersFro
         if (methodName != lastMethodName) {
             callbackData = new MethodCallbackData(this);
             cache->methodCallbackData.push_back(callbackData);
-            auto method = JsFunction::createFromHostFunction(
+            auto method = JsFunction::createFromHostConstructor(
                     rt, engine::PropNameID::forAscii(rt, methodName), 0,
                     [callbackData](JsRuntime &rt, const JsValue &thisVal, const JsValue *args,
                                    size_t argc) -> JsValue {
