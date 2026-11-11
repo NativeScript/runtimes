@@ -42,6 +42,11 @@ function buildSuite() {
     var b = new org.nativescript.Benchmarks();
 
     return [
+        { name: "First access android.R.attr",  iterations: 1, action: function () { void android.R.attr.textColor; } },
+        { name: "First access android.view",    iterations: 1, action: function () { void android.view.View; } },
+        { name: "First access TextView",        iterations: 1, action: function () { void android.widget.TextView; } },
+        { name: "Package member read",          action: function () { for (var i = 0; i < 1e6; i++) void android.widget.TextView; } },
+        { name: "Static final field read",      action: function () { for (var i = 0; i < 1e6; i++) void android.R.attr.textColor; } },
         { name: "Void Method on instance",    action: function () { for (var i = 0; i < 1e6; i++) b.voidMethod1(); } },
         { name: "Field on instance",          action: function () { for (var i = 0; i < 1e6; i++) void b.InstanceField; } },
         { name: "Int Field on instance",      action: function () { for (var i = 0; i < 1e6; i++) void b.IntFieldInstance; } },
