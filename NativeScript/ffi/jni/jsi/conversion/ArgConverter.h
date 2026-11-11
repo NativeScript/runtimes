@@ -21,8 +21,6 @@ namespace tns {
     public:
         static void Init(JsRuntime &rt);
 
-        static int GetJavaArgsLength(JNIEnv *env, const JavaCallArgs &args);
-
         static void ConvertJavaArgsToJsArgs(JsRuntime &rt, const JavaCallArgs &args, size_t length,
                                             JsValue *arr);
 

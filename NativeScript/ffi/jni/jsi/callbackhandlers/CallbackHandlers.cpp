@@ -1161,7 +1161,7 @@ JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
     // a throw. engine:: propagates a JS throw as a JSError, so the equivalent is
     // to let it unwind and convert it here.
     try {
-        int argc = ArgConverter::GetJavaArgsLength(jEnv, args);
+        int argc = args.count;
         if (argc > 0) {
             JsValue *jsArgs = nullptr;
             JsValue stack_args[8];

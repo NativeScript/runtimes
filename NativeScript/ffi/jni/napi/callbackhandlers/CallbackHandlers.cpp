@@ -1203,7 +1203,7 @@ napi_value CallbackHandlers::CallJSMethod(napi_env env, JNIEnv *_jEnv,
         bool exceptionPending;
         NAPI_GUARD(napi_is_exception_pending(env, &exceptionPending)) {}
 
-        int argc = ArgConverter::GetJavaArgsLength(jEnv, args);
+        int argc = args.count;
         if (argc > 0) {
             napi_value* jsArgs = nullptr;
             napi_value stack_args[8];

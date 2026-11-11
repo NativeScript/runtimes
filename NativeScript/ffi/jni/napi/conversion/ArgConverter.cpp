@@ -185,31 +185,21 @@ napi_value ArgConverter::NativeScriptLongFunctionCallback(napi_env env, napi_cal
     return nullptr;
 }
 
-int ArgConverter::GetJavaArgsLength(JNIEnv *env, const JavaCallArgs &args) {
-    return args.types == nullptr ? 0 : env->GetArrayLength(args.types);
-}
-
 void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, const JavaCallArgs &args, size_t argc, napi_value* arr) {
     napi_status status;
     JEnv jenv;
 
     constexpr size_t kInlineArgs = 16;
-    jint inlineTypes[kInlineArgs];
-    jlong inlineValues[kInlineArgs];
-    std::vector<jint> heapTypes;
+    jlong inlineValues[JavaCallArgs::PackedLength(kInlineArgs)];
     std::vector<jlong> heapValues;
-    jint *types = inlineTypes;
     jlong *values = inlineValues;
     if (argc > kInlineArgs) {
-        heapTypes.resize(argc);
-        heapValues.resize(argc);
-        types = heapTypes.data();
+        heapValues.resize(JavaCallArgs::PackedLength(argc));
         values = heapValues.data();
     }
 
     JNIEnv *jni = jenv;
-    jni->GetIntArrayRegion(args.types, 0, argc, types);
-    jni->GetLongArrayRegion(args.values, 0, argc, values);
+    jni->GetLongArrayRegion(args.values, 0, JavaCallArgs::PackedLength(argc), values);
 
     auto runtime = Runtime::GetRuntime(env);
     auto objectManager = runtime->GetObjectManager();
@@ -217,7 +207,7 @@ void ArgConverter::ConvertJavaArgsToJsArgs(napi_env env, const JavaCallArgs &arg
     for (size_t i = 0; i < argc; i++) {
         jlong bits = values[i];
         napi_value jsArg;
-        switch (static_cast<Type>(types[i])) {
+        switch (JavaCallArgs::TypeAt(values, argc, i)) {
             case Type::Boolean:
                 NAPI_GUARD(napi_get_boolean(env, bits != 0, &jsArg)) {}
                 break;

@@ -21,8 +21,6 @@ namespace tns {
     public:
         static void Init(napi_env env);
 
-        static int GetJavaArgsLength(JNIEnv *env, const JavaCallArgs &args);
-
         static void ConvertJavaArgsToJsArgs(napi_env env, const JavaCallArgs &args, size_t length, napi_value* arr);
 
         static napi_value ConvertFromJavaLong(napi_env env, jlong value);
