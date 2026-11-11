@@ -251,6 +251,8 @@ namespace tns {
 
         static jfieldID CURRENT_OBJECTID_FIELD_ID;
 
+        static jfieldID CURRENT_OBJECTCLASS_FIELD_ID;
+
         static jmethodID REGISTER_CONSTRUCTED_INSTANCE_ID;
 
         static jmethodID GET_TYPE_METADATA;
@@ -265,21 +267,7 @@ namespace tns {
 
         static FieldAccessor fieldAccessor;
 
-        struct JavaObjectIdScope {
-            JavaObjectIdScope(JEnv &_jEnv, jfieldID fieldId, jobject runtime, int javaObjectId)
-                    : jEnv(_jEnv), _fieldID(fieldId), _runtime(runtime) {
-                jEnv.SetIntField(_runtime, _fieldID, javaObjectId);
-            }
-
-            ~JavaObjectIdScope() {
-                jEnv.SetIntField(_runtime, _fieldID, -1);
-            }
-
-        private:
-            JEnv jEnv;
-            jfieldID _fieldID;
-            jobject _runtime;
-        };
+        class ConstructionScope;
 
         static std::atomic_int64_t count_;
 

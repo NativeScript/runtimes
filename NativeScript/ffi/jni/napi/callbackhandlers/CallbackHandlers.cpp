@@ -98,6 +98,9 @@ void CallbackHandlers::Init(napi_env env) {
     CURRENT_OBJECTID_FIELD_ID = jEnv.GetFieldID(RUNTIME_CLASS, "currentObjectId", "I");
     assert(CURRENT_OBJECTID_FIELD_ID != nullptr);
 
+    CURRENT_OBJECTCLASS_FIELD_ID = jEnv.GetFieldID(RUNTIME_CLASS, "currentObjectClass", "Ljava/lang/Class;");
+    assert(CURRENT_OBJECTCLASS_FIELD_ID != nullptr);
+
     REGISTER_CONSTRUCTED_INSTANCE_ID = jEnv.GetMethodID(RUNTIME_CLASS, "registerConstructedInstance",
                                                         "(Ljava/lang/Object;I)J");
     assert(REGISTER_CONSTRUCTED_INSTANCE_ID != nullptr);
@@ -547,6 +550,44 @@ napi_value CallbackHandlers::CallJavaMethod(napi_env env, napi_value caller, con
 }
 
 
+class CallbackHandlers::ConstructionScope {
+public:
+    struct Construction {
+        int id;
+        jclass clazz;
+    };
+
+    ConstructionScope(jobject javaRuntime, int javaObjectId, jclass clazz)
+            : _javaRuntime(javaRuntime), _previous(s_current) {
+        Publish({javaObjectId, clazz});
+    }
+
+    ~ConstructionScope() {
+        Publish(_previous);
+    }
+
+    ConstructionScope(const ConstructionScope &) = delete;
+
+    ConstructionScope &operator=(const ConstructionScope &) = delete;
+
+private:
+    void Publish(const Construction &construction) {
+        s_current = construction;
+        JNIEnv *env = JEnv();
+        if (construction.id != -1) {
+            env->SetObjectField(_javaRuntime, CURRENT_OBJECTCLASS_FIELD_ID, construction.clazz);
+        }
+        env->SetIntField(_javaRuntime, CURRENT_OBJECTID_FIELD_ID, construction.id);
+    }
+
+    static thread_local Construction s_current;
+
+    jobject _javaRuntime;
+    Construction _previous;
+};
+
+thread_local CallbackHandlers::ConstructionScope::Construction CallbackHandlers::ConstructionScope::s_current = {-1, nullptr};
+
 bool CallbackHandlers::RegisterInstance(napi_env env, napi_value jsObject,
                                         const std::string &fullClassName,
                                         const ArgsWrapper &argWrapper,
@@ -576,12 +617,9 @@ bool CallbackHandlers::RegisterInstance(napi_env env, napi_value jsObject,
     const auto &mi = MethodCache::ResolveConstructorSignature(env, argWrapper, fullClassName,
                                                        generatedJavaClass, isInterface);
 
-    // while the "instance" is being created, if an exception is thrown during the construction
-    // this scope will guarantee the "javaObjectID" will be set to -1 and won't have an invalid value
     jobject instance;
     {
-        JavaObjectIdScope objIdScope(jEnv, CURRENT_OBJECTID_FIELD_ID, runtime->GetJavaRuntime(),
-                                     javaObjectID);
+        ConstructionScope construction(runtime->GetJavaRuntime(), javaObjectID, generatedJavaClass);
 
         if (argWrapper.type == ArgType::Interface) {
             instance = jEnv.NewObject(generatedJavaClass, mi.mid);
@@ -1904,6 +1942,7 @@ short CallbackHandlers::MAX_JAVA_STRING_ARRAY_LENGTH = 100;
 jclass CallbackHandlers::RUNTIME_CLASS = nullptr;
 jclass CallbackHandlers::JAVA_LANG_STRING = nullptr;
 jfieldID CallbackHandlers::CURRENT_OBJECTID_FIELD_ID = nullptr;
+jfieldID CallbackHandlers::CURRENT_OBJECTCLASS_FIELD_ID = nullptr;
 jmethodID CallbackHandlers::RESOLVE_CLASS_METHOD_ID = nullptr;
 jmethodID CallbackHandlers::REGISTER_CONSTRUCTED_INSTANCE_ID = nullptr;
 jmethodID CallbackHandlers::GET_TYPE_METADATA = nullptr;

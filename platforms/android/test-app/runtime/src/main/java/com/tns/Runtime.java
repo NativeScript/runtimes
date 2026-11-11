@@ -169,6 +169,7 @@ public class Runtime {
     private final java.lang.Runtime dalvikRuntime = java.lang.Runtime.getRuntime();
 
     private int currentObjectId = -1;
+    private Class<?> currentObjectClass;
 
     private ExtractPolicy extractPolicy;
 
@@ -817,7 +818,8 @@ public class Runtime {
 
             int objectId = runtime.currentObjectId;
 
-            if (objectId != -1) {
+            if (objectId != -1 && instance.getClass() == runtime.currentObjectClass) {
+                runtime.currentObjectId = -1;
                 runtime.makeInstanceStrong(instance, objectId);
             } else {
                 runtime.createJSInstance(instance);
