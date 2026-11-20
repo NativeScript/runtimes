@@ -118,7 +118,7 @@ Pod::Spec.new do |s|
   s.homepage = "https://github.com/NativeScript/napi-ios"
   s.license = "Apache-2.0"
   s.author = "NativeScript Team"
-  s.platforms = { :ios => "13.0" }
+  s.platforms = { :ios => "15.0" }
   s.source = { :path => "." }
   s.requires_arc = true
   s.prefix_header_file = "fixtures/TestFixtures-Prefix.h"
