@@ -19,6 +19,18 @@ namespace nativescript {
 
 napi_value JS_NSObject_alloc(napi_env env, napi_callback_info cbinfo);
 
+namespace {
+
+std::atomic<uint64_t> loadedImageGeneration{0};
+
+// Image load functions cannot be unregistered and run on the loading thread
+// with the ObjC runtime lock held, so this only touches process-wide state.
+void onImageLoaded(const struct mach_header* /*header*/) {
+  loadedImageGeneration.fetch_add(1, std::memory_order_release);
+}
+
+}  // namespace
+
 inline bool tryGetInteropPointerArg(napi_env env, napi_value value, void** out) {
   if (out == nullptr || value == nullptr) {
     return false;
@@ -63,6 +75,10 @@ inline bool tryGetInteropPointerArg(napi_env env, napi_value value, void** out) 
 }
 
 void ObjCBridgeState::registerClassGlobals(napi_env env, napi_value global) {
+  static std::once_flag imageLoadObserver;
+  std::call_once(imageLoadObserver, [] { objc_addLoadImageFunc(onImageLoaded); });
+  pendingMdClassesImageGeneration = loadedImageGeneration.load(std::memory_order_acquire);
+
   MDSectionOffset offset = metadata->classesOffset;
   while (offset < metadata->structsOffset) {
     MDSectionOffset originalOffset = offset;
@@ -111,6 +127,8 @@ void ObjCBridgeState::registerClassGlobals(napi_env env, napi_value global) {
     auto nativeClass = objc_getClass(runtimeName);
     if (nativeClass != nil) {
       mdClassesByPointer[nativeClass] = originalOffset;
+    } else {
+      pendingMdClasses.emplace_back(runtimeName, originalOffset);
     }
 
     napi_property_descriptor prop = {
@@ -125,6 +143,29 @@ void ObjCBridgeState::registerClassGlobals(napi_env env, napi_value global) {
 
     napi_define_properties(env, global, 1, &prop);
   }
+}
+
+bool ObjCBridgeState::resolvePendingMetadataClasses() {
+  if (pendingMdClasses.empty()) {
+    return false;
+  }
+
+  uint64_t generation = loadedImageGeneration.load(std::memory_order_acquire);
+  if (generation == pendingMdClassesImageGeneration) {
+    return false;
+  }
+  pendingMdClassesImageGeneration = generation;
+
+  size_t pendingCount = pendingMdClasses.size();
+  std::erase_if(pendingMdClasses, [this](const auto& pending) {
+    Class nativeClass = objc_getClass(pending.first);
+    if (nativeClass == nil) {
+      return false;
+    }
+    mdClassesByPointer.emplace(nativeClass, pending.second);
+    return true;
+  });
+  return pendingMdClasses.size() != pendingCount;
 }
 
 NAPI_FUNCTION(registerClass) {
@@ -267,9 +308,9 @@ NAPI_FUNCTION(classSuperclassFallback) {
     return get_ref_value(env, find->second->constructor);
   }
 
-  auto mdClass = bridgeState->mdClassesByPointer.find(superClass);
-  if (mdClass != bridgeState->mdClassesByPointer.end()) {
-    auto bridgedClass = bridgeState->getClass(env, mdClass->second);
+  MDSectionOffset superClassOffset = MD_SECTION_OFFSET_NULL;
+  if (bridgeState->findMetadataClassOffset(superClass, &superClassOffset)) {
+    auto bridgedClass = bridgeState->getClass(env, superClassOffset);
     return get_ref_value(env, bridgedClass->constructor);
   }
 
