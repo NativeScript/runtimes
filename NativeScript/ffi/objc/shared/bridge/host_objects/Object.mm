@@ -12,6 +12,7 @@ class NativeApiFastEnumerationIteratorHostObject final : public HostObject {
   }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "next") {
       return Function::createFromHostFunction(
@@ -24,6 +25,7 @@ class NativeApiFastEnumerationIteratorHostObject final : public HostObject {
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     addPropertyName(runtime, names, "next");
     return names;
@@ -239,6 +241,7 @@ class NativeApiSuperHostObject final : public HostObject {
   }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (property == "kind") {
       return makeString(runtime, "super");
@@ -301,6 +304,7 @@ class NativeApiSuperHostObject final : public HostObject {
   }
 
   NativeApiHostSetResult set(Runtime& runtime, const PropNameID& name, const Value& value) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (receiver_ == nil || dispatchClass_ == Nil) {
       throw JSError(runtime, "Cannot set property on nil super.");
@@ -342,6 +346,7 @@ class NativeApiSuperHostObject final : public HostObject {
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     addPropertyName(runtime, names, "kind");
     addPropertyName(runtime, names, "toString");
@@ -987,6 +992,7 @@ class NativeApiObjectHostObject final
   }
 
   Value get(Runtime& runtime, const PropNameID& name) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
 
     // Fast path: check expando cache first (hot path for method calls).
@@ -1524,6 +1530,7 @@ class NativeApiObjectHostObject final
   }
 
   NativeApiHostSetResult set(Runtime& runtime, const PropNameID& name, const Value& value) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::string property = name.utf8(runtime);
     if (object_ == nil) {
       throw JSError(runtime, "Cannot set property on nil object.");
@@ -1664,6 +1671,7 @@ class NativeApiObjectHostObject final
   }
 
   std::vector<PropNameID> getPropertyNames(Runtime& runtime) override {
+    bridge_->requireOwnerRuntime(runtime);
     std::vector<PropNameID> names;
     names.reserve(6);
     addPropertyName(runtime, names, "kind");
