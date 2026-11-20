@@ -17,6 +17,7 @@ import {
   defineNativeComponent,
   dispatchNativeComponentCommand,
 } from "./defineNativeComponent";
+import { initWindows, isWindows, runOnUIWindows } from "./windows";
 
 export {
   defineNativeComponent,
@@ -726,6 +727,8 @@ export function installGlobals(): boolean {
 }
 
 export function init(metadataPath = "", options: InstallOptions = {}): boolean {
+  // Windows: the Windows Runtime lives in the UI-thread runtime, reached through scheduleOnUI.
+  if (isWindows) return initWindows();
   const installed =
     NativeScriptNativeApi.isInstalled() ||
     NativeScriptNativeApi.install(metadataPath);
@@ -857,6 +860,7 @@ export function scheduleOnUI<Args extends unknown[], ReturnValue>(
       "NativeScript.scheduleOnUI expects a Worklets callback",
     );
   }
+  if (isWindows) return runOnUIWindows(callback, args);
 
   ensureNativeScriptInstalled();
   const worklets = ensureWorkletsInstalled();
