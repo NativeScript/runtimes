@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.homepage = "https://github.com/NativeScript/runtimes"
   s.license = "Apache-2.0"
   s.author = package["author"]
-  s.platforms = { :ios => "15.1" }
+  s.platforms = { :ios => "15.1", :osx => "14.0" }
   s.source = { :git => "https://github.com/NativeScript/runtimes.git", :tag => "react-native-v#{s.version}" }
   s.requires_arc = false
 
@@ -23,10 +23,17 @@ Pod::Spec.new do |s|
     "native-api/jsi/**/*.h",
     "native-api/ffi/objc/hermes/NativeApiJsi.mm"
   ]
-  s.exclude_files = "ios/Fabric/**/*" unless fabric_enabled
+  s.ios.exclude_files = fabric_enabled ? [] : ["ios/Fabric/**/*"]
+  # Fabric component views host UIKit views; AppKit has no counterpart yet.
+  s.osx.exclude_files = [
+    "ios/Fabric/**/*"
+  ]
   s.public_header_files = "ios/**/*.h"
-  s.resource_bundles = {
-    "NativeScriptNativeApi" => ["metadata/*.nsmd"]
+  s.ios.resource_bundles = {
+    "NativeScriptNativeApi" => ["metadata/metadata.ios*.nsmd"]
+  }
+  s.osx.resource_bundles = {
+    "NativeScriptNativeApi" => ["metadata/metadata.macos*.nsmd"]
   }
   s.vendored_frameworks = "ios/vendor/Libffi.xcframework"
 
