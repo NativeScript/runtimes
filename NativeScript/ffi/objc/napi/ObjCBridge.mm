@@ -1243,6 +1243,7 @@ NAPI_EXPORT void nativescript_init(void* _env, const char* metadata_path,
   ObjCBridgeState* bridgeState = new ObjCBridgeState(env, metadata_path, metadata_ptr);
 #ifndef ENABLE_JS_RUNTIME
   NativeCallbackScope::initialize(env);
+  initForeignThreadCallbacks(env);
 #endif
 
   napi_value objc;
