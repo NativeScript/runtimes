@@ -276,9 +276,11 @@ const sdks = {
   macos: {
     path: getSDKPath("macosx"),
     frameworks: [...COMMON_FRAMEWORKS, ...MACOS_FRAMEWORKS],
+    // The generator leaves out declarations introduced after the target OS, so
+    // the target is the SDK itself; classes missing at runtime resolve to undefined.
     targets: {
-      x86_64: "x86_64-apple-macos11.0",
-      arm64: "arm64-apple-macos11.0",
+      x86_64: `x86_64-apple-macos${getSDKVersion("macosx")}`,
+      arm64: `arm64-apple-macos${getSDKVersion("macosx")}`,
     },
   },
   ios: {
