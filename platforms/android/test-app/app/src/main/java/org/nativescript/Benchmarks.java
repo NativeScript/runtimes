@@ -126,4 +126,16 @@ public class Benchmarks {
     public static void invokeStringCallback(BenchmarkCallback callback) {
         callback.onString("hello");
     }
+
+    public static int invokeThrowingCallback(BenchmarkCallback callback, int count) {
+        int failures = 0;
+        for (int i = 0; i < count; i++) {
+            try {
+                callback.onCallback();
+            } catch (Throwable t) {
+                failures++;
+            }
+        }
+        return failures;
+    }
 }

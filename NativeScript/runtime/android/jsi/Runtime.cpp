@@ -556,6 +556,7 @@ void Runtime::DestroyRuntime() {
     }
     MetadataNode::onDisposeRuntime(rt);
     ArgConverter::onDisposeRuntime(rt);
+    NativeScriptException::ReleaseTransferred(rt);
     tns::GlobalHelpers::onDisposeRuntime(rt);
     this->js_method_cache->cleanupCache();
     delete this->js_method_cache;

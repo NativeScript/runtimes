@@ -103,6 +103,10 @@ function buildSuite() {
             var cb = new org.nativescript.BenchmarkCallback({ onString: function (value) {} });
             for (var i = 0; i < 1e4; i++) Benchmarks.invokeStringCallback(cb);
         } },
+        { name: "Invoke callback that throws", iterations: 5e4, action: function () {
+            var cb = new org.nativescript.BenchmarkCallback({ onCallback: function () { throw new Error("benchmark"); } });
+            Benchmarks.invokeThrowingCallback(cb, 5e4);
+        } },
     ];
 }
 

@@ -69,6 +69,18 @@ class NativeScriptException : public std::exception {
          */
         static void CallJsFuncWithErr(JsRuntime& rt, const JsValue& errObj, bool isDiscarded);
 
+        /*
+         * Java cannot free an engine handle, so a JS error it holds travels as an id into a table
+         * that this class owns, bounded per runtime: the oldest entry is released when the table
+         * is full. An entry is also released when the error comes back to JS, and with its runtime.
+         * An error that is no longer in the table when it comes back is rebuilt from its throwable.
+         */
+        static jlong TransferToJava(JsRuntime& rt, const JsValue& error);
+
+        static bool TakeFromJava(JsRuntime& rt, jlong id, JsValue& out);
+
+        static void ReleaseTransferred(JsRuntime& rt);
+
     private:
         /*
          * Try to get native exception or NativeScriptException from js object
