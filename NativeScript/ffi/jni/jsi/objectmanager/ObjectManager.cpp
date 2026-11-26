@@ -631,20 +631,24 @@ JsValue ObjectManager::CreateJSWrapperHelper(jint javaObjectID, const std::strin
     auto className = (clazz != nullptr) ? GetClassName(clazz) : typeName;
 
     auto node = MetadataNode::GetOrCreate(className);
+    // Reuse the class we already resolved via GetObjectClass on the instance
+    // path instead of re-resolving it with a JNI FindClass. The class is only
+    // stored on JSInstanceInfo::ObjectClazz, which nothing on this path reads,
+    // so a fresh FindClass is pure overhead; only fall back to it for the
+    // typeName-only overload where no instance class was available.
+    jclass linkClazz = clazz;
+    if (linkClazz == nullptr) {
+        JEnv jenv;
+        linkClazz = jenv.FindClass(className);
+    }
+    return CreateJSWrapper(javaObjectID, node, linkClazz);
+}
+
+JsValue ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz) {
     JsValue proxy = js_util::undefined();
     JsValue jsWrapper = node->CreateJSWrapper(*m_rt, this);
     if (jsWrapper.isObject()) {
-        // Reuse the class we already resolved via GetObjectClass on the instance
-        // path instead of re-resolving it with a JNI FindClass. The class is only
-        // stored on JSInstanceInfo::ObjectClazz, which nothing on this path reads,
-        // so a fresh FindClass is pure overhead; only fall back to it for the
-        // typeName-only overload where no instance class was available.
-        jclass linkClazz = clazz;
-        if (linkClazz == nullptr) {
-            JEnv jenv;
-            linkClazz = jenv.FindClass(className);
-        }
-        Link(jsWrapper, javaObjectID, linkClazz, node);
+        Link(jsWrapper, javaObjectID, clazz, node);
         if (node->isArray()) {
             jsWrapper.asObject(*m_rt).setProperty(*m_rt, "__is__javaArray", true);
         }

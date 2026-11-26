@@ -46,6 +46,8 @@ namespace tns {
 
         JsValue CreateJSWrapper(jint javaObjectID, const std::string &typeName, jobject instance);
 
+        JsValue CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz);
+
         JsValue GetOrCreateProxy(jint javaObjectID, const JsValue &instance);
 
         JsValue GetOrCreateProxyWeak(jint javaObjectID, const JsValue &instance);

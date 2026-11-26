@@ -46,6 +46,8 @@ namespace tns {
         napi_value
         CreateJSWrapper(jint javaObjectID, const std::string &typeName, jobject instance);
 
+        napi_value CreateJSWrapper(jint javaObjectID, MetadataNode *node, jclass clazz);
+
         napi_value GetOrCreateProxy(jint javaObjectID, napi_value instance);
 
         napi_value GetOrCreateProxyWeak(jint javaObjectID, napi_value instance);
