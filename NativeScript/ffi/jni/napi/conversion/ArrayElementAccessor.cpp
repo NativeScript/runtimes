@@ -1,6 +1,7 @@
 #include "ArrayElementAccessor.h"
 #include "JsArgToArrayConverter.h"
 #include "ArgConverter.h"
+#include "Coercion.h"
 #include "Util.h"
 #include "NativeScriptException.h"
 #include "Runtime.h"
@@ -142,7 +143,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
     switch (arraySignature[1]) {
         case 'Z': { //bool
             bool b;
-            NAPI_GUARD(napi_get_value_bool(env, value, &b)) {
+            NAPI_GUARD(coerce::GetBool(env, value, &b)) {
                 return;
             }
             jboolean v = static_cast<jboolean>(b);
@@ -151,7 +152,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'B': { //byte
             int32_t i;
-            NAPI_GUARD(napi_get_value_int32(env, value, &i)) {
+            NAPI_GUARD(coerce::GetInt32(env, value, &i)) {
                 return;
             }
             jbyte v = static_cast<jbyte>(i);
@@ -160,8 +161,16 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'C': { //char
             size_t str_len;
-            NAPI_GUARD(napi_get_value_string_utf8(env, value, nullptr, 0, &str_len)) {
-                return;
+            status = napi_get_value_string_utf8(env, value, nullptr, 0, &str_len);
+            if (status != napi_ok) {
+                napi_value coerced;
+                NAPI_GUARD(coerce::ToString(env, value, &coerced)) {
+                    return;
+                }
+                value = coerced;
+                NAPI_GUARD(napi_get_value_string_utf8(env, value, nullptr, 0, &str_len)) {
+                    return;
+                }
             }
             string str(str_len, '\0');
             NAPI_GUARD(napi_get_value_string_utf8(env, value, &str[0], str_len + 1, &str_len)) {
@@ -177,7 +186,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'S': { //short
             int32_t i;
-            NAPI_GUARD(napi_get_value_int32(env, value, &i)) {
+            NAPI_GUARD(coerce::GetInt32(env, value, &i)) {
                 return;
             }
             jshort v = static_cast<jshort>(i);
@@ -186,7 +195,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'I': { //int
             int32_t i;
-            NAPI_GUARD(napi_get_value_int32(env, value, &i)) {
+            NAPI_GUARD(coerce::GetInt32(env, value, &i)) {
                 return;
             }
             jint v = static_cast<jint>(i);
@@ -195,8 +204,17 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'J': { //long
             int64_t l;
-            NAPI_GUARD(napi_get_value_int64(env, value, &l)) {
-                return;
+            status = napi_get_value_int64(env, value, &l);
+            if (status != napi_ok) {
+                napi_valuetype valueType;
+                napi_typeof(env, value, &valueType);
+                if (valueType == napi_object) {
+                    l = ArgConverter::ConvertToJavaLong(env, value);
+                } else {
+                    NAPI_GUARD(coerce::GetInt64(env, value, &l)) {
+                        return;
+                    }
+                }
             }
             jlong v = static_cast<jlong>(l);
             jenv.SetLongArrayRegion((jlongArray) arr, index, 1, &v);
@@ -204,7 +222,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'F': { //float
             double d;
-            NAPI_GUARD(napi_get_value_double(env, value, &d)) {
+            NAPI_GUARD(coerce::GetDouble(env, value, &d)) {
                 return;
             }
             jfloat v = static_cast<jfloat>(d);
@@ -213,7 +231,7 @@ void ArrayElementAccessor::SetArrayElement(napi_env env, napi_value array, uint3
         }
         case 'D': { //double
             double d;
-            NAPI_GUARD(napi_get_value_double(env, value, &d)) {
+            NAPI_GUARD(coerce::GetDouble(env, value, &d)) {
                 return;
             }
             jdouble v = static_cast<jdouble>(d);

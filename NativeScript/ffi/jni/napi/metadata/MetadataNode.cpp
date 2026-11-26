@@ -9,6 +9,7 @@
 #include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
+#include "Coercion.h"
 #include "CallbackHandlers.h"
 #include "NativeScriptAssert.h"
 #include "File.h"
@@ -166,7 +167,7 @@ napi_value MetadataNode::ArrayGetterCallback(napi_env env, napi_callback_info in
 
         napi_value index = argv[0];
         int32_t indexValue;
-        NAPI_GUARD(napi_get_value_int32(env, index, &indexValue)) {
+        NAPI_GUARD(coerce::GetInt32(env, index, &indexValue)) {
             return nullptr;
         }
         auto node = GetInstanceMetadata(env, jsThis);
@@ -235,7 +236,7 @@ napi_value MetadataNode::ArraySetterCallback(napi_env env, napi_callback_info in
         napi_value value = argv[1];
 
         int32_t indexValue;
-        NAPI_GUARD(napi_get_value_int32(env, index, &indexValue)) {
+        NAPI_GUARD(coerce::GetInt32(env, index, &indexValue)) {
             return nullptr;
         }
         auto node = GetInstanceMetadata(env, jsThis);

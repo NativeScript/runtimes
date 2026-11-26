@@ -9,6 +9,7 @@
 #include <android/log.h>
 #include "NativeScriptException.h"
 #include "MetadataNode.h"
+#include "Coercion.h"
 #include "CallbackHandlers.h"
 #include "NativeScriptAssert.h"
 #include "File.h"
@@ -187,7 +188,7 @@ JsValue MetadataNode::CreateJSWrapper(JsRuntime &rt, ObjectManager *objectManage
 JsValue MetadataNode::ArrayGetterCallback(JsRuntime &rt, const JsValue &thisVal,
                                           const JsValue *args, size_t argc) {
     return Guarded(rt, [&]() -> JsValue {
-        int32_t indexValue = argc > 0 ? js_util::get_int32(args[0]) : 0;
+        int32_t indexValue = argc > 0 ? coerce::ToInt32(rt, args[0]) : 0;
         auto node = GetInstanceMetadata(rt, thisVal);
 
         return CallbackHandlers::GetArrayElement(rt, thisVal, indexValue, node->m_name);
@@ -221,7 +222,7 @@ JsValue MetadataNode::ArraySetterCallback(JsRuntime &rt, const JsValue &thisVal,
     return Guarded(rt, [&]() -> JsValue {
         if (argc < 2) return js_util::undefined();
 
-        int32_t indexValue = js_util::get_int32(args[0]);
+        int32_t indexValue = coerce::ToInt32(rt, args[0]);
         auto node = GetInstanceMetadata(rt, thisVal);
 
         CallbackHandlers::SetArrayElement(rt, thisVal, indexValue, node->m_name, args[1]);

@@ -1,4 +1,5 @@
 #include "JsArgToArrayConverter.h"
+#include "Coercion.h"
 #include <sstream>
 #include "ObjectManager.h"
 #include "ArgConverter.h"
@@ -190,7 +191,7 @@ bool JsArgToArrayConverter::ConvertArg(JsRuntime &rt, const JsValue &arg, int in
                         auto strValue = ArgConverter::ConvertToString(rt, castValue);
                         longValue = atoll(strValue.c_str());
                     } else {
-                        longValue = (jlong) js_util::get_number(castValue);
+                        longValue = (jlong) coerce::ToInt64(rt, castValue);
                     }
                 }
                 javaObject = JType::NewLong(jEnv, longValue);
@@ -202,7 +203,7 @@ bool JsArgToArrayConverter::ConvertArg(JsRuntime &rt, const JsValue &arg, int in
                 castValue = NumericCasts::GetCastValue(rt, jsObj);
                 floatValue = 0;
                 if (!castValue.isUndefined()) {
-                    floatValue = (jfloat) js_util::get_number(castValue);
+                    floatValue = (jfloat) coerce::ToDouble(rt, castValue);
                 }
                 javaObject = JType::NewFloat(jEnv, floatValue);
                 SetConvertedObject(jEnv, index, javaObject);
@@ -213,7 +214,7 @@ bool JsArgToArrayConverter::ConvertArg(JsRuntime &rt, const JsValue &arg, int in
                 castValue = NumericCasts::GetCastValue(rt, jsObj);
                 doubleValue = 0;
                 if (!castValue.isUndefined()) {
-                    doubleValue = (jdouble) js_util::get_number(castValue);
+                    doubleValue = (jdouble) coerce::ToDouble(rt, castValue);
                 }
                 javaObject = JType::NewDouble(jEnv, doubleValue);
                 SetConvertedObject(jEnv, index, javaObject);

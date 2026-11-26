@@ -115,5 +115,84 @@ describe("Tests array operations", function () {
 		expect(count).toBe(expectedLength);
 		
 	});
-	
+
+	describe("assigning values of another type to a primitive array element", function () {
+
+		function createArray(wrapperName) {
+			return java.lang.reflect.Array.newInstance(java.lang[wrapperName].class.getField("TYPE").get(null), 1);
+		}
+
+		it("converts the value to a number for float and double arrays", function () {
+			["Float", "Double"].forEach(function (wrapperName) {
+				var arr = createArray(wrapperName);
+
+				arr[0] = undefined;
+				expect(isNaN(arr[0])).toBe(true);
+
+				arr[0] = null;
+				expect(arr[0]).toBe(0);
+
+				arr[0] = "3.5";
+				expect(arr[0]).toBe(3.5);
+
+				arr[0] = true;
+				expect(arr[0]).toBe(1);
+
+				arr[0] = { valueOf: function () { return 7; } };
+				expect(arr[0]).toBe(7);
+			});
+		});
+
+		it("converts the value to an integer for byte, short, int and long arrays", function () {
+			["Byte", "Short", "Integer", "Long"].forEach(function (wrapperName) {
+				var arr = createArray(wrapperName);
+
+				arr[0] = undefined;
+				expect(arr[0]).toBe(0);
+
+				arr[0] = null;
+				expect(arr[0]).toBe(0);
+
+				arr[0] = "42";
+				expect(arr[0]).toBe(42);
+
+				arr[0] = true;
+				expect(arr[0]).toBe(1);
+			});
+		});
+
+		it("uses valueOf of an object assigned to byte, short and int arrays", function () {
+			["Byte", "Short", "Integer"].forEach(function (wrapperName) {
+				var arr = createArray(wrapperName);
+
+				arr[0] = { valueOf: function () { return 7; } };
+				expect(arr[0]).toBe(7);
+			});
+		});
+
+		it("converts the value to a boolean for boolean arrays", function () {
+			var arr = createArray("Boolean");
+
+			arr[0] = "x";
+			expect(arr[0]).toBe(true);
+
+			arr[0] = 0;
+			expect(arr[0]).toBe(false);
+
+			arr[0] = undefined;
+			expect(arr[0]).toBe(false);
+
+			arr[0] = "";
+			expect(arr[0]).toBe(false);
+		});
+
+		it("converts the index of getValueAtIndex and setValueAtIndex to a number", function () {
+			var arr = java.lang.reflect.Array.newInstance(java.lang.Integer.class.getField("TYPE").get(null), 2);
+
+			arr.setValueAtIndex("1", 5);
+			expect(arr.getValueAtIndex(1)).toBe(5);
+			expect(arr.getValueAtIndex("1")).toBe(5);
+		});
+	});
+
 });

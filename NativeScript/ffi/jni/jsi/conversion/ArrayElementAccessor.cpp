@@ -1,6 +1,7 @@
 #include "ArrayElementAccessor.h"
 #include "JsArgToArrayConverter.h"
 #include "ArgConverter.h"
+#include "Coercion.h"
 #include "Util.h"
 #include "NativeScriptException.h"
 #include "Runtime.h"
@@ -114,12 +115,12 @@ void ArrayElementAccessor::SetArrayElement(JsRuntime &rt, const JsValue &array, 
     // chain).
     switch (arraySignature[1]) {
         case 'Z': { //bool
-            jboolean v = static_cast<jboolean>(js_util::get_bool(value));
+            jboolean v = static_cast<jboolean>(coerce::ToBool(rt, value));
             jenv.SetBooleanArrayRegion((jbooleanArray) arr, index, 1, &v);
             break;
         }
         case 'B': { //byte
-            jbyte v = static_cast<jbyte>(js_util::get_int32(value));
+            jbyte v = static_cast<jbyte>(coerce::ToInt32(rt, value));
             jenv.SetByteArrayRegion((jbyteArray) arr, index, 1, &v);
             break;
         }
@@ -134,27 +135,28 @@ void ArrayElementAccessor::SetArrayElement(JsRuntime &rt, const JsValue &array, 
             break;
         }
         case 'S': { //short
-            jshort v = static_cast<jshort>(js_util::get_int32(value));
+            jshort v = static_cast<jshort>(coerce::ToInt32(rt, value));
             jenv.SetShortArrayRegion((jshortArray) arr, index, 1, &v);
             break;
         }
         case 'I': { //int
-            jint v = static_cast<jint>(js_util::get_int32(value));
+            jint v = static_cast<jint>(coerce::ToInt32(rt, value));
             jenv.SetIntArrayRegion((jintArray) arr, index, 1, &v);
             break;
         }
         case 'J': { //long
-            jlong v = static_cast<jlong>(js_util::get_number(value));
+            jlong v = value.isObject() ? static_cast<jlong>(ArgConverter::ConvertToJavaLong(rt, value))
+                                    : static_cast<jlong>(coerce::ToInt64(rt, value));
             jenv.SetLongArrayRegion((jlongArray) arr, index, 1, &v);
             break;
         }
         case 'F': { //float
-            jfloat v = static_cast<jfloat>(js_util::get_number(value));
+            jfloat v = static_cast<jfloat>(coerce::ToDouble(rt, value));
             jenv.SetFloatArrayRegion((jfloatArray) arr, index, 1, &v);
             break;
         }
         case 'D': { //double
-            jdouble v = static_cast<jdouble>(js_util::get_number(value));
+            jdouble v = static_cast<jdouble>(coerce::ToDouble(rt, value));
             jenv.SetDoubleArrayRegion((jdoubleArray) arr, index, 1, &v);
             break;
         }
