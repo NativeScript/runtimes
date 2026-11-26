@@ -1281,6 +1281,38 @@ class Array : public Object {
   }
 
   // See Object::getPropertyBorrowed for the lifetime contract.
+  // Copies the leading numeric elements into `out`. Returns false when an element is not a
+  // number, and the caller falls back to per-element reads. Iterate walks a packed backing
+  // store without a handle or exception check per element.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    v8::Local<v8::Array> array = local(runtime).As<v8::Array>();
+    size_t count = static_cast<size_t>(array->Length());
+    if (count > capacity) count = capacity;
+    struct State {
+      double* out;
+      size_t count;
+      size_t written;
+      bool numbersOnly;
+    } state{out, count, 0, true};
+    v8::Maybe<void> result = array->Iterate(
+        runtime.context(),
+        [](uint32_t index, v8::Local<v8::Value> element, void* data) {
+          auto* s = static_cast<State*>(data);
+          if (index >= s->count) return v8::Array::CallbackResult::kBreak;
+          if (!element->IsNumber()) {
+            s->numbersOnly = false;
+            return v8::Array::CallbackResult::kBreak;
+          }
+          s->out[index] = element.As<v8::Number>()->Value();
+          s->written++;
+          return v8::Array::CallbackResult::kContinue;
+        },
+        &state);
+    if (result.IsNothing() || !state.numbersOnly || state.written != count) return false;
+    *length = count;
+    return true;
+  }
+
   Value getValueAtIndexBorrowed(Runtime& runtime, size_t index) const {
     v8::TryCatch tryCatch(runtime.isolate());
     v8::Local<v8::Value> result;

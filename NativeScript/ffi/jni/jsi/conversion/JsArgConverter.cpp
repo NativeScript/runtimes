@@ -453,7 +453,15 @@ bool JsArgConverter::ConvertJavaScriptArray(JsRuntime &rt, const JsValue &jsArr,
         case 'I': {
             arr = jenv.NewIntArray(arrLength);
             std::vector<jint> ints(arrLength);
-            for (jsize i = 0; i < arrLength; i++) {
+            std::vector<double> numbers(arrLength);
+            size_t copied = 0;
+            bool bulk = jsArray.copyNumbers(rt, numbers.data(), (size_t) arrLength, &copied) &&
+                        copied == (size_t) arrLength;
+            for (jsize i = 0; bulk && i < arrLength; i++) {
+                bulk = numbers[i] >= INT32_MIN && numbers[i] <= INT32_MAX;
+                ints[i] = (jint) numbers[i];
+            }
+            for (jsize i = 0; !bulk && i < arrLength; i++) {
                 ints[i] = (jint) js_util::get_int32(jsArray.getValueAtIndexBorrowed(rt, i));
             }
             jenv.SetIntArrayRegion((jintArray) arr, 0, arrLength, ints.data());
@@ -480,7 +488,10 @@ bool JsArgConverter::ConvertJavaScriptArray(JsRuntime &rt, const JsValue &jsArr,
         case 'D': {
             arr = jenv.NewDoubleArray(arrLength);
             std::vector<jdouble> doubles(arrLength);
-            for (jsize i = 0; i < arrLength; i++) {
+            size_t copied = 0;
+            bool bulk = jsArray.copyNumbers(rt, doubles.data(), (size_t) arrLength, &copied) &&
+                        copied == (size_t) arrLength;
+            for (jsize i = 0; !bulk && i < arrLength; i++) {
                 doubles[i] = (jdouble) js_util::get_number(jsArray.getValueAtIndexBorrowed(rt, i));
             }
             jenv.SetDoubleArrayRegion((jdoubleArray) arr, 0, arrLength, doubles.data());

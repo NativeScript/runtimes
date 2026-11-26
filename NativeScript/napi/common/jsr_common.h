@@ -25,6 +25,11 @@ napi_status js_execute_pending_jobs(napi_env env);
 
 napi_status js_get_engine_ptr(napi_env env, int64_t *engine_ptr);
 napi_status js_adjust_external_memory(napi_env env, int64_t changeInBytes, int64_t* externalMemory);
+
+// Copies the leading elements of a packed numeric JS array into `out`. Returns a failure
+// status when an element is not a number, and the caller falls back to per-element reads.
+napi_status js_get_array_doubles(napi_env env, napi_value array, double* out, uint32_t capacity,
+                                 uint32_t* length);
 napi_status js_cache_script(napi_env env, const char *source, const char *file);
 napi_status js_run_cached_script(napi_env env, const char * file, napi_value script, void* cache, napi_value *result);
 

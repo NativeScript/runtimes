@@ -689,6 +689,20 @@ class Array : public Object {
   Value getValueAtIndex(Runtime& runtime, size_t index) const;
 
   // See Object::getPropertyBorrowed.
+  // Copies the leading numeric elements into `out`. Returns false when an element is not a
+  // number, and the caller falls back to per-element reads.
+  bool copyNumbers(Runtime& runtime, double* out, size_t capacity, size_t* length) const {
+    size_t count = size(runtime);
+    if (count > capacity) count = capacity;
+    for (size_t i = 0; i < count; i++) {
+      Value element = getValueAtIndexBorrowed(runtime, i);
+      if (!element.isNumber()) return false;
+      out[i] = element.getNumber();
+    }
+    *length = count;
+    return true;
+  }
+
   Value getValueAtIndexBorrowed(Runtime& runtime, size_t index) const {
     return getValueAtIndex(runtime, index);
   }
