@@ -53,7 +53,9 @@ namespace tns {
         napi_value GetOrCreateProxyWeak(jint javaObjectID, napi_value instance);
 
         void Link(napi_value object, uint32_t javaObjectID, jclass clazz,
-                  MetadataNode *node = nullptr);
+                  MetadataNode *node = nullptr, bool strongRef = true);
+
+        static constexpr int64_t kWrapperExternalCost = 1024;
 
         // Returns the class metadata stored on the per-instance JSInstanceInfo
         // (host proxy's, or the raw instance's wrap). Used by
@@ -108,6 +110,8 @@ namespace tns {
             // Per-instance class metadata. Under USE_HOST_OBJECT this replaces the
             // "#instance_metadata" property; reachable via GetInstanceNode.
             MetadataNode *node = nullptr;
+            // Set for wrappers held weakly: their finalizer releases the Java side.
+            bool weakWrapper = false;
         };
 
 #ifdef USE_HOST_OBJECT
@@ -167,6 +171,10 @@ namespace tns {
         CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz);
 
         static void JSObjectFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
+
+        static void JSObjectPostFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
+
+        void EnsureInstanceStrong(int javaObjectID);
 
         static void
         JSObjectProxyFinalizerCallback(napi_env env, void *finalizeData, void *finalizeHint);
