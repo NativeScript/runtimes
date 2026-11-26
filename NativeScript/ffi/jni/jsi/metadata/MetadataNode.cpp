@@ -2195,6 +2195,56 @@ JsValue MetadataNode::SuperAccessorGetterCallback(JsRuntime &rt, const JsValue &
     });
 }
 
+static constexpr int kDirectSignatureUnsupported = -2;
+static constexpr int kDirectSignatureMismatch = -1;
+static constexpr int kDirectSignatureUnknown = 0;
+static constexpr int kDirectSignatureMatch = 1;
+
+static bool ResolveDirectParameterKinds(const std::string &signature, std::string &kinds) {
+    kinds.clear();
+    if (signature.empty() || signature[0] != '(') return false;
+    static const std::string stringType = "Ljava/lang/String;";
+    size_t index = 1;
+    while (index < signature.size() && signature[index] != ')') {
+        const char type = signature[index];
+        if (type == 'L') {
+            if (signature.compare(index, stringType.size(), stringType) != 0) return false;
+            kinds.push_back('T');
+            index += stringType.size();
+        } else if (type == 'Z' || type == 'B' || type == 'C' || type == 'S' || type == 'I' ||
+                   type == 'J' || type == 'F' || type == 'D') {
+            kinds.push_back(type);
+            index++;
+        } else {
+            return false;
+        }
+    }
+    return index < signature.size();
+}
+
+int MetadataNode::MatchDirectSignature(MethodCallbackData *data, const JsValue *args, size_t argc) {
+    if (data->cachedIsDirectSignature < 0) {
+        data->cachedIsDirectSignature =
+                ResolveDirectParameterKinds(data->candidates.front().getSig(), data->directParameterKinds) ? 1 : 0;
+    }
+    if (data->cachedIsDirectSignature == 0 || data->directParameterKinds.size() != argc) {
+        return kDirectSignatureUnsupported;
+    }
+    bool hasUnknownArgument = false;
+    for (size_t i = 0; i < argc; i++) {
+        const JsValue &arg = args[i];
+        if (arg.isObject()) return kDirectSignatureUnsupported;
+        if (arg.isNull() || arg.isUndefined()) {
+            hasUnknownArgument = true;
+            continue;
+        }
+        const char kind = data->directParameterKinds[i];
+        const bool compatible = kind == 'T' ? arg.isString() : kind == 'Z' ? arg.isBool() : arg.isNumber();
+        if (!compatible) return kDirectSignatureMismatch;
+    }
+    return hasUnknownArgument ? kDirectSignatureUnknown : kDirectSignatureMatch;
+}
+
 JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
                                      const JsValue *args, size_t argc,
                                      MethodCallbackData *initialCallbackData) {
@@ -2211,6 +2261,7 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
 
         // Fast path for the overwhelmingly common single-overload, non-extension
         // method with no parent chain: skip the candidate-search loop entirely.
+        bool singleCandidate = false;
         if (callbackData->parent == nullptr &&
             callbackData->candidates.size() == 1 &&
             !first.isExtensionFunction &&
@@ -2219,6 +2270,7 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
             selectedCallbackData = callbackData;
             arityCandidates.push_back(&first);
             entry = &first;
+            singleCandidate = true;
         }
 
         while ((callbackData != nullptr) && (entry == nullptr)) {
@@ -2268,6 +2320,17 @@ JsValue MetadataNode::MethodCallback(JsRuntime &rt, const JsValue &thisVal,
         if (initialCallbackData->objectManager == nullptr) {
             initialCallbackData->objectManager =
                     Runtime::GetRuntime(rt)->GetObjectManager();
+        }
+
+        if (singleCandidate) {
+            const int match = MatchDirectSignature(initialCallbackData, args, argc);
+            if (match != kDirectSignatureUnsupported) {
+                return CallbackHandlers::CallJavaMethod(rt, thisVal, *className, methodName,
+                                                        match == kDirectSignatureMismatch ? nullptr : entry,
+                                                        isFromInterface, first.isStatic, false, args, argc,
+                                                        initialCallbackData->objectManager,
+                                                        match == kDirectSignatureMatch);
+            }
         }
 
         size_t metadataMatches = 0;

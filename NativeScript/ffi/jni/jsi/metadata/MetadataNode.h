@@ -107,6 +107,8 @@ private:
 
     explicit MetadataNode(MetadataTreeNode *treeNode);
 
+    static int MatchDirectSignature(MethodCallbackData *data, const JsValue *args, size_t argc);
+
     void SetMissingBaseMethods(
             JsRuntime &rt, const std::vector<MetadataTreeNode *> &skippedBaseTypes,
             const std::vector<MethodCallbackData *> &instanceMethodData,
@@ -305,6 +307,8 @@ private:
         // (-1 = not yet computed, 0 = false, 1 = true).
         int8_t cachedIsFromInterface = -1;
         int8_t cachedIsValueOf = -1;
+        int8_t cachedIsDirectSignature = -1;
+        std::string directParameterKinds;
         // Cached per-runtime ObjectManager (this data is created per runtime, so
         // the pointer's lifetime matches it — no staleness across runtimes).
         tns::ObjectManager *objectManager = nullptr;
