@@ -1,6 +1,7 @@
 #ifndef METADATA_NODE_H
 #define METADATA_NODE_H
 
+#include <mutex>
 #include <string>
 #include "MetadataTreeNode.h"
 #include "MetadataEntry.h"
@@ -250,6 +251,8 @@ private:
     static robin_hood::unordered_map<std::string, MetadataNode *> s_name2NodeCache;
     static robin_hood::unordered_map<std::string, MetadataTreeNode *> s_name2TreeNodeCache;
     static robin_hood::unordered_map<MetadataTreeNode *, MetadataNode *> s_treeNode2NodeCache;
+    // Guards the three caches above. Held only for map access, never across the metadata reader.
+    static std::mutex s_nodeCacheMutex;
     static tns::ConcurrentMap<napi_env, MetadataNodeCache *> s_metadata_node_cache;
     static robin_hood::unordered_map<napi_env, napi_ref> s_arrayObjects;
 

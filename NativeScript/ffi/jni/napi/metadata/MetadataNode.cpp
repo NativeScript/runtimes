@@ -1136,19 +1136,18 @@ void MetadataNode::CreateTopLevelNamespaces(napi_env env) {
 }
 
 MetadataTreeNode *MetadataNode::GetOrCreateTreeNodeByName(const string &className) {
-    MetadataTreeNode *result = nullptr;
-
-    auto itFound = s_name2TreeNodeCache.find(className);
-
-    if (itFound != s_name2TreeNodeCache.end()) {
-        result = itFound->second;
-    } else {
-        result = s_metadataReader.GetOrCreateTreeNodeByName(className);
-
-        s_name2TreeNodeCache.emplace(className, result);
+    {
+        std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+        auto itFound = s_name2TreeNodeCache.find(className);
+        if (itFound != s_name2TreeNodeCache.end()) {
+            return itFound->second;
+        }
     }
 
-    return result;
+    MetadataTreeNode *created = s_metadataReader.GetOrCreateTreeNodeByName(className);
+
+    std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+    return s_name2TreeNodeCache.emplace(className, created).first->second;
 }
 
 string MetadataNode::GetName() {
@@ -1156,54 +1155,53 @@ string MetadataNode::GetName() {
 }
 
 MetadataNode *MetadataNode::GetOrCreate(const string &className) {
-    MetadataNode *node = nullptr;
-
-    auto it = s_name2NodeCache.find(className);
-
-    if (it == s_name2NodeCache.end()) {
-        MetadataTreeNode *treeNode = GetOrCreateTreeNodeByName(className);
-
-        node = GetOrCreateInternal(treeNode);
-
-        s_name2NodeCache.emplace(className, node);
-    } else {
-        node = it->second;
+    {
+        std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+        auto it = s_name2NodeCache.find(className);
+        if (it != s_name2NodeCache.end()) {
+            return it->second;
+        }
     }
 
-    return node;
+    MetadataTreeNode *treeNode = GetOrCreateTreeNodeByName(className);
+
+    MetadataNode *node = GetOrCreateInternal(treeNode);
+
+    std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+    return s_name2NodeCache.emplace(className, node).first->second;
 }
 
 MetadataNode *MetadataNode::GetOrCreateInternal(MetadataTreeNode *treeNode) {
-    MetadataNode *result = nullptr;
-
-    auto it = s_treeNode2NodeCache.find(treeNode);
-
-    if (it != s_treeNode2NodeCache.end()) {
-        result = it->second;
-    } else {
-            auto name = GetJniClassName(treeNode);
-            if (!name.empty()) {
-                auto it2 = s_name2NodeCache.find(name);
-                if ( it2 != s_name2NodeCache.end()) {
-                    result = it2->second;
-                }
-            }
-
-            if (!result) {
-                result = new MetadataNode(treeNode);
-                s_treeNode2NodeCache.emplace(treeNode, result);
-                if (!result->m_name.empty()) {
-                    s_name2NodeCache.emplace(result->m_name, result);
-                }
-            }
+    {
+        std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+        auto it = s_treeNode2NodeCache.find(treeNode);
+        if (it != s_treeNode2NodeCache.end()) {
+            return it->second;
+        }
     }
 
-    auto found = s_treeNode2NodeCache.find(treeNode);
-    if (found == s_treeNode2NodeCache.end()) {
-        s_treeNode2NodeCache.emplace(treeNode, result);
+    auto name = GetJniClassName(treeNode);
+    if (!name.empty()) {
+        std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+        auto it = s_name2NodeCache.find(name);
+        if (it != s_name2NodeCache.end()) {
+            s_treeNode2NodeCache.emplace(treeNode, it->second);
+            return it->second;
+        }
     }
 
-    return result;
+    auto *created = new MetadataNode(treeNode);
+
+    std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+    auto inserted = s_treeNode2NodeCache.emplace(treeNode, created);
+    if (!inserted.second) {
+        delete created;
+        return inserted.first->second;
+    }
+    if (!created->m_name.empty()) {
+        s_name2NodeCache.emplace(created->m_name, created);
+    }
+    return created;
 }
 
 MetadataEntry MetadataNode::GetChildMetadataForPackage(MetadataNode *node, const char *propName) {
@@ -2502,7 +2500,10 @@ napi_value MetadataNode::ExtendMethodCallback(napi_env env, napi_callback_info i
         NAPI_GUARD(napi_set_named_property(env, extendFuncCtor, PRIVATE_TYPE_NAME,
                                 ArgConverter::convertToJsString(env, fullExtendedName))) {}
 
-        s_name2NodeCache.emplace(fullExtendedName, node);
+        {
+            std::lock_guard<std::mutex> lock(s_nodeCacheMutex);
+            s_name2NodeCache.emplace(fullExtendedName, node);
+        }
 
         auto cache = GetMetadataNodeCache(env);
 
@@ -3224,6 +3225,7 @@ MetadataReader MetadataNode::s_metadataReader;
 robin_hood::unordered_map<std::string, MetadataNode *> MetadataNode::s_name2NodeCache;
 robin_hood::unordered_map<std::string, MetadataTreeNode *> MetadataNode::s_name2TreeNodeCache;
 robin_hood::unordered_map<MetadataTreeNode *, MetadataNode *> MetadataNode::s_treeNode2NodeCache;
+std::mutex MetadataNode::s_nodeCacheMutex;
 tns::ConcurrentMap<napi_env, MetadataNode::MetadataNodeCache *> MetadataNode::s_metadata_node_cache;
 robin_hood::unordered_map<napi_env, napi_ref> MetadataNode::s_arrayObjects;
 
