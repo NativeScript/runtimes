@@ -2,6 +2,11 @@
 
 #import <Foundation/Foundation.h>
 #import <TargetConditionals.h>
+#if TARGET_OS_OSX
+#import <AppKit/AppKit.h>
+#else
+#import <UIKit/UIKit.h>
+#endif
 
 #include <memory>
 #include <mutex>
@@ -10,8 +15,10 @@
 
 #include "NativeApiJsiReactNative.h"
 #include "NativeScriptFabricGateway.h"
+#if !TARGET_OS_OSX
 #include "Fabric/NativeScriptComponentRegistration.h"
 #include "Fabric/NativeScriptComponentView.h"
+#endif
 
 #import <React/RCTBridge+Private.h>
 #import <React/RCTConvert.h>
@@ -37,7 +44,13 @@ std::string pathForResource(NSBundle* bundle, NSString* name, NSString* type) {
 }
 
 std::string bundledMetadataPath() {
-#if TARGET_OS_SIMULATOR
+#if TARGET_OS_OSX
+#if defined(__x86_64__)
+  NSString* metadataName = @"metadata.macos.x86_64";
+#else
+  NSString* metadataName = @"metadata.macos.arm64";
+#endif
+#elif TARGET_OS_SIMULATOR
 #if defined(__x86_64__)
   NSString* metadataName = @"metadata.ios-sim.x86_64";
 #else
@@ -199,13 +212,26 @@ RCTImageLoader* currentReactImageLoader() {
   return imageLoader;
 }
 
-UIImage* imageWithRenderingMode(UIImage* image, bool isTemplate) {
+#if TARGET_OS_OSX
+using NativeScriptPlatformImage = NSImage;
+#else
+using NativeScriptPlatformImage = UIImage;
+#endif
+
+NativeScriptPlatformImage* imageWithRenderingMode(NativeScriptPlatformImage* image,
+                                                  bool isTemplate) {
   if (image == nil) {
     return nil;
   }
 
+#if TARGET_OS_OSX
+  NSImage* copy = [[image copy] autorelease];
+  [copy setTemplate:isTemplate];
+  return copy;
+#else
   return [image imageWithRenderingMode:isTemplate ? UIImageRenderingModeAlwaysTemplate
                                                   : UIImageRenderingModeAlwaysOriginal];
+#endif
 }
 
 id imageSourceFromJSIValue(facebook::jsi::Runtime& runtime,
@@ -225,9 +251,9 @@ id imageSourceFromJSIValue(facebook::jsi::Runtime& runtime,
 void callImageLoadCallback(
     std::weak_ptr<worklets::WorkletRuntime> workletRuntimeWeak,
     std::shared_ptr<facebook::jsi::Function> callback,
-    UIImage* image,
+    NativeScriptPlatformImage* image,
     NSString* errorMessage) {
-  UIImage* retainedImage = image != nil ? [image retain] : nil;
+  NativeScriptPlatformImage* retainedImage = image != nil ? [image retain] : nil;
   std::string imageHandle =
       retainedImage != nil ? nativeScriptHandleFromNSObject(retainedImage).UTF8String : "";
   std::string errorText = errorMessage.UTF8String != nullptr ? errorMessage.UTF8String : "";
@@ -380,10 +406,12 @@ bool NativeScriptNativeApiModule::installUIRuntime(jsi::Runtime& runtime,
           nativescript::InstallNativeApiJSI(workletRuntime, config);
         }
 
+#if !TARGET_OS_OSX
 	        // ctx.emit / ctx.setContentSize / ctx.scheduleOnMainQueue targets
 	        // (src/ui/dispatcher.ts); idempotent, safe to call on every
 	        // install (including reload re-installs onto a fresh UI VM).
 	        NativeScriptInstallComponentHostFunctions(workletRuntime);
+#endif
 
 	        std::weak_ptr<worklets::WorkletRuntime> imageWorkletRuntimeWeak(workletRuntimeRef);
 	        auto loadImage = jsi::Function::createFromHostFunction(
@@ -420,11 +448,11 @@ bool NativeScriptNativeApiModule::installUIRuntime(jsi::Runtime& runtime,
 	                                        resizeMode:RCTResizeModeCenter
 	                                     progressBlock:^(int64_t, int64_t) {
 	                                     }
-	                                  partialLoadBlock:^(UIImage*) {
+	                                  partialLoadBlock:^(NativeScriptPlatformImage*) {
 	                                  }
-	                                   completionBlock:^(NSError* error, UIImage* image) {
+	                                   completionBlock:^(NSError* error, NativeScriptPlatformImage* image) {
 	                                     dispatch_async(dispatch_get_main_queue(), ^{
-	                                       UIImage* renderedImage =
+	                                       NativeScriptPlatformImage* renderedImage =
 	                                           imageWithRenderingMode(image, isTemplate);
 	                                       callImageLoadCallback(
 	                                           imageWorkletRuntimeWeak, callback, renderedImage,
@@ -479,6 +507,14 @@ std::string NativeScriptNativeApiModule::__readReloadPhaseMarker(jsi::Runtime&) 
 
 bool NativeScriptNativeApiModule::registerComponent(jsi::Runtime& runtime, std::string name, jsi::Object spec,
                                                      double hookMask, double shouldBeRecycled) {
+#if TARGET_OS_OSX
+  (void)runtime;
+  (void)name;
+  (void)spec;
+  (void)hookMask;
+  (void)shouldBeRecycled;
+  return false;
+#else
   if (name.empty()) {
     return false;
   }
@@ -515,6 +551,7 @@ bool NativeScriptNativeApiModule::registerComponent(jsi::Runtime& runtime, std::
   BOOL shouldBeRecycledValue = shouldBeRecycled > 0;
   NativeScriptRegisterFlavoredComponent(nsName, hookMaskValue, hasShouldBeRecycled, shouldBeRecycledValue);
   return true;
+#endif
 }
 
 }  // namespace facebook::react
