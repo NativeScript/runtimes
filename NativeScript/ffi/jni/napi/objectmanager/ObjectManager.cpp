@@ -39,13 +39,14 @@ ObjectManager::ObjectManager(jobject javaRuntimeObject) :
                                                              "(Ljava/lang/Object;)I");
     assert(GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID != nullptr);
 
-    MAKE_INSTANCE_WEAK_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceWeak",
-                                                   "(I)V");
-    assert(MAKE_INSTANCE_WEAK_METHOD_ID != nullptr);
+    GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID = env.GetMethodID(runtimeClass,
+                                                                       "getOrCreateJavaObjectIDAndClass",
+                                                                       "(Ljava/lang/Object;)J");
+    assert(GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID != nullptr);
 
-    MAKE_INSTANCE_WEAK_BATCH_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceWeak",
-                                                         "(Ljava/nio/ByteBuffer;IZ)V");
-    assert(MAKE_INSTANCE_WEAK_BATCH_METHOD_ID != nullptr);
+    MAKE_INSTANCES_WEAK_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstancesWeak",
+                                                    "([II)V");
+    assert(MAKE_INSTANCES_WEAK_METHOD_ID != nullptr);
 
     MAKE_INSTANCE_STRONG_METHOD_ID = env.GetMethodID(runtimeClass, "makeInstanceStrong",
                                                      "(I)V");
@@ -96,6 +97,13 @@ void ObjectManager::OnDisposeEnv() {
     // Its destructor leaves the weak global refs alive, and the process-wide
     // weak reference table is finite.
     m_cache.clear();
+
+    for (auto &info: m_classInfos) {
+        if (info.clazz != nullptr) {
+            jEnv.DeleteGlobalRef(info.clazz);
+        }
+    }
+    m_classInfos.clear();
 }
 
 napi_value ObjectManager::GetOrCreateProxyWeak(jint javaObjectID, napi_value instance) {
@@ -641,16 +649,7 @@ void ObjectManager::HostObjectProxyPostFinalizer(napi_env env, void *data,
     // instance weak on collection (the old JSObjectProxyFinalizerCallback role).
     if (proxy->isPrimary && proxy->instanceInfo) {
         if (!destroying) {
-            auto objManager = rt->GetObjectManager();
-            auto javaObjectID = proxy->instanceInfo->JavaObjectID;
-            if (objManager->m_weakObjectIds.find(javaObjectID) ==
-                objManager->m_weakObjectIds.end()) {
-                objManager->m_weakObjectIds.emplace(javaObjectID);
-                JEnv jEnv;
-                jEnv.CallVoidMethod(objManager->m_javaRuntimeObject,
-                                    objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
-                                    javaObjectID);
-            }
+            rt->GetObjectManager()->MarkInstanceWeak(proxy->instanceInfo->JavaObjectID);
         }
         delete proxy->instanceInfo;
     }
@@ -783,6 +782,35 @@ int ObjectManager::GetOrCreateObjectId(jobject object) {
     return javaObjectID;
 }
 
+jlong ObjectManager::GetOrCreateObjectIdAndClass(jobject object) {
+    JEnv env;
+    return env.CallLongMethod(m_javaRuntimeObject, GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID,
+                              object);
+}
+
+napi_value ObjectManager::GetOrCreateJSWrapper(jobject object) {
+    jlong packed = GetOrCreateObjectIdAndClass(object);
+    napi_value wrapper = GetJsObjectByJavaObject(IdOf(packed));
+    if (!napi_util::is_null_or_undefined(m_env, wrapper)) {
+        return wrapper;
+    }
+    return CreateJSWrapper(IdOf(packed), ClassIndexOf(packed), object);
+}
+
+ObjectManager::ClassInfo ObjectManager::ResolveClassInfo(jint classIndex, jobject instance) {
+    if (static_cast<size_t>(classIndex) >= m_classInfos.size()) {
+        m_classInfos.resize(classIndex + 1);
+    }
+    ClassInfo &info = m_classInfos[classIndex];
+    if (info.node == nullptr) {
+        JEnv env;
+        JniLocalRef clazz(env.GetObjectClass(instance));
+        info.node = MetadataNode::GetOrCreate(GetClassName((jclass) clazz));
+        info.clazz = (jclass) env.NewGlobalRef(clazz);
+    }
+    return info;
+}
+
 napi_value ObjectManager::GetJsObjectByJavaObject(int javaObjectID) {
     auto it = m_idToObject.find(javaObjectID);
     if (it == m_idToObject.end()) {
@@ -815,6 +843,14 @@ ObjectManager::CreateJSWrapper(jint javaObjectID, const std::string &typeName, j
     JniLocalRef clazz(jenv.GetObjectClass(instance));
 
     return CreateJSWrapperHelper(javaObjectID, typeName, clazz);
+}
+
+napi_value ObjectManager::CreateJSWrapper(jint javaObjectID, jint classIndex, jobject instance) {
+    if (classIndex <= 0) {
+        return CreateJSWrapper(javaObjectID, std::string(), instance);
+    }
+    ClassInfo info = ResolveClassInfo(classIndex, instance);
+    return CreateJSWrapper(javaObjectID, info.node, info.clazz);
 }
 
 napi_value
@@ -854,10 +890,38 @@ napi_value ObjectManager::CreateJSWrapper(jint javaObjectID, MetadataNode *node,
     return proxy;
 }
 
+void ObjectManager::MarkInstanceWeak(int javaObjectID) {
+    if (!m_weakObjectIds.emplace(javaObjectID).second) return;
+    m_pendingWeakIds.insert(javaObjectID);
+    if (m_flushPosted) return;
+    m_flushPosted = true;
+    Runtime::PostFinalizer(m_env, FlushWeakIdsCallback, nullptr, nullptr);
+}
+
+void ObjectManager::FlushWeakIdsCallback(napi_env env, void *, void *) {
+    auto rt = Runtime::GetRuntimeUnchecked(env);
+    if (rt == nullptr || rt->is_destroying) return;
+    rt->GetObjectManager()->FlushWeakIds();
+}
+
+void ObjectManager::FlushWeakIds() {
+    m_flushPosted = false;
+    if (m_pendingWeakIds.empty()) return;
+
+    JEnv jenv;
+    jsize count = static_cast<jsize>(m_pendingWeakIds.size());
+    JniLocalRef ids(jenv.NewIntArray(count));
+    std::vector<jint> buffer(m_pendingWeakIds.begin(), m_pendingWeakIds.end());
+    m_pendingWeakIds.clear();
+    jenv.SetIntArrayRegion(ids, 0, count, buffer.data());
+    jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCES_WEAK_METHOD_ID, (jintArray) ids, count);
+}
+
 void ObjectManager::EnsureInstanceStrong(int javaObjectID) {
     auto it = m_weakObjectIds.find(javaObjectID);
     if (it == m_weakObjectIds.end()) return;
     m_weakObjectIds.erase(it);
+    if (m_pendingWeakIds.erase(javaObjectID) != 0) return;
     JEnv jenv;
     jenv.CallVoidMethod(m_javaRuntimeObject, MAKE_INSTANCE_STRONG_METHOD_ID, javaObjectID);
     DEBUG_WRITE("Making instance strong: %d", javaObjectID);
@@ -971,12 +1035,8 @@ void ObjectManager::JSObjectPostFinalizerCallback(napi_env env, void *finalizeDa
                 objManager->m_idToObject.erase(it);
             }
         }
-        if (!replaced && objManager->m_weakObjectIds.find(data->JavaObjectID) ==
-                         objManager->m_weakObjectIds.end()) {
-            objManager->m_weakObjectIds.emplace(data->JavaObjectID);
-            JEnv jEnv;
-            jEnv.CallVoidMethod(objManager->m_javaRuntimeObject,
-                                objManager->MAKE_INSTANCE_WEAK_METHOD_ID, data->JavaObjectID);
+        if (!replaced) {
+            objManager->MarkInstanceWeak(data->JavaObjectID);
         }
     }
     delete data;
@@ -996,18 +1056,8 @@ void ObjectManager::JSObjectProxyFinalizerCallback(napi_env env, void *finalizeD
     auto rt = Runtime::GetRuntimeUnchecked(env);
     if (rt && !rt->is_destroying) {
 
-        auto objManager = rt->GetObjectManager();
-        auto itFound = objManager->m_weakObjectIds.find(state->JavaObjectID);
-
         DEBUG_WRITE("JS Proxy finalizer called for object id: %d", state->JavaObjectID);
-        if (itFound == objManager->m_weakObjectIds.end()) {
-            objManager->m_weakObjectIds.emplace(state->JavaObjectID);
-            JEnv jEnv;
-            jEnv.CallVoidMethod(objManager->m_javaRuntimeObject,
-                                objManager->MAKE_INSTANCE_WEAK_METHOD_ID,
-                                state->JavaObjectID);
-
-        }
+        rt->GetObjectManager()->MarkInstanceWeak(state->JavaObjectID);
     }
     delete state;
 }
@@ -1082,13 +1132,8 @@ void ObjectManager::ReleaseObjectNow(napi_env env, int javaObjectId) {
     if (!rt || rt->is_destroying) return;
     ObjectManager *objMgr = rt->GetObjectManager();
 
-    auto itFound = objMgr->m_weakObjectIds.find(javaObjectId);
-    if (itFound == objMgr->m_weakObjectIds.end()) {
-        JEnv jEnv;
-        jEnv.CallVoidMethod(objMgr->m_javaRuntimeObject, objMgr->MAKE_INSTANCE_WEAK_METHOD_ID,
-                            javaObjectId);
-        objMgr->m_weakObjectIds.emplace(javaObjectId);
-    }
+    objMgr->MarkInstanceWeak(javaObjectId);
+    objMgr->FlushWeakIds();
 
     auto found = objMgr->m_idToProxy.find(javaObjectId);
     if (found != objMgr->m_idToProxy.end()) {

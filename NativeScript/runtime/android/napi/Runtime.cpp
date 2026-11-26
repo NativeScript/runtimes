@@ -531,7 +531,10 @@ bool Runtime::NotifyGC(JNIEnv *jEnv, jobject obj, jintArray object_ids) {
 
 void Runtime::AdjustAmountOfExternalAllocatedMemory() {
     JEnv jEnv;
-    int64_t usedMemory = jEnv.CallLongMethod(m_runtime, GET_USED_MEMORY_METHOD_ID);
+    AdjustAmountOfExternalAllocatedMemory(jEnv.CallLongMethod(m_runtime, GET_USED_MEMORY_METHOD_ID));
+}
+
+void Runtime::AdjustAmountOfExternalAllocatedMemory(int64_t usedMemory) {
     int64_t changeInBytes = usedMemory - m_lastUsedMemory;
     int64_t externalMemory = 0;
 
@@ -659,9 +662,24 @@ int Runtime::GetReader() {
     return m_mainLooper_fd[0];
 }
 
+const JSMethodCache::MethodName &JSMethodCache::getMethodName(jstring javaName, int id) {
+    if (static_cast<size_t>(id) >= methodNames.size()) {
+        methodNames.resize(id + 1);
+    }
+    auto &entry = methodNames[id];
+    if (entry == nullptr) {
+        entry = std::make_unique<MethodName>();
+        entry->id = id;
+        entry->name = ArgConverter::jstringToString(javaName);
+        auto env = rt->GetNapiEnv();
+        entry->value = napi_util::make_ref(env, ArgConverter::convertToJsString(env, entry->name), 1);
+    }
+    return *entry;
+}
+
 jobject
 Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclass claz, jstring methodName,
-                            jint retType, jboolean isConstructor, jobjectArray packagedArgs) {
+                            jint methodNameId, jint retType, jboolean isConstructor, const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
 
     DEBUG_WRITE("CallJSMethodNative called javaObjectID=%d", javaObjectID);
@@ -675,11 +693,11 @@ Runtime::CallJSMethodNative(JNIEnv *_jEnv, jobject obj, jint javaObjectID, jclas
         throw NativeScriptException(ss.str());
     }
 
-    string method_name = ArgConverter::jstringToString(methodName);
+    auto &method = js_method_cache->getMethodName(methodName, methodNameId);
 
-    DEBUG_WRITE("CallJSMethodNative called jsObject %s", method_name.c_str());
+    DEBUG_WRITE("CallJSMethodNative called jsObject %s", method.name.c_str());
 
-    auto jsResult = CallbackHandlers::CallJSMethod(env, jEnv, jsObject, claz,method_name, javaObjectID,packagedArgs);
+    auto jsResult = CallbackHandlers::CallJSMethod(env, jEnv, jsObject, claz, method, javaObjectID, args);
 
     if (napi_util::is_null_or_undefined(env, jsResult)) return nullptr;
 

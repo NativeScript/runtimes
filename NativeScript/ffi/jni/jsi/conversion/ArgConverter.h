@@ -11,6 +11,7 @@
 #include "Runtime.h"
 #include "NativeScriptAssert.h"
 #include "JEnv.h"
+#include "JavaCallArgs.h"
 #include <string>
 #include <map>
 
@@ -20,7 +21,7 @@ namespace tns {
     public:
         static void Init(JsRuntime &rt);
 
-        static void ConvertJavaArgsToJsArgs(JsRuntime &rt, jobjectArray args, size_t length,
+        static void ConvertJavaArgsToJsArgs(JsRuntime &rt, const JavaCallArgs &args, size_t length,
                                             JsValue *arr);
 
         static JsValue ConvertFromJavaLong(JsRuntime &rt, jlong value);

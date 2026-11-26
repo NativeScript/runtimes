@@ -317,4 +317,64 @@ describeFunc("Tests garbage collection", function () {
 
 		test.postCallback();
 	});
+
+	describe("collected wrappers waiting for a flush", function () {
+		var Holder = com.tns.tests.WrapperHolder;
+
+		function collectJava() {
+			for (var i = 0; i < 3; i++) {
+				java.lang.Runtime.getRuntime().gc();
+				java.lang.System.runFinalization();
+			}
+		}
+
+		afterEach(function () {
+			Holder.held = null;
+		});
+
+		it("keep a callback's error when wrappers were collected after its last Java call", function () {
+			var callable = new java.util.concurrent.Callable({
+				call: function () {
+					for (var i = 0; i < 2000; i++) {
+						new java.lang.Object();
+					}
+					gc();
+					throw new Error("thrown with a batch pending");
+				}
+			});
+			var task = new java.util.concurrent.FutureTask(callable);
+			task.run();
+
+			expect(task.isDone()).toBe(true);
+			expect(function () { task.get(); }).toThrow();
+		});
+
+		it("keep the Java object of a wrapper handed back to JS before the flush", function () {
+			(function () {
+				Holder.held = new java.lang.StringBuilder("reacquired");
+			})();
+			gc();
+			var again = Holder.held;
+			Holder.held = null;
+			collectJava();
+
+			expect(again.toString()).toBe("reacquired");
+		});
+
+		it("keep a wrapper handed back to JS while its liveness check is queued", function () {
+			(function () {
+				Holder.held = new java.lang.StringBuilder("checked");
+			})();
+			gc();
+			collectJava();
+			gc();
+			var again = Holder.held;
+			collectJava();
+
+			expect(again.toString()).toBe("checked");
+			again = null;
+			gc();
+			collectJava();
+		});
+	});
 });

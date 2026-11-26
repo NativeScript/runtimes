@@ -105,8 +105,7 @@ JsValue ArrayHelper::CreateJavaArray(JsRuntime &rt, const JsValue *args, size_t 
         throw JsError(rt, "Expect primitive type name or class function as a first argument");
     }
 
-    jint javaObjectID = objectManager->GetOrCreateObjectId(array);
-    return objectManager->CreateJSWrapper(javaObjectID, "" /* ignored */, array);
+    return objectManager->GetOrCreateJSWrapper(array);
 }
 
 jobject ArrayHelper::CreateArrayByClassName(const string& typeName, int length) {

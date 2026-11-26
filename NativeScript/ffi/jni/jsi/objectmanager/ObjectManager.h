@@ -40,6 +40,20 @@ namespace tns {
 
         int GetOrCreateObjectId(jobject object);
 
+        jlong GetOrCreateObjectIdAndClass(jobject object);
+
+        static jint IdOf(jlong packed) {
+            return static_cast<jint>(packed);
+        }
+
+        static jint ClassIndexOf(jlong packed) {
+            return static_cast<jint>((packed >> 32) & 0x7fffffff);
+        }
+
+        JsValue GetOrCreateJSWrapper(jobject object);
+
+        JsValue CreateJSWrapper(jint javaObjectID, jint classIndex, jobject instance);
+
         JsValue GetJsObjectByJavaObject(int javaObjectID);
 
         JsValue CreateJSWrapper(jint javaObjectID, const std::string &typeName);
@@ -214,7 +228,20 @@ namespace tns {
 
         JsValue CreateJSWrapperHelper(jint javaObjectID, const std::string &typeName, jclass clazz);
 
+        struct ClassInfo {
+            MetadataNode *node = nullptr;
+            jclass clazz = nullptr;
+        };
+
+        ClassInfo ResolveClassInfo(jint classIndex, jobject instance);
+
         void EnsureInstanceStrong(int javaObjectID);
+
+        void MarkInstanceWeak(int javaObjectID);
+
+        void FlushWeakIds();
+
+        static void FlushWeakIdsCallback(JsRuntime &rt, void *data, void *hint);
 
         static void WrapperPostFinalizer(JsRuntime &rt, void *data, void *hint);
 
@@ -248,6 +275,10 @@ namespace tns {
         std::shared_ptr<OwnerToken> m_ownerToken;
         robin_hood::unordered_set<int> m_weakObjectIds;
         robin_hood::unordered_set<int> m_markedAsWeakIds;
+        robin_hood::unordered_set<int> m_pendingWeakIds;
+
+        std::vector<ClassInfo> m_classInfos;
+        bool m_flushPosted = false;
 
         // Every live host-object proxy. The engine owns the proxies, so without
         // this the only thing that ever destroys them is the engine's own
@@ -278,9 +309,9 @@ namespace tns {
 
         jmethodID GET_OR_CREATE_JAVA_OBJECT_ID_METHOD_ID;
 
-        jmethodID MAKE_INSTANCE_WEAK_BATCH_METHOD_ID;
+        jmethodID GET_OR_CREATE_JAVA_OBJECT_ID_AND_CLASS_METHOD_ID;
 
-        jmethodID MAKE_INSTANCE_WEAK_METHOD_ID;
+        jmethodID MAKE_INSTANCES_WEAK_METHOD_ID;
 
         jmethodID MAKE_INSTANCE_STRONG_METHOD_ID;
 

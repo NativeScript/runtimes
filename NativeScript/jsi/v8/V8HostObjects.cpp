@@ -447,7 +447,7 @@ Function Function::createFromHostFunction(Runtime& runtime, const PropNameID& na
           v8engine::throwV8Exception(info.GetIsolate(), exception);
         }
       },
-      data);
+      data, v8::Local<v8::Signature>(), 0, v8::ConstructorBehavior::kThrow);
   v8::Local<v8::Function> function =
       functionTemplate->GetFunction(runtime.context()).ToLocalChecked();
   std::string functionName = name.utf8(runtime);

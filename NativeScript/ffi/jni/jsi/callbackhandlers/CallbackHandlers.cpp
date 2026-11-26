@@ -112,9 +112,12 @@ void CallbackHandlers::Init(JsRuntime &rt) {
     CURRENT_OBJECTID_FIELD_ID = jEnv.GetFieldID(RUNTIME_CLASS, "currentObjectId", "I");
     assert(CURRENT_OBJECTID_FIELD_ID != nullptr);
 
-    MAKE_INSTANCE_STRONG_ID = jEnv.GetMethodID(RUNTIME_CLASS, "makeInstanceStrong",
-                                               "(Ljava/lang/Object;I)V");
-    assert(MAKE_INSTANCE_STRONG_ID != nullptr);
+    CURRENT_OBJECTCLASS_FIELD_ID = jEnv.GetFieldID(RUNTIME_CLASS, "currentObjectClass", "Ljava/lang/Class;");
+    assert(CURRENT_OBJECTCLASS_FIELD_ID != nullptr);
+
+    REGISTER_CONSTRUCTED_INSTANCE_ID = jEnv.GetMethodID(RUNTIME_CLASS, "registerConstructedInstance",
+                                                        "(Ljava/lang/Object;I)J");
+    assert(REGISTER_CONSTRUCTED_INSTANCE_ID != nullptr);
 
     GET_TYPE_METADATA = jEnv.GetStaticMethodID(RUNTIME_CLASS, "getTypeMetadata",
                                                "(Ljava/lang/String;I)[Ljava/lang/String;");
@@ -164,10 +167,10 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     JEnv jEnv;
     jclass clazz;
     jmethodID mid;
-    string *sig = nullptr;
-    string *returnType = nullptr;
+    const string *sig = nullptr;
+    const string *returnType = nullptr;
     auto retType = MethodReturnType::Unknown;
-    MethodCache::CacheMethodInfo mi;
+    const MethodCache::CacheMethodInfo *mi = nullptr;
     bool isSuper = false;
 
     if (metadataSignatureIsUnambiguous && entry != nullptr &&
@@ -287,8 +290,8 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
 
         clazz = jEnv.FindClass(className);
         if (clazz != nullptr) {
-            mi = MethodCache::ResolveMethodSignature(rt, className, methodName, argc, argv, isStatic);
-            if (mi.mid == nullptr) {
+            mi = &MethodCache::ResolveMethodSignature(rt, className, methodName, argc, argv, isStatic);
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE("Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d",
                             className.c_str(), methodName.c_str(), isStatic, isSuper);
                 return js_util::undefined();
@@ -298,9 +301,9 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             const string callerClassName = callerNode->GetName();
             DEBUG_WRITE("Resolving method on caller class: %s.%s on className %s",
                         callerClassName.c_str(), methodName.c_str(), className.c_str());
-            mi = MethodCache::ResolveMethodSignature(rt, callerClassName, methodName, argc, argv,
+            mi = &MethodCache::ResolveMethodSignature(rt, callerClassName, methodName, argc, argv,
                                                      isStatic);
-            if (mi.mid == nullptr) {
+            if (mi->mid == nullptr) {
                 DEBUG_WRITE(
                         "Cannot resolve class=%s, method=%s, isStatic=%d, isSuper=%d, callerClass=%s",
                         className.c_str(), methodName.c_str(), isStatic, isSuper,
@@ -309,11 +312,11 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             }
         }
 
-        clazz = mi.clazz;
-        mid = mi.mid;
-        sig = &mi.signature;
-        returnType = &mi.returnType;
-        retType = mi.retType;
+        clazz = mi->clazz;
+        mid = mi->mid;
+        sig = &mi->signature;
+        returnType = &mi->returnType;
+        retType = mi->retType;
     }
 
     if (!isStatic) {
@@ -513,14 +516,15 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
             if (isString) {
                 returnValue = ArgConverter::jstringToJsString(rt, (jstring) result);
             } else {
-                jint javaObjectID = objectManager->GetOrCreateObjectId(result);
+                jlong packed = objectManager->GetOrCreateObjectIdAndClass(result);
+                jint javaObjectID = ObjectManager::IdOf(packed);
                 returnValue = objectManager->GetJsObjectByJavaObject(javaObjectID);
 
                 if (js_util::is_null_or_undefined(returnValue)) {
                     MetadataNode *returnNode = ResolveDeclaredReturnNode(jEnv, entry, result);
                     returnValue = returnNode != nullptr
                                   ? objectManager->CreateJSWrapper(javaObjectID, returnNode, entry->returnClass)
-                                  : objectManager->CreateJSWrapper(javaObjectID, *returnType, result);
+                                  : objectManager->CreateJSWrapper(javaObjectID, ObjectManager::ClassIndexOf(packed), result);
                 }
             }
 
@@ -535,6 +539,44 @@ JsValue CallbackHandlers::CallJavaMethod(JsRuntime &rt, const JsValue &caller, c
     }
 }
 
+
+class CallbackHandlers::ConstructionScope {
+public:
+    struct Construction {
+        int id;
+        jclass clazz;
+    };
+
+    ConstructionScope(jobject javaRuntime, int javaObjectId, jclass clazz)
+            : _javaRuntime(javaRuntime), _previous(s_current) {
+        Publish({javaObjectId, clazz});
+    }
+
+    ~ConstructionScope() {
+        Publish(_previous);
+    }
+
+    ConstructionScope(const ConstructionScope &) = delete;
+
+    ConstructionScope &operator=(const ConstructionScope &) = delete;
+
+private:
+    void Publish(const Construction &construction) {
+        s_current = construction;
+        JNIEnv *env = JEnv();
+        if (construction.id != -1) {
+            env->SetObjectField(_javaRuntime, CURRENT_OBJECTCLASS_FIELD_ID, construction.clazz);
+        }
+        env->SetIntField(_javaRuntime, CURRENT_OBJECTID_FIELD_ID, construction.id);
+    }
+
+    static thread_local Construction s_current;
+
+    jobject _javaRuntime;
+    Construction _previous;
+};
+
+thread_local CallbackHandlers::ConstructionScope::Construction CallbackHandlers::ConstructionScope::s_current = {-1, nullptr};
 
 bool CallbackHandlers::RegisterInstance(JsRuntime &rt, const JsValue &jsObject,
                                         const std::string &fullClassName,
@@ -562,15 +604,12 @@ bool CallbackHandlers::RegisterInstance(JsRuntime &rt, const JsValue &jsObject,
     objectManager->Link(jsObject, javaObjectID, nullptr, node);
 
     // resolve constructor
-    auto mi = MethodCache::ResolveConstructorSignature(rt, argWrapper, fullClassName,
+    const auto &mi = MethodCache::ResolveConstructorSignature(rt, argWrapper, fullClassName,
                                                        generatedJavaClass, isInterface);
 
-    // while the "instance" is being created, if an exception is thrown during the construction
-    // this scope will guarantee the "javaObjectID" will be set to -1 and won't have an invalid value
     jobject instance;
     {
-        JavaObjectIdScope objIdScope(jEnv, CURRENT_OBJECTID_FIELD_ID, runtime->GetJavaRuntime(),
-                                     javaObjectID);
+        ConstructionScope construction(runtime->GetJavaRuntime(), javaObjectID, generatedJavaClass);
 
         if (argWrapper.type == ArgType::Interface) {
             instance = jEnv.NewObject(generatedJavaClass, mi.mid);
@@ -601,10 +640,10 @@ bool CallbackHandlers::RegisterInstance(JsRuntime &rt, const JsValue &jsObject,
         }
     }
 
-    jEnv.CallVoidMethod(runtime->GetJavaRuntime(), MAKE_INSTANCE_STRONG_ID, instance, javaObjectID);
+    jlong usedMemory = jEnv.CallLongMethod(runtime->GetJavaRuntime(), REGISTER_CONSTRUCTED_INSTANCE_ID, instance, javaObjectID);
 
     // Reuse the runtime we already resolved instead of re-querying via rt.
-    runtime->AdjustAmountOfExternalAllocatedMemory();
+    runtime->AdjustAmountOfExternalAllocatedMemory(usedMemory);
     runtime->TryCallGC();
 
     JniLocalRef localInstance(instance);
@@ -1133,26 +1172,26 @@ vector<string> CallbackHandlers::GetTypeMetadata(const string &name, int index) 
 
 JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
                                        const JsValue &jsObject, jclass claz,
-                                       const string &methodName, int javaObjectId,
-                                       jobjectArray args) {
+                                       const JSMethodCache::MethodName &methodName, int javaObjectId,
+                                       const JavaCallArgs &args) {
     JEnv jEnv(_jEnv);
 
     auto runtime = Runtime::GetRuntime(rt);
-    JsValue method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName);
+    JsValue method = runtime->js_method_cache->getCachedMethod(javaObjectId, methodName.id);
     if (method.isUndefined()) {
-        method = jsObject.asObjectBorrowed(rt).getProperty(rt, methodName);
+        method = jsObject.asObjectBorrowed(rt).getProperty(rt, methodName.value);
         if (method.isObject() && method.asObjectBorrowed(rt).isFunction(rt)) {
-            runtime->js_method_cache->cacheMethod(javaObjectId, methodName, method);
+            runtime->js_method_cache->cacheMethod(javaObjectId, methodName.id, method);
         }
     }
 
     if (!method.isObject() || !method.asObjectBorrowed(rt).isFunction(rt)) {
         stringstream ss;
-        ss << "Cannot find method '" << methodName << "' implementation";
+        ss << "Cannot find method '" << methodName.name << "' implementation";
         throw NativeScriptException(ss.str());
     }
 
-    DEBUG_WRITE("Calling JS Method %s", methodName.c_str());
+    DEBUG_WRITE("Calling JS Method %s", methodName.name.c_str());
 
     auto fn = method.asObjectBorrowed(rt).asFunction(rt);
     auto receiver = jsObject.asObjectBorrowed(rt);
@@ -1161,7 +1200,7 @@ JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
     // a throw. engine:: propagates a JS throw as a JSError, so the equivalent is
     // to let it unwind and convert it here.
     try {
-        int argc = jEnv.GetArrayLength(args) / 3;
+        int argc = args.count;
         if (argc > 0) {
             JsValue *jsArgs = nullptr;
             JsValue stack_args[8];
@@ -1179,9 +1218,9 @@ JsValue CallbackHandlers::CallJSMethod(JsRuntime &rt, JNIEnv *_jEnv,
         return fn.callWithThis(rt, receiver);
     } catch (JsError &e) {
         if (e.value() != nullptr) {
-            throw NativeScriptException(rt, *e.value(), "Error calling js method: " + methodName);
+            throw NativeScriptException(rt, *e.value(), "Error calling js method: " + methodName.name);
         }
-        throw NativeScriptException("Error calling js method: " + methodName + ": " + e.what());
+        throw NativeScriptException("Error calling js method: " + methodName.name + ": " + e.what());
     }
 }
 
@@ -1192,14 +1231,7 @@ JsValue CallbackHandlers::FindClass(JsRuntime &rt, const char *name) {
         auto runtime = Runtime::GetRuntime(rt);
         auto objectManager = runtime->GetObjectManager();
 
-        jint javaObjectID = objectManager->GetOrCreateObjectId(javaClass);
-        JsValue clazz = objectManager->GetJsObjectByJavaObject(javaObjectID);
-
-        if (js_util::is_null_or_undefined(clazz)) {
-            clazz = objectManager->CreateJSWrapper(javaObjectID, "Ljava/lang/Class;", javaClass);
-        }
-
-        return clazz;
+        return objectManager->GetOrCreateJSWrapper(javaClass);
     }
     return js_util::undefined();
 }
@@ -1806,8 +1838,9 @@ short CallbackHandlers::MAX_JAVA_STRING_ARRAY_LENGTH = 100;
 jclass CallbackHandlers::RUNTIME_CLASS = nullptr;
 jclass CallbackHandlers::JAVA_LANG_STRING = nullptr;
 jfieldID CallbackHandlers::CURRENT_OBJECTID_FIELD_ID = nullptr;
+jfieldID CallbackHandlers::CURRENT_OBJECTCLASS_FIELD_ID = nullptr;
 jmethodID CallbackHandlers::RESOLVE_CLASS_METHOD_ID = nullptr;
-jmethodID CallbackHandlers::MAKE_INSTANCE_STRONG_ID = nullptr;
+jmethodID CallbackHandlers::REGISTER_CONSTRUCTED_INSTANCE_ID = nullptr;
 jmethodID CallbackHandlers::GET_TYPE_METADATA = nullptr;
 jmethodID CallbackHandlers::ENABLE_VERBOSE_LOGGING_METHOD_ID = nullptr;
 jmethodID CallbackHandlers::DISABLE_VERBOSE_LOGGING_METHOD_ID = nullptr;

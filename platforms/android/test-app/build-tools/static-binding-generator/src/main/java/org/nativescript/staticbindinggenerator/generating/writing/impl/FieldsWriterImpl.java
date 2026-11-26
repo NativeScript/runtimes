@@ -8,6 +8,8 @@ public class FieldsWriterImpl implements FieldsWriter {
 
     private static final String THIZ_KEYWORD = "thiz";
     private static final String RUNTIME_ID_KEYWORD = "runtimeId";
+    private static final String RUNTIME_TAG_FIELD_DECLARATION = "private volatile int runtimeTag__ns;";
+    private static final String OBJECT_ID_FIELD_DECLARATION = "private int objectId__ns;";
 
     private final Writer writer;
 
@@ -42,6 +44,15 @@ public class FieldsWriterImpl implements FieldsWriter {
         writer.write(SPACE_LITERAL);
         writer.write("0");
         writer.writeln(END_OF_STATEMENT_LITERAL);
+        writer.writeln();
+    }
+
+    @Override
+    public void writeRuntimeTagField() {
+        writer.write(TABULATION_LITERAL);
+        writer.writeln(RUNTIME_TAG_FIELD_DECLARATION);
+        writer.write(TABULATION_LITERAL);
+        writer.writeln(OBJECT_ID_FIELD_DECLARATION);
         writer.writeln();
     }
 }

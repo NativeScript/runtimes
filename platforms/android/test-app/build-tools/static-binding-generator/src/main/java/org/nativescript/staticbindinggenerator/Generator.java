@@ -413,6 +413,7 @@ public class Generator {
         boolean isApplicationClass = androidClassChecker.isApplicationClass(clazz);
 
         fieldsWriter.writePublicRuntimeIdField();
+        fieldsWriter.writeRuntimeTagField();
 
         if (isApplicationClass) {
             String normalizedClassName = BcelNamingUtil.resolveClassName(clazz.getClassName());
@@ -493,6 +494,7 @@ public class Generator {
 
         methodsWriter.writeInternalRuntimeHashCodeMethod();
         methodsWriter.writeInternalRuntimeEqualsMethod();
+        methodsWriter.writeInternalRuntimeTagAccessorMethods();
     }
 
     /**

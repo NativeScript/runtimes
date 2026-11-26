@@ -39,72 +39,69 @@ class MethodCache {
 
         static void Init();
 
-    inline static MethodCache::CacheMethodInfo ResolveMethodSignature(napi_env env, const string &className, const string &methodName, size_t argc, napi_value* argv, bool isStatic)
+    inline static const CacheMethodInfo &ResolveMethodSignature(napi_env env, const string &className, const string &methodName, size_t argc, napi_value* argv, bool isStatic)
     {
+        EncodeSignature(s_signatureKey, env, className, methodName, argc, argv, isStatic);
+        auto it = s_method_ctor_signature_cache.find(s_signatureKey);
+
+        if (it != s_method_ctor_signature_cache.end())
+        {
+            return it->second;
+        }
+
+        std::string encoded_method_signature = s_signatureKey;
+        auto signature = ResolveJavaMethod(env, argc, argv, className, methodName);
+
+        DEBUG_WRITE("ResolveMethodSignature %s='%s'", encoded_method_signature.c_str(), signature.c_str());
+
+        if (signature.empty())
+        {
+            return s_unresolved;
+        }
+
         CacheMethodInfo method_info;
-        auto encoded_method_signature = EncodeSignature(env, className, methodName,argc, argv, isStatic);
-        auto it = s_method_ctor_signature_cache.find(encoded_method_signature);
+        JEnv jEnv;
+        auto clazz = jEnv.FindClass(className);
+        assert(clazz != nullptr);
+        method_info.clazz = clazz;
+        method_info.signature = signature;
+        method_info.returnType = MetadataReader::ParseReturnType(method_info.signature);
+        method_info.retType = MetadataReader::GetReturnType(method_info.returnType);
+        method_info.isStatic = isStatic;
+        method_info.mid = isStatic
+                          ? jEnv.GetStaticMethodID(clazz, methodName, signature)
+                          : jEnv.GetMethodID(clazz, methodName, signature);
 
-        if (it == s_method_ctor_signature_cache.end())
-        {
-            auto signature = ResolveJavaMethod(env, argc, argv, className, methodName);
-
-            DEBUG_WRITE("ResolveMethodSignature %s='%s'", encoded_method_signature.c_str(), signature.c_str());
-
-            if (!signature.empty())
-            {
-                JEnv jEnv;
-                auto clazz = jEnv.FindClass(className);
-                assert(clazz != nullptr);
-                method_info.clazz = clazz;
-                method_info.signature = signature;
-                method_info.returnType = MetadataReader::ParseReturnType(method_info.signature);
-                method_info.retType = MetadataReader::GetReturnType(method_info.returnType);
-                method_info.isStatic = isStatic;
-                method_info.mid = isStatic
-                                  ? jEnv.GetStaticMethodID(clazz, methodName, signature)
-                                  : jEnv.GetMethodID(clazz, methodName, signature);
-
-                s_method_ctor_signature_cache.emplace(encoded_method_signature, method_info);
-            }
-        }
-        else
-        {
-            method_info = (*it).second;
-        }
-
-        return method_info;
+        return s_method_ctor_signature_cache.emplace(encoded_method_signature, method_info).first->second;
     }
 
-    inline static MethodCache::CacheMethodInfo ResolveConstructorSignature(napi_env env, const ArgsWrapper &argWrapper, const string &fullClassName, jclass javaClass, bool isInterface)
+    inline static const CacheMethodInfo &ResolveConstructorSignature(napi_env env, const ArgsWrapper &argWrapper, const string &fullClassName, jclass javaClass, bool isInterface)
     {
+        EncodeSignature(s_signatureKey, env, fullClassName, "<init>", argWrapper.argc, argWrapper.argv, false);
+        auto it = s_method_ctor_signature_cache.find(s_signatureKey);
+
+        if (it != s_method_ctor_signature_cache.end())
+        {
+            return it->second;
+        }
+
+        std::string encoded_ctor_signature = s_signatureKey;
+        auto signature = ResolveConstructor(env, argWrapper.argc, argWrapper.argv, javaClass, isInterface);
+
+        DEBUG_WRITE("ResolveConstructorSignature %s='%s'", encoded_ctor_signature.c_str(), signature.c_str());
+
+        if (signature.empty())
+        {
+            return s_unresolved;
+        }
+
         CacheMethodInfo constructor_info;
+        JEnv jEnv;
+        constructor_info.clazz = javaClass;
+        constructor_info.signature = signature;
+        constructor_info.mid = jEnv.GetMethodID(javaClass, "<init>", signature);
 
-        auto encoded_ctor_signature = EncodeSignature(env, fullClassName, "<init>", argWrapper.argc, argWrapper.argv, false);
-        auto it = s_method_ctor_signature_cache.find(encoded_ctor_signature);
-
-        if (it == s_method_ctor_signature_cache.end())
-        {
-            auto signature = ResolveConstructor(env, argWrapper.argc, argWrapper.argv, javaClass, isInterface);
-
-            DEBUG_WRITE("ResolveConstructorSignature %s='%s'", encoded_ctor_signature.c_str(), signature.c_str());
-
-            if (!signature.empty())
-            {
-                JEnv jEnv;
-                constructor_info.clazz = javaClass;
-                constructor_info.signature = signature;
-                constructor_info.mid = jEnv.GetMethodID(javaClass, "<init>", signature);
-
-                s_method_ctor_signature_cache.emplace(encoded_ctor_signature, constructor_info);
-            }
-        }
-        else
-        {
-            constructor_info = (*it).second;
-        }
-
-        return constructor_info;
+        return s_method_ctor_signature_cache.emplace(encoded_ctor_signature, constructor_info).first->second;
     }
 
 private:
@@ -112,9 +109,9 @@ private:
         }
 
     // Encoded signature <className>.S/I.<methodName>.<argsCount>.<arg1class>.<...>
-    inline static string EncodeSignature(napi_env env, const string &className, const string &methodName, size_t argc, napi_value* argv, bool isStatic)
+    inline static void EncodeSignature(string &sig, napi_env env, const string &className, const string &methodName, size_t argc, napi_value* argv, bool isStatic)
     {
-        string sig(className);
+        sig.assign(className);
         sig.append(".");
         if (isStatic)
         {
@@ -127,17 +124,13 @@ private:
         sig.append(methodName);
         sig.append(".");
 
-        stringstream s;
-        s << argc;
-        sig.append(s.str());
+        sig.append(std::to_string(argc));
 
         for (int i = 0; i < argc; i++)
         {
             sig.append(".");
             sig.append(GetType(env, argv[i]));
         }
-
-        return sig;
     }
 
     inline static string GetType(napi_env env, napi_value value)
@@ -365,7 +358,11 @@ private:
          *  Used for caching the resolved constructor or method signature.
          * The encoded signature has template: <className>.S/I.<methodName>.<argsCount>.<arg1class>.<...>
          */
-        static robin_hood::unordered_map<std::string, CacheMethodInfo> s_method_ctor_signature_cache;
+        static robin_hood::unordered_node_map<std::string, CacheMethodInfo> s_method_ctor_signature_cache;
+
+        static thread_local std::string s_signatureKey;
+
+        static const CacheMethodInfo s_unresolved;
 };
 }
 
