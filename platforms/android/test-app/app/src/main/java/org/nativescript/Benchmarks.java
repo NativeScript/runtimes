@@ -82,4 +82,48 @@ public class Benchmarks {
     public static void invokeCallback(BenchmarkCallback callback) {
         callback.onCallback();
     }
+
+    public int add(int a, int b) {
+        return a + b;
+    }
+
+    public int getInt() {
+        return IntFieldInstance;
+    }
+
+    public Benchmarks self() {
+        return this;
+    }
+
+    public static Benchmarks returnNewObject() {
+        return new Benchmarks();
+    }
+
+    public static char returnChar() {
+        return '\u00e9';
+    }
+
+    public static int sumInts(int[] values) {
+        int sum = 0;
+        for (int value : values) {
+            sum += value;
+        }
+        return sum;
+    }
+
+    public static double sumDoubles(double[] values) {
+        double sum = 0;
+        for (double value : values) {
+            sum += value;
+        }
+        return sum;
+    }
+
+    public static int invokeIntCallback(BenchmarkCallback callback) {
+        return callback.onInts(1, 2);
+    }
+
+    public static void invokeStringCallback(BenchmarkCallback callback) {
+        callback.onString("hello");
+    }
 }

@@ -22,7 +22,7 @@ function run(entry) {
     var start = now();
     entry.action();
     var ms = now() - start;
-    var perCall = (ms / n * 1000).toFixed(1);
+    var perCall = (ms * 1e6 / n).toFixed(1);
     return {
         ms: ms,
         line: pad(ms.toFixed(2), 9) + " ms  [" + perCall + " ns/call]  " + entry.name,
@@ -84,6 +84,24 @@ function buildSuite() {
         { name: "Invoke void callback",       iterations: 2000, action: function () {
             var cb = new org.nativescript.BenchmarkCallback({ onCallback: function () {} });
             for (var i = 0; i < 2000; i++) Benchmarks.invokeCallback(cb);
+        } },
+
+        { name: "Instance add(a, b)",         action: function () { for (var i = 0; i < 1e6; i++) b.add(3, 2); } },
+        { name: "Pass and return non-ASCII string", action: function () { for (var i = 0; i < 1e6; i++) Benchmarks.passAndReturnString("h\u00e9llo w\u00f6rld"); } },
+        { name: "Pass and return 1KB string", iterations: 1e5, action: function () { var s = new Array(1025).join("x"); for (var i = 0; i < 1e5; i++) Benchmarks.passAndReturnString(s); } },
+        { name: "Return a Char",              action: function () { for (var i = 0; i < 1e6; i++) void Benchmarks.returnChar(); } },
+        { name: "Return this",                action: function () { for (var i = 0; i < 1e6; i++) void b.self(); } },
+        { name: "Return a new object",        iterations: 1e5, action: function () { for (var i = 0; i < 1e5; i++) void Benchmarks.returnNewObject(); } },
+        { name: "Call a method on a new object", iterations: 1e5, action: function () { for (var i = 0; i < 1e5; i++) Benchmarks.returnNewObject().getInt(); } },
+        { name: "Pass a 16 Int Array",        iterations: 1e5, action: function () { var a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]; for (var i = 0; i < 1e5; i++) Benchmarks.sumInts(a); } },
+        { name: "Pass a 16 Double Array",     iterations: 1e5, action: function () { var a = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5]; for (var i = 0; i < 1e5; i++) Benchmarks.sumDoubles(a); } },
+        { name: "Invoke int callback",        iterations: 1e4, action: function () {
+            var cb = new org.nativescript.BenchmarkCallback({ onInts: function (x, y) { return x + y; } });
+            for (var i = 0; i < 1e4; i++) Benchmarks.invokeIntCallback(cb);
+        } },
+        { name: "Invoke string callback",     iterations: 1e4, action: function () {
+            var cb = new org.nativescript.BenchmarkCallback({ onString: function (value) {} });
+            for (var i = 0; i < 1e4; i++) Benchmarks.invokeStringCallback(cb);
         } },
     ];
 }
