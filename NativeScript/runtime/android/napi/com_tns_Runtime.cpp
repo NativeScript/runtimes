@@ -94,6 +94,7 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_setManualInstrumentationModeLegac
 }
 
 extern "C" JNIEXPORT void Java_com_tns_Runtime_initNativeScript(JNIEnv* _env, jobject obj, jint runtimeId, jstring filesPath, jstring nativeLibDir, jboolean verboseLoggingEnabled, jboolean isDebuggable, jstring packageName, jobjectArray args, jstring callingDir, jint maxLogcatObjectSize, jboolean forceLog) {
+    JEnv::EntryScope envScope(_env);
     try {
         DEBUG_WRITE("NativeScript Initializing!");
         Runtime::Init(_env, obj, runtimeId, filesPath, nativeLibDir, verboseLoggingEnabled, isDebuggable, packageName, args, callingDir, maxLogcatObjectSize, forceLog);
@@ -130,6 +131,7 @@ Runtime* TryGetRuntime(int runtimeId) {
 }
 
 extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject obj, jint runtimeId, jstring scriptFile) {
+    JEnv::EntryScope envScope(_env);
     auto runtime = TryGetRuntime(runtimeId);
     if (runtime == nullptr) {
         return;
@@ -153,6 +155,7 @@ extern "C" JNIEXPORT void Java_com_tns_Runtime_runModule(JNIEnv* _env, jobject o
 }
 
 extern "C" JNIEXPORT jobject Java_com_tns_Runtime_runScript(JNIEnv* _env, jobject obj, jint runtimeId, jstring scriptFile) {
+    JEnv::EntryScope envScope(_env);
     jobject result = nullptr;
 
     auto runtime = TryGetRuntime(runtimeId);
@@ -178,6 +181,7 @@ extern "C" JNIEXPORT jobject Java_com_tns_Runtime_runScript(JNIEnv* _env, jobjec
 }
 
 extern "C" JNIEXPORT jobject Java_com_tns_Runtime_callJSMethodNative(JNIEnv* _env, jobject obj, jint runtimeId, jint javaObjectID, jclass claz, jstring methodName,jint retType, jboolean isConstructor, jobjectArray packagedArgs) {
+    JEnv::EntryScope envScope(_env);
     jobject result = nullptr;
     auto runtime = TryGetRuntime(runtimeId);
     if (runtime == nullptr) return result;
@@ -202,6 +206,7 @@ extern "C" JNIEXPORT jobject Java_com_tns_Runtime_callJSMethodNative(JNIEnv* _en
 
 
 extern "C" JNIEXPORT void Java_com_tns_Runtime_createJSInstanceNative(JNIEnv* _env, jobject obj, jint runtimeId, jobject javaObject, jint javaObjectID, jstring className) {
+    JEnv::EntryScope envScope(_env);
     auto runtime = TryGetRuntime(runtimeId);
     if (runtime == nullptr) return;
 

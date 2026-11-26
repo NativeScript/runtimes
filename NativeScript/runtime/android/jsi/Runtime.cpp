@@ -203,6 +203,7 @@ Runtime::Init(JNIEnv *_env, jobject obj, int runtimeId, jstring filesPath, jstri
 void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
                    bool verboseLoggingEnabled, bool isDebuggable, jstring packageName,
                    jobjectArray args, jstring callingDir, int maxLogcatObjectSize, bool forceLog) {
+    JEnv::PinThreadEnv(_env);
 
     LogEnabled = verboseLoggingEnabled;
     auto filesRoot = ArgConverter::jstringToString(filesPath);
@@ -576,6 +577,7 @@ void Runtime::DestroyRuntime() {
         m_finalizerQueue = nullptr;
     }
     is_destroying = true;
+    JEnv::UnpinThreadEnv();
     engine::Runtime &rt = engineHost->GetRuntime();
     if (m_looperTasks != nullptr) {
         m_looperTasks->Terminate();

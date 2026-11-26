@@ -214,6 +214,7 @@ napi_value Runtime::GlobalAccessorCallback(napi_env env, napi_callback_info  inf
 void Runtime::Init(JNIEnv *_env, jstring filesPath, jstring nativeLibsDir,
                    bool verboseLoggingEnabled, bool isDebuggable, jstring packageName,
                    jobjectArray args, jstring callingDir, int maxLogcatObjectSize, bool forceLog) {
+    JEnv::PinThreadEnv(_env);
 
     LogEnabled = verboseLoggingEnabled;
     auto filesRoot = ArgConverter::jstringToString(filesPath);
@@ -508,6 +509,7 @@ void Runtime::DestroyRuntime() {
         return;
     }
     is_destroying = true;
+    JEnv::UnpinThreadEnv();
     delete m_loopTimer;
     m_loopTimer = nullptr;
     napi_status status;
