@@ -569,6 +569,73 @@ class NativeApiBridge {
     }
   }
 
+  // Called while the bridge's runtime is being destroyed, when its Values can
+  // still be released. Host objects can be shared into another runtime and
+  // outlive this one, so from here on the bridge holds no Values.
+  void releaseRuntimeValues() {
+    decltype(roundTripValues_) roundTripValues;
+    decltype(roundTripCacheFramesByThread_) roundTripFrames;
+    decltype(recentRoundTripValues_) recentRoundTripValues;
+#ifdef TARGET_ENGINE_HERMES
+    decltype(weakRoundTripValues_) weakRoundTripValues;
+    std::shared_ptr<Value> roundTripRoot;
+#endif
+    {
+      std::lock_guard<std::mutex> lock(roundTripValuesMutex_);
+      runtimeValuesReleased_.store(true, std::memory_order_release);
+      roundTripValues.swap(roundTripValues_);
+      roundTripFrames.swap(roundTripCacheFramesByThread_);
+      recentRoundTripValues.swap(recentRoundTripValues_);
+      recentRoundTripValueOrder_.clear();
+#ifdef TARGET_ENGINE_HERMES
+      weakRoundTripValues.swap(weakRoundTripValues_);
+      rootedRoundTripValues_.clear();
+      roundTripRoot.swap(roundTripRootCache_);
+#endif
+      roundTripValuesGeneration_.fetch_add(1, std::memory_order_release);
+    }
+    classValues_.clear();
+    classPrototypes_.clear();
+    pointerValues_.clear();
+    decltype(objectExpandos_) objectExpandos;
+    {
+      std::lock_guard<std::mutex> lock(objectExpandosMutex_);
+      objectExpandos.swap(objectExpandos_);
+      objectExpandoOwnerCounts_.clear();
+      retiredObjectExpandoKeys_.clear();
+      objectExpandosGeneration_.fetch_add(1, std::memory_order_release);
+    }
+  }
+
+  bool runtimeValuesReleased() const {
+    return runtimeValuesReleased_.load(std::memory_order_acquire);
+  }
+
+  // A destroyed runtime freed its Values with its heap; releasing one would
+  // touch freed memory.
+  template <typename T>
+  void releaseOrAbandonValue(std::shared_ptr<T>& value) {
+    if (value != nullptr && runtimeValuesReleased()) {
+      new std::shared_ptr<T>(std::move(value));
+    }
+    value.reset();
+  }
+
+  void setOwnerRuntime(const Runtime& runtime) { ownerRuntime_ = &runtime; }
+
+  // Worklets shares host objects between runtimes by reference. Using one in
+  // a runtime other than its bridge's would mix the two heaps.
+  void requireOwnerRuntime(Runtime& runtime) const {
+    if (ownerRuntime_ != nullptr && ownerRuntime_ != &runtime) {
+      throw JSError(
+          runtime,
+          "This NativeScript object belongs to another JavaScript runtime, "
+          "such as the Worklets UI runtime. Pass a handle instead: "
+          "interop.handleof(object).toHexString() in the runtime that owns "
+          "it, then interop.object(handle) in this one.");
+    }
+  }
+
   MDMetadataReader* metadata() const { return metadata_.get(); }
 
   void* selfDl() const { return selfDl_; }
@@ -800,7 +867,7 @@ class NativeApiBridge {
                               const Value& value,
                               bool stringLikeNative = false,
                               uintptr_t validationKey = 0) {
-    if (native == nullptr) {
+    if (native == nullptr || runtimeValuesReleased()) {
       return;
     }
     uintptr_t key =
@@ -846,7 +913,7 @@ class NativeApiBridge {
       Runtime& runtime, id object, const Value& value,
       bool stringLikeNative = false) {
 #ifdef TARGET_ENGINE_HERMES
-    if (object == nil || !value.isObject()) {
+    if (object == nil || !value.isObject() || runtimeValuesReleased()) {
       return;
     }
     auto weak =
@@ -891,7 +958,7 @@ class NativeApiBridge {
                                                      bool stringLikeNative,
                                                      bool persistBeyondFrame,
                                                      uintptr_t validationKey) {
-    if (native == nullptr) {
+    if (native == nullptr || runtimeValuesReleased()) {
       return;
     }
     uintptr_t key =
@@ -1161,7 +1228,7 @@ class NativeApiBridge {
   }
 
   void rememberClassValue(Runtime& runtime, Class cls, const Value& value) {
-    if (cls == Nil) {
+    if (cls == Nil || runtimeValuesReleased()) {
       return;
     }
     classValues_[normalizeRuntimePointer(reinterpret_cast<uintptr_t>(cls))] =
@@ -1181,7 +1248,7 @@ class NativeApiBridge {
   }
 
   void rememberClassPrototype(Runtime& runtime, Class cls, const Value& value) {
-    if (cls == Nil) {
+    if (cls == Nil || runtimeValuesReleased()) {
       return;
     }
     classPrototypes_[normalizeRuntimePointer(reinterpret_cast<uintptr_t>(cls))] =
@@ -1206,7 +1273,7 @@ class NativeApiBridge {
   // expando owner count can run on either thread relative to a get/set.
   void setObjectExpando(Runtime& runtime, const void* native,
                         const std::string& property, const Value& value) {
-    if (native == nullptr || property.empty()) {
+    if (native == nullptr || property.empty() || runtimeValuesReleased()) {
       return;
     }
     const uintptr_t key =
@@ -1424,6 +1491,9 @@ class NativeApiBridge {
 
   void rememberPointerValue(Runtime& runtime, const void* native,
                             const Value& value) {
+    if (runtimeValuesReleased()) {
+      return;
+    }
     pointerValues_[reinterpret_cast<uintptr_t>(native)] =
         std::make_shared<Value>(runtime, value);
   }
@@ -2543,6 +2613,8 @@ class NativeApiBridge {
   std::thread::id jsThreadId_ = std::this_thread::get_id();
   std::mutex retainedLifetimesMutex_;
   std::vector<std::shared_ptr<void>> retainedLifetimes_;
+  std::atomic<bool> runtimeValuesReleased_{false};
+  const Runtime* ownerRuntime_ = nullptr;
 };
 
 class NativeApiRoundTripCacheFrameGuard final {
