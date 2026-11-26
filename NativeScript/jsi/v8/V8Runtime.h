@@ -699,6 +699,8 @@ class Value {
   // Contract: the result must not outlive the current HandleScope. Callers that
   // need an owning value keep using String::createFromUtf8.
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
+  static Value createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length);
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const;
 
   v8::Local<v8::Value> local(Runtime& runtime) const;
 

@@ -576,6 +576,8 @@ class Value {
   // scope-rooted, so unlike V8 this still needs owning storage -- but it does
   // not need a second reference.
   static Value createStringFromUtf8(Runtime& runtime, const char* data, size_t length);
+  static Value createStringFromUtf16(Runtime& runtime, const char16_t* data, size_t length);
+  size_t copyUtf16(Runtime& runtime, char16_t* buffer, size_t capacity) const;
 
   JSValue local(Runtime& runtime) const {
     switch (kind_) {
