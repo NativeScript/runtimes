@@ -17,7 +17,6 @@ namespace tns {
             ObjectManager* m_objectManager;
 
             jclass m_ByteBufferClass;
-            jmethodID m_isDirectMethodID;
             jmethodID m_remainingMethodID;
             jmethodID m_getMethodID;
     };

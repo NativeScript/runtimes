@@ -41,7 +41,7 @@ namespace {
 }
 
 ArrayBufferHelper::ArrayBufferHelper()
-        : m_objectManager(nullptr), m_ByteBufferClass(nullptr), m_isDirectMethodID(nullptr),
+        : m_objectManager(nullptr), m_ByteBufferClass(nullptr),
           m_remainingMethodID(nullptr), m_getMethodID(nullptr) {
 }
 
@@ -103,19 +103,11 @@ JsValue ArrayBufferHelper::CreateFromCallbackImpl(JsRuntime &rt, const JsValue *
         throw NativeScriptException("Wrong type of argument (ByteBuffer expected)");
     }
 
-    if (m_isDirectMethodID == nullptr) {
-        m_isDirectMethodID = jEnv.GetMethodID(m_ByteBufferClass, "isDirect", "()Z");
-        assert(m_isDirectMethodID != nullptr);
-    }
-
-    auto ret = jEnv.CallBooleanMethod(obj, m_isDirectMethodID);
-
-    auto isDirectBuffer = ret == JNI_TRUE;
-
     std::shared_ptr<engine::MutableBuffer> buffer;
 
-    if (isDirectBuffer) {
-        auto data = jEnv.GetDirectBufferAddress(obj);
+    auto data = jEnv.GetDirectBufferAddress(obj);
+
+    if (data != nullptr) {
         auto size = jEnv.GetDirectBufferCapacity(obj);
 
         buffer = std::make_shared<BorrowedBuffer>(static_cast<uint8_t *>(data), (size_t) size);
