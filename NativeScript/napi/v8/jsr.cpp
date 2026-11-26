@@ -265,7 +265,9 @@ napi_status js_free_runtime(jsr_ns_runtime runtime) {
     v8::Locker locker(jsr->isolate);
     // The ES module cache holds thread-local Globals per isolate. Release them
     // now; left to thread exit, they would be reset against a disposed isolate.
+#ifndef __ANDROID__
     v8impl::CleanupESModuleSystem(jsr->isolate);
+#endif
     while (v8::Isolate::GetCurrent() == jsr->isolate) {
       jsr->isolate->Exit();
     }
