@@ -221,10 +221,6 @@ namespace tns {
 
         std::shared_ptr<LooperTasks> m_looperTasks;
 
-        static int GetAndroidVersion();
-
-        static int m_androidVersion;
-
         static JavaVM *java_vm;
 
         static jmethodID GET_USED_MEMORY_METHOD_ID;

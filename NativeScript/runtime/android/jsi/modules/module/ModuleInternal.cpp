@@ -7,6 +7,7 @@
 #include "NativeScriptException.h"
 #include "Util.h"
 #include "CallbackHandlers.h"
+#include "CrashBreadcrumbs.h"
 #include "Runtime.h"
 #include <sstream>
 #include <mutex>
@@ -278,6 +279,7 @@ std::string ModuleInternal::EnsureFileProtocol(const std::string& path) {
 }
 
 engine::Value ModuleInternal::LoadModule(engine::Runtime& rt, const std::string& modulePath, const std::string& moduleCacheKey) {
+    CrashBreadcrumbs::ModuleScope moduleBreadcrumb(modulePath.c_str());
     engine::Object context = rt.global();
 
     engine::Object moduleObj(rt);
